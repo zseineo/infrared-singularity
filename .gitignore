@@ -1,0 +1,18 @@
+# 個人設定與暫存（含個資，不上傳）
+aa_settings_cache.json
+AA_Settings.json
+
+# Python 快取
+__pycache__/
+*.pyc
+
+# PyInstaller 打包輸出
+build/
+dist/
+
+# 輸出成品與草稿
+*.html
+tmp_app.txt
+web_app_js.txt
+HTML_Python_Feature_Checklist.md
+sample.txt

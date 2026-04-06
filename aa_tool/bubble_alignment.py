@@ -1,0 +1,629 @@
+"""對話框對齊演算法 — 純邏輯，不依賴任何 UI 框架。
+
+所有字寬量測透過 FontMeasurer 協議完成。
+支援三種對話框類型：
+  - normal: 普通框（￣/＿）
+  - shout:  吶喊框（_人/⌒Y）
+  - slash:  斜線框（＼─|／）
+"""
+from __future__ import annotations
+
+import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .font_measure import FontMeasurer
+
+
+# ════════════════════════════════════════════════════════════════
+#  共用常數
+# ════════════════════════════════════════════════════════════════
+
+SHOUT_DELIM_PAIRS = [('）', '（'), ('＞', '＜'), ('>', '<'), ('》', '《')]
+SLASH_DELIM_CHARS = ['│', '─']
+VALID_TEXT_RE = re.compile(
+    r'[\u4e00-\u9fff\u3000-\u303f\uff00-\uffefa-zA-Z0-9…―—]'
+)
+RIGHT_BORDER_CHARS = '│｜|〉》>）)ノﾉ＼ヽ｝}］]'
+
+
+# ════════════════════════════════════════════════════════════════
+#  內部輔助：解析行結構
+# ════════════════════════════════════════════════════════════════
+
+def _parse_shout_lines(box_lines: list[str]) -> list[dict]:
+    """將吶喊框的各行解析為結構化字典。"""
+    re_top = re.compile(r'[､、]?[_＿]+(?:人[_＿]*)+')
+    re_bot = re.compile(r'(?:⌒[YＹ]){2,}')
+    parsed: list[dict] = []
+
+    for sl in box_lines:
+        m_t = re_top.search(sl)
+        m_b = re_bot.search(sl)
+        if m_t and not m_b:
+            parsed.append({
+                'type': 'top',
+                'prefix': sl[:m_t.start()],
+                'bubble': sl[m_t.start():].rstrip(),
+                'orig': sl,
+            })
+        elif m_b:
+            parsed.append({
+                'type': 'bot',
+                'prefix': sl[:m_b.start()],
+                'bubble': sl[m_b.start():].rstrip(),
+                'orig': sl,
+            })
+        else:
+            stripped = sl.rstrip(' \u3000\r\n')
+            found = False
+            for lc, rc in SHOUT_DELIM_PAIRS:
+                if not stripped.endswith(rc):
+                    continue
+                rc_pos = len(stripped) - 1
+                lc_pos = stripped.rfind(lc, 0, rc_pos)
+                if lc_pos == -1:
+                    continue
+                inner = re.sub(r'[ \u3000.,]+$', '', stripped[lc_pos + 1:rc_pos])
+                parsed.append({
+                    'type': 'content',
+                    'prefix': sl[:lc_pos],
+                    'left_char': lc,
+                    'right_char': rc,
+                    'inner': inner,
+                    'orig': sl,
+                })
+                found = True
+                break
+            if not found:
+                parsed.append({'type': 'other', 'orig': sl})
+
+    return parsed
+
+
+def _parse_slash_lines(box_lines: list[str]) -> list[dict]:
+    """將斜線框的各行解析為結構化字典。"""
+    parsed: list[dict] = []
+    for sl in box_lines:
+        mt = re.search(r'＼─\|(?:──\|)+─?／', sl)
+        mb = re.search(r'／─\|(?:──\|)+─?＼', sl)
+        if mt:
+            parsed.append({
+                'type': 'top',
+                'prefix': sl[:mt.start()],
+                'bubble': sl[mt.start():mt.end()],
+                'orig': sl,
+            })
+        elif mb:
+            parsed.append({
+                'type': 'bot',
+                'prefix': sl[:mb.start()],
+                'bubble': sl[mb.start():mb.end()],
+                'orig': sl,
+            })
+        else:
+            stripped = sl.rstrip(' \u3000\r\n')
+            found = False
+            for dc in SLASH_DELIM_CHARS:
+                if not stripped.endswith(dc):
+                    continue
+                rc_pos = len(stripped) - 1
+                lc_pos = stripped.rfind(dc, 0, rc_pos)
+                if lc_pos == -1:
+                    continue
+                inner = re.sub(r'[ \u3000.]+$', '', stripped[lc_pos + 1:rc_pos])
+                parsed.append({
+                    'type': 'content',
+                    'prefix': sl[:lc_pos],
+                    'left_char': dc,
+                    'right_char': dc,
+                    'inner': inner,
+                    'orig': sl,
+                })
+                found = True
+                break
+            if not found:
+                parsed.append({'type': 'other', 'orig': sl})
+    return parsed
+
+
+def _parse_normal_lines(box_lines: list[str]) -> list[dict]:
+    """將普通對話框的各行解析為結構化字典。"""
+    parsed: list[dict] = []
+    for bl in box_lines:
+        if not bl:
+            parsed.append({'type': 'orig', 'orig': bl})
+            continue
+        bl_n = bl.rstrip('\r\n \u3000')
+        matched_border = False
+        for bc in ['￣', '＿']:
+            bm_list = list(re.finditer(f'({re.escape(bc)}{{3,}})', bl_n))
+            if not bm_list:
+                continue
+            for bm in reversed(bm_list):
+                rp = bl_n[bm.end():]
+                if len(rp.strip(' \u3000')) <= 4:
+                    lp = bl_n[:bm.start()]
+                    parsed.append({
+                        'type': 'border',
+                        'left': lp,
+                        'char': bc,
+                        'right': rp,
+                        'orig': bl_n,
+                    })
+                    matched_border = True
+                    break
+            if matched_border:
+                break
+        if matched_border:
+            continue
+
+        cm = re.search(r'^(.*?[^ \u3000.])([ \u3000.]+)([^ \u3000.]{1,3})$', bl_n)
+        if cm:
+            rc = cm.group(3)
+            if any(c in rc for c in RIGHT_BORDER_CHARS):
+                lt = re.sub(r'[ \u3000.,]+$', '', cm.group(1))
+                parsed.append({
+                    'type': 'content',
+                    'left': lt,
+                    'char': ' ',
+                    'right_padding': cm.group(2),
+                    'right': rc,
+                    'orig': bl_n,
+                })
+                continue
+        lt = re.sub(r'[ \u3000.,]+$', '', bl_n)
+        parsed.append({
+            'type': 'content',
+            'left': lt,
+            'char': ' ',
+            'right_padding': '',
+            'right': '',
+            'orig': bl_n,
+        })
+    return parsed
+
+
+# ════════════════════════════════════════════════════════════════
+#  內部輔助：補空白至目標寬度
+# ════════════════════════════════════════════════════════════════
+
+def _pad_to_width(text: str, target_width: int, m: FontMeasurer) -> str:
+    """用全形空白再半形空白將 *text* 補至最接近 *target_width* 的寬度。"""
+    while m.measure(text + '　') <= target_width:
+        text += '　'
+    while m.measure(text + ' ') <= target_width:
+        text += ' '
+    return text
+
+
+def _pad_to_width_snap(text: str, target_width: int, m: FontMeasurer) -> str:
+    """補空白後，若再多一個半形空白更接近目標，則多補一個。"""
+    text = _pad_to_width(text, target_width, m)
+    d1 = target_width - m.measure(text)
+    d2 = m.measure(text + ' ') - target_width
+    if d2 < d1:
+        text += ' '
+    return text
+
+
+# ════════════════════════════════════════════════════════════════
+#  三種框型的共用處理函式
+# ════════════════════════════════════════════════════════════════
+
+def process_shout(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
+    """處理吶喊框，回傳對齊後的各行。失敗回傳 None。"""
+    parsed = _parse_shout_lines(box_lines)
+
+    # 原始邊框寬度
+    obw = 0
+    for ps in parsed:
+        if ps['type'] in ('top', 'bot') and 'bubble' in ps:
+            obw = m.measure(ps['bubble'])
+            break
+    if obw == 0:
+        return None
+
+    # 內容所需最小寬度
+    mcw = 0
+    for ps in parsed:
+        if ps['type'] == 'content':
+            needed = m.measure(
+                ps['left_char'] + ps['inner'].rstrip(' \u3000') + '　' + ps['right_char']
+            )
+            if needed > mcw:
+                mcw = needed
+    tw = max(obw, mcw)
+
+    # 重建
+    result: list[str] = []
+    for ps in parsed:
+        if ps['type'] == 'top':
+            bubble = ps['bubble']
+            corner = bubble[0] if bubble and bubble[0] in '､、' else ''
+            res = corner + '_'
+            while m.measure(res + '_人') <= tw:
+                res += '_人'
+            result.append(ps['prefix'] + res)
+        elif ps['type'] == 'bot':
+            res = ''
+            while m.measure(res + '⌒Y') <= tw:
+                res += '⌒Y'
+            if res.endswith('Y'):
+                res = res[:-1] + 'Ｙ'
+            result.append(ps['prefix'] + res)
+        elif ps['type'] == 'content':
+            lc, rc = ps['left_char'], ps['right_char']
+            inner = ps['inner'].rstrip(' \u3000')
+            pw = m.measure(lc) + m.measure(rc)
+            tiw = max(tw - pw, 0)
+            padded = _pad_to_width(inner, tiw, m)
+            result.append(ps['prefix'] + lc + padded + rc)
+        else:
+            result.append(ps['orig'])
+    return result
+
+
+def process_slash(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
+    """處理斜線框，回傳對齊後的各行。失敗回傳 None。"""
+    parsed = _parse_slash_lines(box_lines)
+
+    obw = 0
+    for ps in parsed:
+        if ps['type'] in ('top', 'bot') and 'bubble' in ps:
+            obw = m.measure(ps['bubble'])
+            break
+    if obw == 0:
+        return None
+
+    mcw = 0
+    for ps in parsed:
+        if ps['type'] == 'content':
+            needed = m.measure(
+                ps['left_char'] + ps['inner'].rstrip(' \u3000') + '　' + ps['right_char']
+            )
+            if needed > mcw:
+                mcw = needed
+    tw = max(obw, mcw)
+
+    result: list[str] = []
+    for ps in parsed:
+        if ps['type'] == 'top':
+            res = '＼─|'
+            while m.measure(res + '──|' + '─／') <= tw:
+                res += '──|'
+            res += '─／'
+            result.append(ps['prefix'] + res)
+        elif ps['type'] == 'bot':
+            res = '／─|'
+            while m.measure(res + '──|' + '─＼') <= tw:
+                res += '──|'
+            res += '─＼'
+            result.append(ps['prefix'] + res)
+        elif ps['type'] == 'content':
+            lc, rc = ps['left_char'], ps['right_char']
+            inner = ps['inner'].rstrip(' \u3000')
+            pw = m.measure(lc) + m.measure(rc)
+            tiw = max(tw - pw, 0)
+            padded = _pad_to_width(inner, tiw, m)
+            result.append(ps['prefix'] + lc + padded + rc)
+        else:
+            result.append(ps['orig'])
+    return result
+
+
+def process_normal(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
+    """處理普通對話框，回傳對齊後的各行。失敗回傳 None。"""
+    parsed = _parse_normal_lines(box_lines)
+
+    max_left_w = 0
+    has_right_border = False
+    for p in parsed:
+        if p['type'] == 'content':
+            vm = list(VALID_TEXT_RE.finditer(str(p.get('left', ''))))
+            if vm:
+                w = m.measure(str(p['left'])[:vm[-1].end()])
+            else:
+                w = m.measure(str(p.get('left', '')).rstrip(' \u3000'))
+            if w > max_left_w:
+                max_left_w = w
+            if p.get('right'):
+                has_right_border = True
+    if max_left_w == 0:
+        return None
+
+    fw_w = m.measure('　')
+    tw_n = max_left_w - fw_w
+    if tw_n < 0:
+        tw_n = 0
+    if has_right_border:
+        tw_n += fw_w
+
+    btw = max_left_w + m.measure('￣')
+    if btw < 0:
+        btw = 0
+    atw = btw - fw_w
+
+    new_box: list[str] = []
+    last_bdr = ''
+    for p in parsed:
+        if p['type'] == 'border':
+            pc = str(p['char'])
+            res = str(p['left']) + pc
+            while m.measure(res + pc) <= btw:
+                res += pc
+            d1 = btw - m.measure(res)
+            d2 = m.measure(res + pc) - btw
+            if d2 < d1:
+                res += pc
+            last_bdr = res + str(p['right'])
+            new_box.append(last_bdr)
+        elif p['type'] == 'content':
+            if p.get('right'):
+                ctw = m.measure(last_bdr[:-1]) if last_bdr else atw
+                rp = str(p['left'])
+                if m.measure(rp) < ctw:
+                    rp = _pad_to_width_snap(rp, ctw, m)
+                new_box.append(rp + str(p['right']))
+            else:
+                new_box.append(str(p.get('left', p.get('orig', ''))))
+        else:
+            new_box.append(str(p.get('orig', '')))
+    return new_box
+
+
+# ════════════════════════════════════════════════════════════════
+#  高階 API：單選對話框修正
+# ════════════════════════════════════════════════════════════════
+
+def adjust_bubble(selected_text: str, m: FontMeasurer) -> str | None:
+    """對使用者選取的文本進行對話框修正。
+
+    自動偵測框型（吶喊/斜線/普通），回傳修正後的文本。
+    回傳 None 表示選取範圍無法辨識為有效對話框。
+
+    錯誤以 str 回傳，開頭為 '⚠️'。
+    """
+    lines = selected_text.split('\n')
+
+    # ── 偵測吶喊框 ──
+    has_top = any('_人' in ln for ln in lines)
+    has_bot = any('⌒Y' in ln or '⌒Ｙ' in ln for ln in lines)
+    if has_top and has_bot:
+        result = process_shout(lines, m)
+        if result is None:
+            return '⚠️ 無法計算吶喊框寬度！'
+        return '\n'.join(result)
+
+    # ── 偵測斜線框 ──
+    has_slash_top = any(re.search(r'＼─\|(?:──\|){2,}', ln) for ln in lines)
+    has_slash_bot = any(re.search(r'／─\|(?:──\|){2,}', ln) for ln in lines)
+    if has_slash_top and has_slash_bot:
+        result = process_slash(lines, m)
+        if result is None:
+            return '⚠️ 無法計算斜線框寬度！'
+        return '\n'.join(result)
+
+    # ── 普通對話框 ──
+    # 先檢查是否有標準邊界
+    has_border = False
+    for line in lines:
+        line_n = line.rstrip('\r\n \u3000')
+        for char in ['￣', '＿', '─', '-', '=']:
+            matches = list(re.finditer(f'({re.escape(char)}{{3,}})', line_n))
+            if matches:
+                for match in reversed(matches):
+                    right_part = line_n[match.end():]
+                    if len(right_part.strip(' \u3000')) <= 4:
+                        has_border = True
+                        break
+            if has_border:
+                break
+        if has_border:
+            break
+
+    if not has_border:
+        return '⚠️ 選取的範圍沒有標準對話框邊界 (￣ 或 ＿)，請確認選取範圍！'
+
+    result = process_normal(lines, m)
+    if result is None:
+        return '⚠️ 無法計算對話框寬度！'
+    return '\n'.join(result)
+
+
+# ════════════════════════════════════════════════════════════════
+#  高階 API：全文對話框偵測與修正
+# ════════════════════════════════════════════════════════════════
+
+def _is_safe_normal_border(left_part: str, right_part: str, char: str) -> bool:
+    """安全性檢查：確認邊框角落字元符合已知模式，避免誤判 AA 圖案。"""
+    rp_clean = right_part.strip(' \u3000')
+    if len(rp_clean) > 4:
+        return False
+    lp_end = left_part.rstrip(' \u3000')
+    last_c = lp_end[-1] if lp_end else ''
+    if char == '￣':
+        if last_c not in "´'":
+            return False
+        if not any(c in rp_clean for c in '｀ヽﾍ'):
+            return False
+    elif char == '＿':
+        if last_c not in '乂ヽ丶':
+            return False
+        if not any(c in rp_clean for c in 'ノﾉ'):
+            return False
+    else:
+        return False
+    return True
+
+
+def detect_all_boxes(all_lines: list[str]) -> list[tuple[int, int, str]]:
+    """掃描全文，找出所有獨立對話框的範圍。
+
+    Returns:
+        list of (top_line_idx, bot_line_idx, box_type)
+        box_type: 'shout' | 'slash' | 'normal'
+    """
+    all_boxes: list[tuple[int, int, str]] = []
+    used_lines: set[int] = set()
+
+    # ── 偵測 A: 吶喊框 ──
+    re_shout_top = re.compile(r'[､、][_＿]+(?:人[_＿]*){3,}')
+    re_shout_bot = re.compile(r'(?:⌒[YＹ]){3,}')
+    s_tops: list[int] = []
+    s_bots: list[int] = []
+    for i, ln in enumerate(all_lines):
+        if re_shout_top.search(ln):
+            s_tops.append(i)
+        if re_shout_bot.search(ln):
+            s_bots.append(i)
+    for ti in s_tops:
+        if ti in used_lines:
+            continue
+        for bi in s_bots:
+            if bi <= ti or bi in used_lines:
+                continue
+            if bi - ti > 30:
+                break
+            all_boxes.append((ti, bi, 'shout'))
+            for k in range(ti, bi + 1):
+                used_lines.add(k)
+            break
+
+    # ── 偵測 B: 斜線框 ──
+    re_slash_top = re.compile(r'＼─\|(?:──\|){2,}─?／')
+    re_slash_bot = re.compile(r'／─\|(?:──\|){2,}─?＼')
+    for i, ln in enumerate(all_lines):
+        if i in used_lines:
+            continue
+        if not re_slash_top.search(ln):
+            continue
+        for j in range(i + 1, min(i + 31, len(all_lines))):
+            if j in used_lines:
+                continue
+            if re_slash_bot.search(all_lines[j]):
+                all_boxes.append((i, j, 'slash'))
+                for k in range(i, j + 1):
+                    used_lines.add(k)
+                break
+
+    # ── 偵測 C: 普通對話框 ──
+    n_borders: list[dict] = []
+    for i, line in enumerate(all_lines):
+        if i in used_lines:
+            continue
+        line_n = line.rstrip('\r\n \u3000')
+        for char, btype in [('￣', 'top'), ('＿', 'bot')]:
+            matches = list(re.finditer(f'({re.escape(char)}{{3,}})', line_n))
+            if not matches:
+                continue
+            for mt in reversed(matches):
+                rp = line_n[mt.end():]
+                if len(rp.strip(' \u3000')) <= 4:
+                    lp = line_n[:mt.start()]
+                    if _is_safe_normal_border(lp, rp, char):
+                        n_borders.append({
+                            'line': i, 'btype': btype,
+                            'left': lp, 'char': char, 'right': rp, 'orig': line_n,
+                        })
+                    break
+            break
+
+    n_tops = [b for b in n_borders if b['btype'] == 'top']
+    n_bots = [b for b in n_borders if b['btype'] == 'bot']
+    for top in n_tops:
+        ti = top['line']
+        if ti in used_lines:
+            continue
+        for bot in n_bots:
+            bi = bot['line']
+            if bi <= ti or bi in used_lines:
+                continue
+            if bi - ti > 30:
+                break
+            has_inner = any(
+                t['line'] > ti and t['line'] < bi and t['line'] not in used_lines
+                for t in n_tops if t is not top
+            )
+            if has_inner:
+                break
+            all_boxes.append((ti, bi, 'normal'))
+            for k in range(ti, bi + 1):
+                used_lines.add(k)
+            break
+
+    all_boxes.sort(key=lambda x: x[0])
+    return all_boxes
+
+
+def adjust_all_bubbles(text: str, m: FontMeasurer) -> tuple[str, int]:
+    """掃描全文並自動對齊所有對話框。
+
+    Returns:
+        (修正後的完整文本, 成功修正的對話框數量)
+    """
+    all_lines = text.split('\n')
+    all_boxes = detect_all_boxes(all_lines)
+
+    count = 0
+    for top_idx, bot_idx, box_type in reversed(all_boxes):
+        box_lines = all_lines[top_idx:bot_idx + 1]
+        if box_type == 'shout':
+            result = process_shout(box_lines, m)
+        elif box_type == 'slash':
+            result = process_slash(box_lines, m)
+        else:
+            result = process_normal(box_lines, m)
+        if result is not None:
+            all_lines[top_idx:bot_idx + 1] = result
+            count += 1
+
+    return '\n'.join(all_lines), count
+
+
+# ════════════════════════════════════════════════════════════════
+#  高階 API：對齊上一行
+# ════════════════════════════════════════════════════════════════
+
+def align_to_prev_line(
+    prev_line_text: str,
+    current_line_text: str,
+    col_idx: int,
+    m: FontMeasurer,
+) -> tuple[str, int] | None:
+    """將目前行游標後方的符號對齊到上一行末端。
+
+    Args:
+        prev_line_text: 上一行文字（已去除尾部空白）
+        current_line_text: 目前行完整文字
+        col_idx: 游標在目前行中的位置（column index）
+        m: 字型量測器
+
+    Returns:
+        (修正後的目前行文字, 新游標 column) 或 None 表示無法對齊。
+    """
+    if not prev_line_text:
+        return None
+
+    # 找游標後第一個非空白字元
+    target_col = -1
+    for i in range(col_idx, len(current_line_text)):
+        if current_line_text[i] not in [' ', '　']:
+            target_col = i
+            break
+    if target_col == -1:
+        return None
+
+    selected_text = current_line_text[target_col:]
+    target_width = m.measure(prev_line_text[:-1])
+
+    text_before = current_line_text[:target_col]
+    stripped_before = text_before.rstrip(' \u3000')
+
+    if m.measure(stripped_before) >= target_width:
+        res_prefix = stripped_before
+    else:
+        res_prefix = _pad_to_width_snap(stripped_before, target_width, m)
+
+    new_col = len(res_prefix) + 1
+    return res_prefix + ' ' + selected_text, new_col

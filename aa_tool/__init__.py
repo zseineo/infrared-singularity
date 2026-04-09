@@ -10,5 +10,8 @@
 #   bubble_alignment  - 對話框對齊演算法（三種框型）
 #   url_fetcher       - HTTP 抓取 + 頁面 HTML 解析
 #
-# UI 模組（依賴 customtkinter，遷移時需重寫）：
+# UI 模組（PyQt6）：
 #   ui_result_modal   - 最終結果預覽視窗
+#   qt_helpers        - 按鈕工廠、Toast 浮動提示
+#   qt_text_utils     - QTextCursor 輔助函式
+#   dark_theme.qss    - 暗色主題樣式表

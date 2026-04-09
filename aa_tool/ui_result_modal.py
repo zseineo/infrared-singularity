@@ -1,18 +1,28 @@
-"""最終結果預覽視窗 — UI 模組，依賴 customtkinter。
+"""最終結果預覽視窗 — PyQt6 UI 模組。
 
-PyQt6 遷移時只需重寫此檔案，邏輯模組無需變動。
+提供兩種使用方式：
+  1. ResultModalDialog — 獨立全螢幕預覽對話框
+  2. ResultEditWidget  — 可內嵌在主視窗分頁中的 QWidget
+
+show_result_modal() 為向後相容的入口函式。
 """
 from __future__ import annotations
 
 import os
 import re
-import tkinter as tk
-from tkinter import filedialog, colorchooser
 from typing import TYPE_CHECKING
 
-import customtkinter as ctk
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QFont, QKeySequence, QShortcut, QTextBlockFormat, QTextCursor
+from PyQt6.QtWidgets import (
+    QApplication, QCheckBox, QColorDialog, QDialog, QFileDialog,
+    QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
+    QVBoxLayout, QWidget,
+)
 
-from .font_measure import TkFontMeasurer
+from .font_measure import QtFontMeasurer
+from .qt_helpers import make_button, show_toast
+from .qt_text_utils import expand_selection_to_lines, find_text, get_line_col, get_line_text, move_to_line
 from .bubble_alignment import (
     adjust_bubble as _adjust_bubble,
     adjust_all_bubbles as _adjust_all_bubbles,
@@ -28,397 +38,457 @@ if TYPE_CHECKING:
     from ..aa_translation_tool import AATranslationTool
 
 
-def show_result_modal(
-    app: AATranslationTool,
-    text: str,
-    source_file: str = "",
-    scroll_to_line: int | None = None,
-) -> None:
-    """建立並顯示最終結果預覽視窗（或內嵌分頁）。"""
-    use_tab = hasattr(app, 'experimental_edit_tab') and app.experimental_edit_tab.get()
+# ════════════════════════════════════════════════════════════════
+#  核心編輯器元件
+# ════════════════════════════════════════════════════════════════
 
-    if use_tab:
-        for w in app.edit_frame.winfo_children():
-            w.destroy()
-        container = app.edit_frame
-        modal = None
-    else:
-        modal = ctk.CTkToplevel(app)
-        container = modal
+class ResultEditorCore(QWidget):
+    """結果預覽 / 編輯器核心 — 包含工具列、搜尋列、文字框。
 
-        match = re.search(r'第\s*(\d+)\s*話', text[:500])
-        if match:
-            chapter_str = f" - 第{match.group(1)}話"
-        else:
-            match = re.search(r'番外編\s*(\d+)', text[:500])
-            if match:
-                chapter_str = f" - 番外編{match.group(1)}"
-            else:
-                chapter_str = ""
+    可被 ResultModalDialog 或 ResultEditWidget 嵌入使用。
+    """
 
-        modal.title(f"✨ 最終結果預覽 (全螢幕){chapter_str}")
-        modal.state("zoomed")
+    def __init__(
+        self,
+        app: AATranslationTool,
+        text: str,
+        source_file: str = "",
+        close_callback=None,
+        toast_parent: QWidget | None = None,
+        is_tab: bool = False,
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self.app = app
+        self.source_file = source_file
+        self._close_callback = close_callback
+        self._toast_parent = toast_parent or self
+        self._is_tab = is_tab
 
-    # ── 關閉動作 ──
-    def close_action():
-        app.preview_text_cache = final_textbox.get("1.0", tk.END).rstrip('\n')
-        app.save_cache()
-        if modal:
-            modal.destroy()
-        else:
-            app.switch_mode(app._previous_mode)
+        # 字體 — AA 依賴 GDI 渲染（由 main() 設定 fontengine=gdi）
+        self._result_font = QFont("MS PGothic", 16)
+        self._ui_font = QFont("Microsoft JhengHei", 14, QFont.Weight.Bold)
+        self._ui_small_font = QFont("Microsoft JhengHei", 12)
+        self._font_measurer = QtFontMeasurer(self._result_font)
 
-    if modal:
-        modal.bind("<Escape>", lambda e: close_action())
-        modal.protocol("WM_DELETE_WINDOW", close_action)
-        modal.transient(app)
+        self._current_color = "#ff0000"
 
-    # ── Toast 輔助 ──
-    def show_toast(message, color="#28a745", duration=3000):
-        target = modal if modal else app
-        toast = ctk.CTkFrame(target, fg_color=color, corner_radius=8)
-        toast.place(relx=1.0, rely=0.0, anchor="ne", x=-20, y=60 if modal else 55)
-        lbl = ctk.CTkLabel(toast, text=message, text_color="white", font=app.ui_font)
-        lbl.pack(padx=20, pady=10)
-        target.after(duration, toast.destroy)
+        self._build_ui(text)
+        self._setup_shortcuts()
 
-    # ════════════════════════════════════════════════════════════
-    #  工具列
-    # ════════════════════════════════════════════════════════════
-    toolbar = ctk.CTkFrame(container, fg_color="#343a40", corner_radius=0)
-    toolbar.pack(fill="x")
+    # ────────────────────────────────────────────────────
+    #  UI 建構
+    # ────────────────────────────────────────────────────
 
-    tb_inner = ctk.CTkFrame(toolbar, fg_color="transparent")
-    tb_inner.pack(fill="x", padx=10, pady=5)
+    def _build_ui(self, text: str):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-    # ── 群組 1：全文替換 + 術語 ──
-    grp1 = ctk.CTkFrame(tb_inner, fg_color="transparent")
-    grp1.pack(side="left", padx=5)
+        # ── 工具列 ──
+        self._build_toolbar(layout)
 
-    ctk.CTkLabel(grp1, text="全文替換", text_color="white", font=app.ui_font).pack(side="left", padx=2)
-    quick_orig = ctk.CTkEntry(grp1, placeholder_text="原文", width=120, font=app.ui_font)
-    quick_orig.pack(side="left", padx=2)
-    quick_trans = ctk.CTkEntry(grp1, placeholder_text="翻譯", width=120, font=app.ui_font)
-    quick_trans.pack(side="left", padx=2)
+        # ── 搜尋列（預設隱藏）──
+        self._build_search_bar(layout)
 
-    save_to_glossary_var = ctk.BooleanVar(value=True)
-    ctk.CTkCheckBox(
-        grp1, text="存入術語表", variable=save_to_glossary_var,
-        text_color="white", font=app.ui_small_font, width=80,
-    ).pack(side="left", padx=5)
+        # ── 文字編輯框 ──
+        self.textbox = QPlainTextEdit()
+        self.textbox.setFont(self._result_font)
+        self.textbox.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.textbox.setUndoRedoEnabled(True)
+        self.textbox.setStyleSheet(f"""
+            QPlainTextEdit {{
+                background-color: {self.app.bg_color};
+                color: {self.app.fg_color};
+                border: none;
+                padding: 10px;
+            }}
+        """)
 
-    # ── 文字框 ──
-    final_textbox = ctk.CTkTextbox(
-        container, font=app.result_font, wrap="none",
-        fg_color=app.bg_color, text_color=app.fg_color, undo=True,
-    )
-    final_textbox._textbox.configure(spacing1=2, spacing3=2)
+        self.textbox.setPlainText(text)
 
-    def _on_mousewheel(event):
-        units = int(-(event.delta / 120) * 8)
-        final_textbox._textbox.yview_scroll(units, "units")
-        return "break"
+        # 行間距 — 對應 tkinter spacing1=2, spacing3=2
+        cursor = self.textbox.textCursor()
+        cursor.select(QTextCursor.SelectionType.Document)
+        block_fmt = QTextBlockFormat()
+        block_fmt.setTopMargin(2)
+        block_fmt.setBottomMargin(2)
+        cursor.mergeBlockFormat(block_fmt)
+        cursor.clearSelection()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        self.textbox.setTextCursor(cursor)
+        layout.addWidget(self.textbox, 1)
 
-    final_textbox._textbox.bind("<MouseWheel>", _on_mousewheel)
+    def _build_toolbar(self, parent_layout: QVBoxLayout):
+        toolbar = QWidget()
+        toolbar.setStyleSheet("background-color: #343a40;")
+        tb_layout = QHBoxLayout(toolbar)
+        tb_layout.setContentsMargins(10, 5, 10, 5)
 
-    # ── 全文替換 ──
-    def quick_replace():
-        orig = quick_orig.get().strip()
-        trans = quick_trans.get().strip()
+        # ── 群組 1：全文替換 + 術語 ──
+        self._build_grp1(tb_layout)
+
+        # ── 群組 2：選區操作 ──
+        self._build_grp2(tb_layout)
+
+        tb_layout.addStretch()
+
+        # ── 群組 3：右側工具 ──
+        self._build_grp3(tb_layout)
+
+        parent_layout.addWidget(toolbar)
+
+    def _build_grp1(self, tb_layout: QHBoxLayout):
+        lbl = QLabel("全文替換")
+        lbl.setFont(self._ui_font)
+        lbl.setStyleSheet("color: white;")
+        tb_layout.addWidget(lbl)
+
+        self.quick_orig = QLineEdit()
+        self.quick_orig.setPlaceholderText("原文")
+        self.quick_orig.setFixedWidth(120)
+        self.quick_orig.setFont(self._ui_font)
+        tb_layout.addWidget(self.quick_orig)
+
+        self.quick_trans = QLineEdit()
+        self.quick_trans.setPlaceholderText("翻譯")
+        self.quick_trans.setFixedWidth(120)
+        self.quick_trans.setFont(self._ui_font)
+        tb_layout.addWidget(self.quick_trans)
+
+        self.save_to_glossary_cb = QCheckBox("存入術語表")
+        self.save_to_glossary_cb.setChecked(True)
+        self.save_to_glossary_cb.setFont(self._ui_small_font)
+        self.save_to_glossary_cb.setStyleSheet("color: white;")
+        tb_layout.addWidget(self.save_to_glossary_cb)
+
+        btn_exec = make_button("執行", color="#17a2b8", hover="#138496", font=self._ui_small_font, width=50)
+        btn_exec.clicked.connect(self._quick_replace)
+        tb_layout.addWidget(btn_exec)
+
+        btn_glossary = make_button("重套術語", color="#28a745", hover="#218838", font=self._ui_small_font, width=60)
+        btn_glossary.clicked.connect(self._reapply_glossary)
+        tb_layout.addWidget(btn_glossary)
+
+    def _build_grp2(self, tb_layout: QHBoxLayout):
+        # 顏色選擇按鈕
+        self.color_btn = QPushButton()
+        self.color_btn.setFixedWidth(40)
+        self.color_btn.setStyleSheet(f"background-color: {self._current_color}; border: none; border-radius: 4px;")
+        self.color_btn.clicked.connect(self._choose_color)
+        tb_layout.addWidget(self.color_btn)
+
+        btn_color = make_button("上色", color="#6f42c1", hover="#5a32a3", font=self._ui_small_font, width=60)
+        btn_color.clicked.connect(self._apply_color)
+        tb_layout.addWidget(btn_color)
+
+        btn_strip = make_button("消空白", color="#e0a800", hover="#c82333", font=self._ui_small_font, text_color="black", width=60)
+        btn_strip.clicked.connect(self._strip_spaces)
+        tb_layout.addWidget(btn_strip)
+
+        btn_add_sp = make_button("補空白", color="#17a2b8", hover="#138496", font=self._ui_small_font, width=60)
+        btn_add_sp.clicked.connect(self._add_double_spaces)
+        tb_layout.addWidget(btn_add_sp)
+
+        btn_bubble = make_button("對話框修正", color="#28a745", hover="#218838", font=self._ui_small_font, width=80)
+        btn_bubble.clicked.connect(self._adjust_bubble)
+        tb_layout.addWidget(btn_bubble)
+
+        btn_align = make_button("對齊上一行", color="#17a2b8", hover="#138496", font=self._ui_small_font, width=80)
+        btn_align.clicked.connect(self._align_to_prev_line)
+        tb_layout.addWidget(btn_align)
+
+        btn_smart = make_button("自動判斷", color="#e67e22", hover="#d35400", font=self._ui_small_font, width=70)
+        btn_smart.clicked.connect(self._smart_action)
+        tb_layout.addWidget(btn_smart)
+
+        btn_all = make_button("對話框(全)", color="#20c997", hover="#17a085", font=self._ui_small_font, width=80)
+        btn_all.clicked.connect(self._adjust_all_bubbles)
+        tb_layout.addWidget(btn_all)
+
+    def _build_grp3(self, tb_layout: QHBoxLayout):
+        btn_bg = make_button("底色", color="#6c757d", hover="#5a6268", font=self._ui_small_font, width=45)
+        btn_bg.clicked.connect(self._choose_bg_color)
+        tb_layout.addWidget(btn_bg)
+
+        btn_fg = make_button("文字色", color="#17a2b8", hover="#138496", font=self._ui_small_font, width=45)
+        btn_fg.clicked.connect(self._choose_fg_color)
+        tb_layout.addWidget(btn_fg)
+
+        btn_save = make_button("💾 儲存", color="#28a745", hover="#218838", font=self._ui_small_font, width=60)
+        btn_save.clicked.connect(self._dl_html)
+        tb_layout.addWidget(btn_save)
+
+        close_text = "↩ 返回" if self._is_tab else "✖ 關閉"
+        btn_close = make_button(close_text, color="#dc3545", hover="#c82333", font=self._ui_small_font, width=60)
+        btn_close.clicked.connect(self._close)
+        tb_layout.addWidget(btn_close)
+
+    def _build_search_bar(self, parent_layout: QVBoxLayout):
+        self.search_frame = QWidget()
+        self.search_frame.setVisible(False)
+        sf_layout = QHBoxLayout(self.search_frame)
+        sf_layout.setContentsMargins(10, 0, 10, 5)
+
+        self.search_entry = QLineEdit()
+        self.search_entry.setPlaceholderText("搜尋...")
+        self.search_entry.setFont(self._ui_small_font)
+        self.search_entry.setFixedWidth(200)
+        self.search_entry.returnPressed.connect(self._find_next)
+        sf_layout.addWidget(self.search_entry)
+
+        btn_next = make_button("下一個", color="#007bff", hover="#0056b3", font=self._ui_small_font, width=60)
+        btn_next.clicked.connect(self._find_next)
+        sf_layout.addWidget(btn_next)
+
+        btn_dice = make_button("🎲 1D10:10", color="#f39c12", hover="#d68910", font=self._ui_small_font, width=80)
+        btn_dice.clicked.connect(self._search_dice)
+        sf_layout.addWidget(btn_dice)
+
+        sf_layout.addStretch()
+        parent_layout.addWidget(self.search_frame)
+
+    # ────────────────────────────────────────────────────
+    #  快捷鍵
+    # ────────────────────────────────────────────────────
+
+    def _setup_shortcuts(self):
+        QShortcut(QKeySequence("Ctrl+Q"), self, self._smart_action)
+        QShortcut(QKeySequence("Ctrl+F"), self, self._toggle_search)
+        QShortcut(QKeySequence("Ctrl+S"), self, self._dl_html)
+
+    # ────────────────────────────────────────────────────
+    #  Toast 輔助
+    # ────────────────────────────────────────────────────
+
+    def _toast(self, message: str, color: str = "#28a745", duration: int = 3000):
+        show_toast(self._toast_parent, message, color=color, duration=duration)
+
+    # ────────────────────────────────────────────────────
+    #  關閉
+    # ────────────────────────────────────────────────────
+
+    def _close(self):
+        self.app.preview_text_cache = self.textbox.toPlainText()
+        self.app.save_cache()
+        if self._close_callback:
+            self._close_callback()
+
+    # ────────────────────────────────────────────────────
+    #  群組 1：全文替換 + 術語
+    # ────────────────────────────────────────────────────
+
+    def _quick_replace(self):
+        orig = self.quick_orig.text().strip()
+        trans = self.quick_trans.text().strip()
         if not orig or not trans:
-            show_toast("⚠️ 不可為空！", color="#f39c12")
+            self._toast("⚠️ 不可為空！", color="#f39c12")
             return
 
         len_diff = len(orig) - len(trans)
         padded_trans = trans + ('　' * len_diff if len_diff > 0 else '')
 
-        current_yview = final_textbox._textbox.yview()
-        current_text = final_textbox.get("1.0", tk.END).rstrip('\n')
+        scroll_val = self.textbox.verticalScrollBar().value()
+        current_text = self.textbox.toPlainText()
         lines = current_text.split('\n')
         for i in range(len(lines)):
             lines[i] = _replace_with_padding(lines[i], orig, trans, padded_trans)
 
-        final_textbox.delete("1.0", tk.END)
-        final_textbox.insert("1.0", '\n'.join(lines))
-        final_textbox._textbox.yview_moveto(current_yview[0])
+        self.textbox.setPlainText('\n'.join(lines))
+        self.textbox.verticalScrollBar().setValue(scroll_val)
 
-        if save_to_glossary_var.get():
-            g_text = app.glossary_text.get("1.0", tk.END).rstrip('\n')
+        if self.save_to_glossary_cb.isChecked():
+            g_text = self.app.glossary_text.toPlainText().strip()
             if g_text:
                 g_text += '\n'
             g_text += f"{orig}={trans}"
-            app.glossary_text.delete("1.0", tk.END)
-            app.glossary_text.insert("1.0", g_text)
-            app.save_cache()
+            self.app.glossary_text.setPlainText(g_text)
+            self.app.save_cache()
 
-        quick_orig.delete(0, tk.END)
-        quick_trans.delete(0, tk.END)
+        self.quick_orig.clear()
+        self.quick_trans.clear()
 
-    ctk.CTkButton(
-        grp1, text="執行", command=quick_replace,
-        fg_color="#17a2b8", hover_color="#138496", font=app.ui_small_font, width=50,
-    ).pack(side="left", padx=5)
-
-    # ── 重套術語 ──
-    def reapply_glossary():
-        glossary_str = app.get_combined_glossary()
+    def _reapply_glossary(self):
+        glossary_str = self.app.get_combined_glossary()
         if not glossary_str:
-            show_toast("⚠️ 術語表為空！", color="#f39c12")
+            self._toast("⚠️ 術語表為空！", color="#f39c12")
             return
 
         glossary = parse_glossary(glossary_str)
         if not glossary:
-            show_toast("⚠️ 術語表格式不正確或為空！", color="#f39c12")
+            self._toast("⚠️ 術語表格式不正確或為空！", color="#f39c12")
             return
 
-        current_yview = final_textbox._textbox.yview()
-        current_text = final_textbox.get("1.0", tk.END).rstrip('\n')
+        scroll_val = self.textbox.verticalScrollBar().value()
+        current_text = self.textbox.toPlainText()
         new_text = apply_glossary_to_text(current_text, glossary)
-        final_textbox.delete("1.0", tk.END)
-        final_textbox.insert("1.0", new_text)
-        final_textbox._textbox.yview_moveto(current_yview[0])
-        app.save_cache()
-        show_toast("✅ 已套用術語表變更！", color="#28a745")
+        self.textbox.setPlainText(new_text)
+        self.textbox.verticalScrollBar().setValue(scroll_val)
+        self.app.save_cache()
+        self._toast("✅ 已套用術語表變更！")
 
-    ctk.CTkButton(
-        grp1, text="重套術語", command=reapply_glossary,
-        fg_color="#28a745", hover_color="#218838", font=app.ui_small_font, width=60,
-    ).pack(side="left", padx=5)
+    # ────────────────────────────────────────────────────
+    #  群組 2：選區操作
+    # ────────────────────────────────────────────────────
 
-    # ── 群組 2：選區操作 ──
-    grp2 = ctk.CTkFrame(tb_inner, fg_color="transparent")
-    grp2.pack(side="left", padx=20)
+    def _choose_color(self):
+        from PyQt6.QtGui import QColor
+        color = QColorDialog.getColor(QColor(self._current_color), self, "選擇顏色")
+        if color.isValid():
+            self._current_color = color.name()
+            self.color_btn.setStyleSheet(
+                f"background-color: {self._current_color}; border: none; border-radius: 4px;"
+            )
 
-    color_btn = ctk.CTkButton(grp2, text="", fg_color="#ff0000", width=40, hover_color="#cc0000")
-    color_btn.pack(side="left", padx=2)
-    current_color = ["#ff0000"]
+    def _apply_color(self):
+        cursor = self.textbox.textCursor()
+        selected = cursor.selectedText()
+        if not selected:
+            self._toast("⚠️ 請先選取想要上色的文字！", color="#f39c12")
+            return
 
-    def choose_color():
-        color_code = colorchooser.askcolor(title="選擇顏色", initialcolor=current_color[0])[1]
-        if color_code:
-            current_color[0] = color_code
-            color_btn.configure(fg_color=color_code, hover_color=color_code)
+        if re.search(r'<span style="color:[^"]*">', selected):
+            stripped = re.sub(r'<span style="color:[^"]*">', '', selected)
+            stripped = stripped.replace('</span>', '')
+            cursor.insertText(stripped)
+        else:
+            colored = f'<span style="color:{self._current_color}">{selected}</span>'
+            cursor.insertText(colored)
 
-    color_btn.configure(command=choose_color)
+    def _strip_spaces(self):
+        cursor = self.textbox.textCursor()
+        selected = cursor.selectedText()
+        if not selected:
+            self._toast("⚠️ 請先選取想要消除空白的文字！", color="#f39c12")
+            return
+        stripped = selected.replace(" ", "").replace("　", "")
+        cursor.insertText(stripped)
 
-    def apply_color():
-        try:
-            first = final_textbox._textbox.index(tk.SEL_FIRST)
-            last = final_textbox._textbox.index(tk.SEL_LAST)
-            selected_text = final_textbox._textbox.get(first, last)
-            if not selected_text:
-                return
+    def _add_double_spaces(self):
+        cursor = self.textbox.textCursor()
+        selected = cursor.selectedText()
+        if not selected:
+            self._toast("⚠️ 請先選取想要補空白的文字！", color="#f39c12")
+            return
+        # QPlainTextEdit 用 \u2029 表示段落分隔，轉回 \n
+        lines = selected.replace('\u2029', '\n').split('\n')
+        spaced_lines = ["　　".join(list(line)) for line in lines]
+        spaced_text = '\n'.join(spaced_lines)
+        cursor.insertText(spaced_text)
 
-            if re.search(r'<span style="color:[^"]*">', selected_text):
-                stripped_text = re.sub(r'<span style="color:[^"]*">', '', selected_text)
-                stripped_text = stripped_text.replace('</span>', '')
-                final_textbox._textbox.delete(first, last)
-                final_textbox._textbox.insert(first, stripped_text)
+    def _adjust_bubble(self):
+        cursor = expand_selection_to_lines(self.textbox)
+        selected = cursor.selectedText()
+        if not selected:
+            self._toast("⚠️ 請先選取想要調整的對話框！", color="#f39c12")
+            return
+        # QPlainTextEdit 的 selectedText 用 \u2029 作為換行
+        selected = selected.replace('\u2029', '\n')
+        result = _adjust_bubble(selected, self._font_measurer)
+        if result is None:
+            self._toast("⚠️ 無法辨識對話框類型！", color="#f39c12")
+        elif result.startswith('⚠️'):
+            self._toast(result, color="#f39c12")
+        else:
+            cursor.insertText(result)
+
+    def _align_to_prev_line(self):
+        cursor = self.textbox.textCursor()
+        line_idx, col_idx = get_line_col(cursor)
+
+        if line_idx < 2:
+            self._toast("⚠️ 這是第一行，沒有上一行可以對齊！", color="#f39c12")
+            return
+
+        prev_line_text = get_line_text(self.textbox, line_idx - 1).rstrip('\r\n \u3000')
+        if not prev_line_text:
+            self._toast("⚠️ 上一行為空，無法對齊！", color="#f39c12")
+            return
+
+        current_line_text = get_line_text(self.textbox, line_idx)
+        align_result = _align_to_prev_line(prev_line_text, current_line_text, col_idx, self._font_measurer)
+        if align_result is None:
+            self._toast("⚠️ 游標後方沒有可以對齊的符號！", color="#f39c12")
+            return
+
+        new_line, new_col = align_result
+        # 選取整行並替換
+        cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+        cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+        cursor.insertText(new_line)
+        # 移到新欄位
+        move_to_line(self.textbox, line_idx, new_col)
+        self.textbox.ensureCursorVisible()
+
+    def _smart_action(self):
+        cursor = self.textbox.textCursor()
+        selected = cursor.selectedText()
+        if selected:
+            if '\u2029' in selected or '\n' in selected:
+                self._adjust_bubble()
             else:
-                colored_text = f'<span style="color:{current_color[0]}">{selected_text}</span>'
-                final_textbox._textbox.delete(first, last)
-                final_textbox._textbox.insert(first, colored_text)
-        except tk.TclError:
-            show_toast("⚠️ 請先選取想要上色的文字！", color="#f39c12")
+                self._apply_color()
+        else:
+            self._align_to_prev_line()
 
-    ctk.CTkButton(
-        grp2, text="上色", command=apply_color,
-        fg_color="#6f42c1", hover_color="#5a32a3", font=app.ui_small_font, width=60,
-    ).pack(side="left", padx=5)
-
-    def strip_spaces():
-        try:
-            first = final_textbox._textbox.index(tk.SEL_FIRST)
-            last = final_textbox._textbox.index(tk.SEL_LAST)
-            selected_text = final_textbox._textbox.get(first, last)
-            if not selected_text:
-                return
-            stripped_text = selected_text.replace(" ", "").replace("　", "")
-            final_textbox._textbox.delete(first, last)
-            final_textbox._textbox.insert(first, stripped_text)
-        except tk.TclError:
-            show_toast("⚠️ 請先選取想要消除空白的文字！", color="#f39c12")
-
-    ctk.CTkButton(
-        grp2, text="消空白", command=strip_spaces,
-        fg_color="#e0a800", hover_color="#c82333", text_color="black",
-        font=app.ui_small_font, width=60,
-    ).pack(side="left", padx=5)
-
-    def add_double_spaces():
-        try:
-            first = final_textbox._textbox.index(tk.SEL_FIRST)
-            last = final_textbox._textbox.index(tk.SEL_LAST)
-            selected_text = final_textbox._textbox.get(first, last)
-            if not selected_text:
-                return
-            lines = selected_text.split('\n')
-            spaced_lines = ["　　".join(list(line)) for line in lines]
-            spaced_text = '\n'.join(spaced_lines)
-            final_textbox._textbox.delete(first, last)
-            final_textbox._textbox.insert(first, spaced_text)
-        except tk.TclError:
-            show_toast("⚠️ 請先選取想要補空白的文字！", color="#f39c12")
-
-    ctk.CTkButton(
-        grp2, text="補空白", command=add_double_spaces,
-        fg_color="#17a2b8", hover_color="#138496", text_color="white",
-        font=app.ui_small_font, width=60,
-    ).pack(side="left", padx=5)
-
-    # ── 對話框修正 ──
-    font_measurer = TkFontMeasurer(app.result_font)
-
-    def adjust_bubble():
-        try:
-            first_idx = final_textbox._textbox.index(tk.SEL_FIRST)
-            last_idx = final_textbox._textbox.index(tk.SEL_LAST)
-
-            first = final_textbox._textbox.index(f"{first_idx} linestart")
-            if last_idx.split('.')[1] == '0' and last_idx != first_idx:
-                last = final_textbox._textbox.index(f"{last_idx} - 1 chars lineend")
-            else:
-                last = final_textbox._textbox.index(f"{last_idx} lineend")
-
-            selected_text = final_textbox._textbox.get(first, last)
-            if not selected_text:
-                return
-
-            result = _adjust_bubble(selected_text, font_measurer)
-            if result is None:
-                show_toast("⚠️ 無法辨識對話框類型！", color="#f39c12")
-            elif result.startswith('⚠️'):
-                show_toast(result, color="#f39c12")
-            else:
-                final_textbox._textbox.delete(first, last)
-                final_textbox._textbox.insert(first, result)
-        except tk.TclError:
-            show_toast("⚠️ 請先選取想要調整的對話框！", color="#f39c12")
-
-    ctk.CTkButton(
-        grp2, text="對話框修正", command=adjust_bubble,
-        fg_color="#28a745", hover_color="#218838", text_color="white",
-        font=app.ui_small_font, width=80,
-    ).pack(side="left", padx=5)
-
-    def align_to_prev_line():
-        try:
-            cursor_pos = final_textbox._textbox.index(tk.INSERT)
-            line_idx, col_idx = cursor_pos.split('.')
-            line_idx = int(line_idx)
-            col_idx = int(col_idx)
-
-            prev_line_idx = line_idx - 1
-            if prev_line_idx < 1:
-                show_toast("⚠️ 這是第一行，沒有上一行可以對齊！", color="#f39c12")
-                return
-
-            prev_line_text = final_textbox._textbox.get(f"{prev_line_idx}.0", f"{prev_line_idx}.end")
-            prev_line_text = prev_line_text.rstrip('\r\n \u3000')
-
-            if not prev_line_text:
-                show_toast("⚠️ 上一行為空，無法對齊！", color="#f39c12")
-                return
-
-            current_line_text = final_textbox._textbox.get(f"{line_idx}.0", f"{line_idx}.end")
-            align_result = _align_to_prev_line(prev_line_text, current_line_text, col_idx, font_measurer)
-
-            if align_result is None:
-                show_toast("⚠️ 游標後方沒有可以對齊的符號！", color="#f39c12")
-                return
-
-            new_line, new_col = align_result
-            final_textbox._textbox.delete(f"{line_idx}.0", f"{line_idx}.end")
-            final_textbox._textbox.insert(f"{line_idx}.0", new_line)
-            final_textbox._textbox.mark_set(tk.INSERT, f"{line_idx}.{new_col}")
-            final_textbox._textbox.see(tk.INSERT)
-        except Exception as e:
-            show_toast(f"❌ 無法對齊：{e}", color="#dc3545", duration=5000)
-
-    ctk.CTkButton(
-        grp2, text="對齊上一行", command=align_to_prev_line,
-        fg_color="#17a2b8", hover_color="#138496", text_color="white",
-        font=app.ui_small_font, width=80,
-    ).pack(side="left", padx=5)
-
-    def smart_action(event=None):
-        try:
-            first = final_textbox._textbox.index(tk.SEL_FIRST)
-            last = final_textbox._textbox.index(tk.SEL_LAST)
-            selected_text = final_textbox._textbox.get(first, last)
-            if "\n" in selected_text:
-                adjust_bubble()
-            else:
-                apply_color()
-        except tk.TclError:
-            align_to_prev_line()
-
-    ctk.CTkButton(
-        grp2, text="自動判斷", command=smart_action,
-        fg_color="#e67e22", hover_color="#d35400", text_color="white",
-        font=app.ui_small_font, width=70,
-    ).pack(side="left", padx=5)
-
-    def adjust_all_bubbles():
-        text_content = final_textbox.get("1.0", tk.END).rstrip('\n')
-        new_text, count = _adjust_all_bubbles(text_content, font_measurer)
+    def _adjust_all_bubbles(self):
+        text_content = self.textbox.toPlainText()
+        new_text, count = _adjust_all_bubbles(text_content, self._font_measurer)
 
         if count == 0:
-            show_toast("⚠️ 未找到可處理的獨立對話框！", color="#f39c12")
+            self._toast("⚠️ 未找到可處理的獨立對話框！", color="#f39c12")
             return
 
-        scroll_pos = final_textbox._textbox.yview()
-        cursor_pos = final_textbox._textbox.index(tk.INSERT)
-        final_textbox._textbox.delete("1.0", tk.END)
-        final_textbox._textbox.insert("1.0", new_text)
-        final_textbox._textbox.mark_set(tk.INSERT, cursor_pos)
-        final_textbox._textbox.yview_moveto(scroll_pos[0])
-        show_toast(f"✅ 已自動調整 {count} 個對話框！", color="#28a745")
+        scroll_val = self.textbox.verticalScrollBar().value()
+        cursor_line, cursor_col = get_line_col(self.textbox.textCursor())
+        self.textbox.setPlainText(new_text)
+        move_to_line(self.textbox, cursor_line, cursor_col)
+        self.textbox.verticalScrollBar().setValue(scroll_val)
+        self._toast(f"✅ 已自動調整 {count} 個對話框！")
 
-    ctk.CTkButton(
-        grp2, text="對話框(全)", command=adjust_all_bubbles,
-        fg_color="#20c997", hover_color="#17a085", text_color="white",
-        font=app.ui_small_font, width=80,
-    ).pack(side="left", padx=5)
+    # ────────────────────────────────────────────────────
+    #  群組 3：右側工具
+    # ────────────────────────────────────────────────────
 
-    def handle_smart_action_event(e=None):
-        smart_action()
-        return "break"
+    def _choose_bg_color(self):
+        from PyQt6.QtGui import QColor
+        color = QColorDialog.getColor(QColor(self.app.bg_color), self, "選擇背景顏色")
+        if color.isValid():
+            self.app.bg_color = color.name()
+            self.textbox.setStyleSheet(f"""
+                QPlainTextEdit {{
+                    background-color: {self.app.bg_color};
+                    color: {self.app.fg_color};
+                    border: none; padding: 10px;
+                }}
+            """)
+            self.app.save_cache()
 
-    container.bind("<Control-q>", handle_smart_action_event)
-    container.bind("<Control-Q>", handle_smart_action_event)
-    final_textbox._textbox.bind("<Control-q>", handle_smart_action_event)
-    final_textbox._textbox.bind("<Control-Q>", handle_smart_action_event)
+    def _choose_fg_color(self):
+        from PyQt6.QtGui import QColor
+        color = QColorDialog.getColor(QColor(self.app.fg_color), self, "選擇文字顏色")
+        if color.isValid():
+            self.app.fg_color = color.name()
+            self.textbox.setStyleSheet(f"""
+                QPlainTextEdit {{
+                    background-color: {self.app.bg_color};
+                    color: {self.app.fg_color};
+                    border: none; padding: 10px;
+                }}
+            """)
+            self.app.save_cache()
 
-    # ── 群組 3：右側工具 ──
-    grp3 = ctk.CTkFrame(tb_inner, fg_color="transparent")
-    grp3.pack(side="right", padx=5)
-
-    def choose_bg_color():
-        color_code = colorchooser.askcolor(title="選擇背景顏色")[1]
-        if color_code:
-            app.bg_color = color_code
-            final_textbox.configure(fg_color=color_code)
-            app.save_cache()
-
-    def choose_fg_color():
-        color_code = colorchooser.askcolor(title="選擇文字顏色")[1]
-        if color_code:
-            app.fg_color = color_code
-            final_textbox.configure(text_color=color_code)
-            app.save_cache()
-
-    def dl_html():
-        raw_text = final_textbox.get("1.0", tk.END).rstrip('\n')
+    def _dl_html(self):
+        raw_text = self.textbox.toPlainText()
         if not raw_text:
-            show_toast("⚠️ 預覽視窗沒有內容！", color="#f39c12")
+            self._toast("⚠️ 預覽視窗沒有內容！", color="#f39c12")
             return
 
-        if source_file:
-            init_name = os.path.basename(source_file)
+        if self.source_file:
+            init_name = os.path.basename(self.source_file)
         else:
-            title_val = app.doc_title.get().strip()
-            num_val = app.doc_num.get().strip()
+            title_val = self.app.doc_title.text().strip()
+            num_val = self.app.doc_num.text().strip()
             if title_val and num_val:
                 init_name = f"{title_val}_{num_val}.html"
             elif title_val:
@@ -428,120 +498,178 @@ def show_result_modal(
             else:
                 init_name = "AA_Result.html"
 
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".html",
-            filetypes=[("HTML files", "*.html")],
-            initialfile=init_name,
-            title="儲存 HTML 檔案",
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "儲存 HTML 檔案", init_name,
+            "HTML files (*.html)",
         )
         if file_path:
             try:
-                app.write_html_file(file_path, raw_text)
-                show_toast("✅ 已儲存 HTML 檔案！", color="#28a745")
+                self.app.write_html_file(file_path, raw_text)
+                self._toast("✅ 已儲存 HTML 檔案！")
             except Exception as e:
-                show_toast(f"❌ 無法儲存: {e}", color="#dc3545", duration=5000)
+                self._toast(f"❌ 無法儲存: {e}", color="#dc3545", duration=5000)
 
-    ctk.CTkButton(grp3, text="底色", command=choose_bg_color, fg_color="#6c757d", hover_color="#5a6268", font=app.ui_small_font, width=45).pack(side="left", padx=2)
-    ctk.CTkButton(grp3, text="文字色", command=choose_fg_color, fg_color="#17a2b8", hover_color="#138496", font=app.ui_small_font, width=45).pack(side="left", padx=2)
-    ctk.CTkButton(grp3, text="💾 儲存", command=dl_html, fg_color="#28a745", hover_color="#218838", font=app.ui_small_font, width=60).pack(side="left", padx=5)
-    _close_text = "↩ 返回" if use_tab else "✖ 關閉"
-    ctk.CTkButton(grp3, text=_close_text, command=close_action, fg_color="#dc3545", hover_color="#c82333", font=app.ui_small_font, width=60).pack(side="left", padx=5)
+    # ────────────────────────────────────────────────────
+    #  搜尋
+    # ────────────────────────────────────────────────────
 
-    # ════════════════════════════════════════════════════════════
-    #  搜尋列
-    # ════════════════════════════════════════════════════════════
-    search_frame = ctk.CTkFrame(container, fg_color="transparent")
-    search_var = tk.StringVar()
-    search_entry = ctk.CTkEntry(search_frame, textvariable=search_var, placeholder_text="搜尋...", font=app.ui_small_font, width=200)
-    search_entry.pack(side="left", padx=5)
+    def _toggle_search(self):
+        visible = self.search_frame.isVisible()
+        self.search_frame.setVisible(not visible)
+        if not visible:
+            self.search_entry.setFocus()
 
-    def find_next(event=None):
-        query = search_var.get()
+    def _find_next(self):
+        query = self.search_entry.text()
         if not query:
             return
+        if not find_text(self.textbox, query, wrap=True):
+            self._toast("🔍 找不到符合的文字。", color="#17a2b8")
 
-        start_pos = final_textbox._textbox.index(tk.INSERT)
-        try:
-            sel_first = final_textbox._textbox.index(tk.SEL_FIRST)
-            sel_last = final_textbox._textbox.index(tk.SEL_LAST)
-            if final_textbox._textbox.get(sel_first, sel_last).lower() == query.lower():
-                start_pos = sel_last
-        except tk.TclError:
-            pass
+    def _search_dice(self):
+        self.search_entry.setText("1D10:10")
+        self.search_frame.setVisible(True)
+        self._find_next()
 
-        pos = final_textbox._textbox.search(query, start_pos, nocase=True, stopindex=tk.END)
-        if not pos:
-            pos = final_textbox._textbox.search(query, "1.0", nocase=True, stopindex=start_pos)
+    # ────────────────────────────────────────────────────
+    #  捲動到指定行
+    # ────────────────────────────────────────────────────
 
-        if pos:
-            end_pos = f"{pos}+{len(query)}c"
-            final_textbox._textbox.tag_remove(tk.SEL, "1.0", tk.END)
-            final_textbox._textbox.tag_add(tk.SEL, pos, end_pos)
-            final_textbox._textbox.mark_set(tk.INSERT, end_pos)
-            final_textbox._textbox.see(pos)
+    def scroll_to_line(self, line: int):
+        """捲動到指定行並選取該行。"""
+        def _do_scroll():
+            cursor = move_to_line(self.textbox, line)
+            cursor.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+            self.textbox.setTextCursor(cursor)
+            self.textbox.ensureCursorVisible()
+        QTimer.singleShot(100, _do_scroll)
+
+
+# ════════════════════════════════════════════════════════════════
+#  對話框模式
+# ════════════════════════════════════════════════════════════════
+
+class ResultModalDialog(QDialog):
+    """全螢幕預覽對話框。"""
+
+    def __init__(
+        self,
+        app: AATranslationTool,
+        text: str,
+        source_file: str = "",
+        scroll_to_line: int | None = None,
+    ):
+        super().__init__(app)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
+
+        # 標題
+        chapter_str = ""
+        match = re.search(r'第\s*(\d+)\s*話', text[:500])
+        if match:
+            chapter_str = f" - 第{match.group(1)}話"
         else:
-            show_toast("🔍 找不到符合的文字。", color="#17a2b8")
+            match = re.search(r'番外編\s*(\d+)', text[:500])
+            if match:
+                chapter_str = f" - 番外編{match.group(1)}"
+        self.setWindowTitle(f"✨ 最終結果預覽 (全螢幕){chapter_str}")
 
-    search_entry.bind("<Return>", find_next)
-    ctk.CTkButton(search_frame, text="下一個", command=find_next, font=app.ui_small_font, width=60).pack(side="left", padx=5)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-    def search_dice(event=None):
-        search_var.set("1D10:10")
-        if not search_frame.winfo_ismapped():
-            search_frame.pack(fill="x", padx=10, pady=(0, 5), before=final_textbox)
-        find_next()
+        self.editor = ResultEditorCore(
+            app, text, source_file,
+            close_callback=self.close,
+            toast_parent=self,
+            is_tab=False,
+            parent=self,
+        )
+        layout.addWidget(self.editor)
 
-    ctk.CTkButton(search_frame, text="🎲 1D10:10", command=search_dice, fg_color="#f39c12", hover_color="#d68910", font=app.ui_small_font, width=80).pack(side="left", padx=5)
+        # Esc 關閉
+        QShortcut(QKeySequence("Escape"), self, self.close)
 
-    def toggle_search(event=None):
-        if search_frame.winfo_ismapped():
-            search_frame.pack_forget()
-        else:
-            search_frame.pack(fill="x", padx=10, pady=(0, 5), before=final_textbox)
-            search_entry.focus_set()
-        return "break"
+        # 最大化
+        self.showMaximized()
 
-    def save_shortcut(event=None):
-        dl_html()
-        return "break"
+        if scroll_to_line is not None:
+            self.editor.scroll_to_line(scroll_to_line)
 
-    container.bind("<Control-f>", toggle_search)
-    container.bind("<Control-F>", toggle_search)
-    container.bind("<Control-s>", save_shortcut)
-    container.bind("<Control-S>", save_shortcut)
-    final_textbox._textbox.bind("<Control-f>", toggle_search)
-    final_textbox._textbox.bind("<Control-F>", toggle_search)
-    final_textbox._textbox.bind("<Control-s>", save_shortcut)
-    final_textbox._textbox.bind("<Control-S>", save_shortcut)
+    def closeEvent(self, event):
+        self.editor._close()
+        event.accept()
 
-    # ════════════════════════════════════════════════════════════
-    #  填入文本
-    # ════════════════════════════════════════════════════════════
-    final_textbox.pack(fill="both", expand=True, padx=10, pady=10)
-    final_textbox.insert("1.0", text)
+
+# ════════════════════════════════════════════════════════════════
+#  內嵌分頁模式
+# ════════════════════════════════════════════════════════════════
+
+class ResultEditWidget(QWidget):
+    """可內嵌在主視窗的結果編輯元件。"""
+
+    def __init__(
+        self,
+        app: AATranslationTool,
+        text: str,
+        source_file: str = "",
+        scroll_to_line: int | None = None,
+    ):
+        super().__init__()
+        self.app = app
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.editor = ResultEditorCore(
+            app, text, source_file,
+            close_callback=lambda: app.switch_mode(app._previous_mode),
+            toast_parent=app,
+            is_tab=True,
+            parent=self,
+        )
+        layout.addWidget(self.editor)
+
+        # 給主視窗存取
+        app.edit_tab_textbox = self.editor.textbox
+
+        if scroll_to_line is not None:
+            self.editor.scroll_to_line(scroll_to_line)
+
+
+# ════════════════════════════════════════════════════════════════
+#  向後相容入口
+# ════════════════════════════════════════════════════════════════
+
+def show_result_modal(
+    app: AATranslationTool,
+    text: str,
+    source_file: str = "",
+    scroll_to_line: int | None = None,
+) -> None:
+    """建立並顯示最終結果預覽視窗（或內嵌分頁）。"""
+    use_tab = hasattr(app, 'experimental_edit_tab') and app.experimental_edit_tab.isChecked()
 
     if use_tab:
-        app.edit_tab_textbox = final_textbox
-        app.bind("<Control-f>", toggle_search)
-        app.bind("<Control-F>", toggle_search)
-        app.bind("<Control-s>", save_shortcut)
-        app.bind("<Control-S>", save_shortcut)
-        app.bind("<Control-q>", handle_smart_action_event)
-        app.bind("<Control-Q>", handle_smart_action_event)
-        app.bind("<Escape>", lambda e: close_action())
-        app._edit_tab_unbind = lambda: [
-            app.unbind("<Control-f>"), app.unbind("<Control-F>"),
-            app.unbind("<Control-s>"), app.unbind("<Control-S>"),
-            app.unbind("<Control-q>"), app.unbind("<Control-Q>"),
-            app.unbind("<Escape>"),
-        ]
-        app.switch_mode("edit")
+        # 清除舊的內嵌編輯元件
+        if hasattr(app, '_edit_widget'):
+            app._edit_widget.deleteLater()
 
-    if scroll_to_line is not None:
-        def _scroll():
-            target = f"{scroll_to_line}.0"
-            final_textbox._textbox.see(target)
-            final_textbox._textbox.mark_set(tk.INSERT, target)
-            line_end = f"{scroll_to_line}.end"
-            final_textbox._textbox.tag_add(tk.SEL, target, line_end)
-        (modal or app).after(100, _scroll)
+        widget = ResultEditWidget(app, text, source_file, scroll_to_line)
+        app._edit_widget = widget
+
+        # 將 widget 放入 edit_frame
+        if app.edit_frame.layout() is None:
+            from PyQt6.QtWidgets import QVBoxLayout as _QVBox
+            app.edit_frame.setLayout(_QVBox())
+            app.edit_frame.layout().setContentsMargins(0, 0, 0, 0)
+        else:
+            # 清除舊 children
+            while app.edit_frame.layout().count():
+                item = app.edit_frame.layout().takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+
+        app.edit_frame.layout().addWidget(widget)
+        app.switch_mode("edit")
+    else:
+        dialog = ResultModalDialog(app, text, source_file, scroll_to_line)
+        dialog.exec()

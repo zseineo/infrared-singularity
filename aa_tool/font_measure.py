@@ -8,10 +8,11 @@ class FontMeasurer(Protocol):
         ...
 
 
-class TkFontMeasurer:
-    """Tkinter / customtkinter 字體量測實作。"""
+class QtFontMeasurer:
+    """PyQt6 字體量測實作。"""
     def __init__(self, font):
-        self._font = font
+        from PyQt6.QtGui import QFontMetrics
+        self._metrics = QFontMetrics(font)
 
     def measure(self, text: str) -> int:
-        return int(self._font.measure(text))
+        return self._metrics.horizontalAdvance(text)

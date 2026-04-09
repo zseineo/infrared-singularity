@@ -1,174 +1,228 @@
-import customtkinter as ctk
-import tkinter as tk
+"""文字處理工具 — 去重複行 / 提取裝飾字元。"""
 import re
 
-class AADedupTool(ctk.CTkToplevel):
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFont
+from PyQt6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QLabel, QPlainTextEdit, QPushButton, QFrame, QWidget, QApplication,
+)
+
+from aa_tool.qt_helpers import make_button
+
+
+class AADedupTool(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
-        self.parent = parent
-        self.title("文字處理工具")
-        self.geometry("600x650")
-        self.transient(parent)
-        
-        self.ui_font = ctk.CTkFont(family="Microsoft JhengHei", size=14)
-        
-        # UI Layout
-        self.grid_rowconfigure(0, weight=0)
-        self.grid_rowconfigure(1, weight=1)
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_columnconfigure(1, weight=1)
-        
-        # Regex display frame
-        top_frame = ctk.CTkFrame(self)
-        top_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 0))
-        
-        ctk.CTkLabel(top_frame, text="目前載入的正規表達式 (僅供檢視):", font=ctk.CTkFont(family="Microsoft JhengHei", size=13, weight="bold")).pack(anchor="w", padx=5, pady=(5, 0))
-        
-        self.info_text = ctk.CTkTextbox(top_frame, height=90, wrap="word", fg_color="#1e2b3c", text_color="#a0aab5", font=ctk.CTkFont(family="Consolas", size=12))
-        self.info_text.pack(fill="x", padx=5, pady=5)
-        self.update_info_text()
-        
-    def update_info_text(self):
-        regex_content = f"【基本分段 Base Regex】\n{self.parent.current_base_regex}\n\n"
-        regex_content += f"【無效符號 Invalid Regex】\n{self.parent.current_invalid_regex}\n\n"
-        regex_content += f"【獨立符號 Symbol Regex】\n{self.parent.current_symbol_regex}"
-        
-        self.info_text.configure(state="normal")
-        self.info_text.delete("1.0", tk.END)
-        self.info_text.insert("1.0", regex_content)
-        self.info_text.configure(state="disabled")
-        
-        # Output frame
-        left_frame = ctk.CTkFrame(self)
-        left_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
-        ctk.CTkLabel(left_frame, text="原始文字 (每行獨立):", font=self.ui_font).pack(anchor="w", padx=5, pady=2)
-        self.input_text = ctk.CTkTextbox(left_frame, wrap="none", undo=True)
-        self.input_text.pack(fill="both", expand=True, padx=5, pady=5)
-        
-        right_frame = ctk.CTkFrame(self)
-        right_frame.grid(row=1, column=1, sticky="nsew", padx=10, pady=10)
-        
-        right_top = ctk.CTkFrame(right_frame, fg_color="transparent")
-        right_top.pack(fill="x", padx=5, pady=2)
-        ctk.CTkLabel(right_top, text="去重複後結果:", font=self.ui_font).pack(side="left")
-        
-        self.count_label = ctk.CTkLabel(right_top, text="行數: 0", font=self.ui_font, text_color="#17a2b8")
-        self.count_label.pack(side="right")
-        
-        self.output_text = ctk.CTkTextbox(right_frame, wrap="none", fg_color="#2a3b4c")
-        self.output_text.pack(fill="both", expand=True, padx=5, pady=5)
-        
-        # Bottom controls
-        self.status_label = ctk.CTkLabel(self, text="", font=self.ui_font, text_color="#e67e22")
-        self.status_label.grid(row=2, column=0, columnspan=2, pady=(10, 0))
-        
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=3, column=0, columnspan=2, pady=10)
-        
-        btn_dedup = ctk.CTkButton(btn_frame, text="🚀 移除完全重複行", command=self.dedup_lines, fg_color="#28a745", hover_color="#218838", font=self.ui_font, width=150, height=40)
-        btn_dedup.pack(side="left", padx=5)
-        
-        btn_extract = ctk.CTkButton(btn_frame, text="🔍 提取裝飾字元", command=self.extract_symbols, fg_color="#e67e22", hover_color="#d35400", font=self.ui_font, width=150, height=40)
-        btn_extract.pack(side="left", padx=5)
-        
-        btn_copy = ctk.CTkButton(btn_frame, text="📋 複製結果", command=self.copy_result, fg_color="#007bff", font=self.ui_font, height=40, width=100)
-        btn_copy.pack(side="left", padx=5)
+        self.parent_app = parent
+        self.setWindowTitle("文字處理工具")
+        self.resize(600, 650)
+
+        self.ui_font = QFont("Microsoft JhengHei", 14)
+        self.ui_font_bold = QFont("Microsoft JhengHei", 13, QFont.Weight.Bold)
+        self.mono_font = QFont("Consolas", 12)
+
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QGridLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        # ── Row 0: 正規表達式顯示 ──
+        top_frame = QFrame()
+        top_layout = QVBoxLayout(top_frame)
+        top_layout.setContentsMargins(5, 5, 5, 5)
+
+        header = QLabel("目前載入的正規表達式 (僅供檢視):")
+        header.setFont(self.ui_font_bold)
+        top_layout.addWidget(header)
+
+        self.info_text = QPlainTextEdit()
+        self.info_text.setFont(self.mono_font)
+        self.info_text.setReadOnly(True)
+        self.info_text.setFixedHeight(90)
+        self.info_text.setStyleSheet(
+            "QPlainTextEdit { background-color: #1e2b3c; color: #a0aab5; }"
+        )
+        top_layout.addWidget(self.info_text)
+        self._refresh_info_text()
+
+        layout.addWidget(top_frame, 0, 0, 1, 2)
+
+        # ── Row 1 Left: 輸入 ──
+        left_frame = QFrame()
+        left_layout = QVBoxLayout(left_frame)
+        left_layout.setContentsMargins(5, 5, 5, 5)
+
+        lbl_input = QLabel("原始文字 (每行獨立):")
+        lbl_input.setFont(self.ui_font)
+        left_layout.addWidget(lbl_input)
+
+        self.input_text = QPlainTextEdit()
+        self.input_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        left_layout.addWidget(self.input_text)
+
+        layout.addWidget(left_frame, 1, 0)
+
+        # ── Row 1 Right: 輸出 ──
+        right_frame = QFrame()
+        right_layout = QVBoxLayout(right_frame)
+        right_layout.setContentsMargins(5, 5, 5, 5)
+
+        right_top = QHBoxLayout()
+        lbl_output = QLabel("去重複後結果:")
+        lbl_output.setFont(self.ui_font)
+        right_top.addWidget(lbl_output)
+        right_top.addStretch()
+
+        self.count_label = QLabel("行數: 0")
+        self.count_label.setFont(self.ui_font)
+        self.count_label.setStyleSheet("color: #17a2b8;")
+        right_top.addWidget(self.count_label)
+        right_layout.addLayout(right_top)
+
+        self.output_text = QPlainTextEdit()
+        self.output_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.output_text.setStyleSheet(
+            "QPlainTextEdit { background-color: #2a3b4c; }"
+        )
+        right_layout.addWidget(self.output_text)
+
+        layout.addWidget(right_frame, 1, 1)
+
+        # ── Row 2: 狀態 ──
+        self.status_label = QLabel("")
+        self.status_label.setFont(self.ui_font)
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setStyleSheet("color: #e67e22;")
+        layout.addWidget(self.status_label, 2, 0, 1, 2)
+
+        # ── Row 3: 按鈕 ──
+        btn_layout = QHBoxLayout()
+        btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        btn_dedup = make_button(
+            "🚀 移除完全重複行", color="#28a745", hover="#218838",
+            font=self.ui_font, width=170,
+        )
+        btn_dedup.setFixedHeight(40)
+        btn_dedup.clicked.connect(self.dedup_lines)
+        btn_layout.addWidget(btn_dedup)
+
+        btn_extract = make_button(
+            "🔍 提取裝飾字元", color="#e67e22", hover="#d35400",
+            font=self.ui_font, width=170,
+        )
+        btn_extract.setFixedHeight(40)
+        btn_extract.clicked.connect(self.extract_symbols)
+        btn_layout.addWidget(btn_extract)
+
+        btn_copy = make_button(
+            "📋 複製結果", color="#007bff", hover="#0056b3",
+            font=self.ui_font, width=120,
+        )
+        btn_copy.setFixedHeight(40)
+        btn_copy.clicked.connect(self.copy_result)
+        btn_layout.addWidget(btn_copy)
+
+        btn_widget = QWidget()
+        btn_widget.setLayout(btn_layout)
+        layout.addWidget(btn_widget, 3, 0, 1, 2)
+
+        # Grid stretch
+        layout.setRowStretch(1, 1)
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 1)
+
+    def _refresh_info_text(self):
+        regex_content = (
+            f"【基本分段 Base Regex】\n{self.parent_app.current_base_regex}\n\n"
+            f"【無效符號 Invalid Regex】\n{self.parent_app.current_invalid_regex}\n\n"
+            f"【獨立符號 Symbol Regex】\n{self.parent_app.current_symbol_regex}"
+        )
+        self.info_text.setReadOnly(False)
+        self.info_text.setPlainText(regex_content)
+        self.info_text.setReadOnly(True)
 
     def dedup_lines(self):
-        input_content = self.input_text.get("1.0", tk.END).strip("\n")
+        input_content = self.input_text.toPlainText().strip("\n")
         if not input_content:
             return
-            
+
         lines = input_content.split("\n")
         seen = set()
         deduped_lines = []
-        
         for line in lines:
-            # keeping exact line string including spaces
             if line not in seen:
                 seen.add(line)
                 deduped_lines.append(line)
-                
-        result = "\n".join(deduped_lines)
-        self.output_text.delete("1.0", tk.END)
-        self.output_text.insert("1.0", result)
-        self.count_label.configure(text=f"行數: {len(deduped_lines)}")
-        self.status_label.configure(text=f"已成功移除重複行，共保留 {len(deduped_lines)} 行", text_color="#28a745")
-        
+
+        self.output_text.setPlainText("\n".join(deduped_lines))
+        self.count_label.setText(f"行數: {len(deduped_lines)}")
+        self.status_label.setText(f"已成功移除重複行，共保留 {len(deduped_lines)} 行")
+        self.status_label.setStyleSheet("color: #28a745;")
+
     def copy_result(self):
-        result = self.output_text.get("1.0", tk.END).strip("\n")
+        result = self.output_text.toPlainText().strip("\n")
         if result:
-            self.clipboard_clear()
-            self.clipboard_append(result)
-            self.status_label.configure(text="已複製到剪貼簿", text_color="#007bff")
+            QApplication.clipboard().setText(result)
+            self.status_label.setText("已複製到剪貼簿")
+            self.status_label.setStyleSheet("color: #007bff;")
 
     def extract_symbols(self):
-        input_content = self.input_text.get("1.0", tk.END).strip("\n")
+        input_content = self.input_text.toPlainText().strip("\n")
         if not input_content:
             return
-            
+
         lines = input_content.split("\n")
-        
-        # This regex removes numbers (0-9) and common separators/punctuation at the start or anywhere if typical of the format 001|
-        # Also strips leading/trailing spaces.
         cleaned_symbols = []
         for line in lines:
-            # specifically for the format "001|,.癶", remove digits and a pipe/comma/period if it acts as a separator
-            cleaned = re.sub(r'^\d+[\s|,\.]*', '', line)
-            cleaned = cleaned.strip()
+            cleaned = re.sub(r'^\d+[\s|,\.]*', '', line).strip()
             if cleaned:
                 cleaned_symbols.append(cleaned)
-                
+
         if not cleaned_symbols:
-            self.output_text.delete("1.0", tk.END)
-            self.output_text.insert("1.0", "未找到任何裝飾字元")
-            self.count_label.configure(text="行數: 0")
-            self.status_label.configure(text="沒有提取出有效的符號！", text_color="#dc3545")
+            self.output_text.setPlainText("未找到任何裝飾字元")
+            self.count_label.setText("行數: 0")
+            self.status_label.setText("沒有提取出有效的符號！")
+            self.status_label.setStyleSheet("color: #dc3545;")
             return
-            
-        result_text = "\n".join(cleaned_symbols)
-        self.output_text.delete("1.0", tk.END)
-        self.output_text.insert("1.0", result_text)
-        self.count_label.configure(text=f"行數: {len(cleaned_symbols)}")
-        
-        # Add to main application's invalid_regex
-        current_invalid = self.parent.current_invalid_regex
-        
-        # Collect unique characters from all extracted symbols
+
+        self.output_text.setPlainText("\n".join(cleaned_symbols))
+        self.count_label.setText(f"行數: {len(cleaned_symbols)}")
+
+        # 加入主程式的 invalid_regex
+        current_invalid = self.parent_app.current_invalid_regex
+
         unique_new_chars = set()
         for sym in cleaned_symbols:
             for char in sym:
                 unique_new_chars.add(char)
-        
+
         added_count = 0
         added_items = []
-        
+
         first_bracket = current_invalid.find('[')
         last_bracket = current_invalid.rfind(']')
-        
+
         if first_bracket != -1 and last_bracket != -1 and first_bracket < last_bracket:
-            prefix = current_invalid[:first_bracket+1]
-            existing_chars = current_invalid[first_bracket+1:last_bracket]
+            prefix = current_invalid[:first_bracket + 1]
+            existing_chars = current_invalid[first_bracket + 1:last_bracket]
             suffix = current_invalid[last_bracket:]
-            
+
             for char in unique_new_chars:
-                # If char requires escaping in bracket, you could re.escape it, but usually standard chars are fine.
-                # However, checking existence literally works, unless it's a structural bracket character.
-                # Specifically checking ] or \ could be tricky, but those shouldn't be extracted normally.
                 if char not in existing_chars:
                     added_items.append(char)
-                    
+
             if added_items:
                 added_str = "".join(added_items)
                 if existing_chars.endswith('-'):
                     existing_chars = existing_chars[:-1] + added_str + "-"
                 else:
                     existing_chars += added_str
-                
                 current_invalid = prefix + existing_chars + suffix
                 added_count = len(added_items)
         else:
-            # Fallback for unexpected regex format
             for sym in cleaned_symbols:
                 parts = current_invalid.split('|')
                 if sym not in parts and re.escape(sym) not in parts:
@@ -176,11 +230,13 @@ class AADedupTool(ctk.CTkToplevel):
                     current_invalid = "|".join(parts)
                     added_count += 1
                     added_items.append(sym)
-                
+
         if added_count > 0:
-            self.parent.current_invalid_regex = current_invalid
-            self.parent.save_regex_to_settings()  # 寫回 AA_Settings.json
-            self.update_info_text()  # Refresh the UI regex display
-            self.status_label.configure(text=f"成功加入了 {added_count} 個新裝飾字元到過濾名單中！", text_color="#28a745")
+            self.parent_app.current_invalid_regex = current_invalid
+            self.parent_app.save_regex_to_settings()
+            self._refresh_info_text()
+            self.status_label.setText(f"成功加入了 {added_count} 個新裝飾字元到過濾名單中！")
+            self.status_label.setStyleSheet("color: #28a745;")
         else:
-            self.status_label.configure(text="提取的裝飾字元都已經存在於過濾名單中了。", text_color="#17a2b8")
+            self.status_label.setText("提取的裝飾字元都已經存在於過濾名單中了。")
+            self.status_label.setStyleSheet("color: #17a2b8;")

@@ -234,18 +234,66 @@ def validate_ai_text(ai_content: str) -> list[str]:
     return warnings
 
 
+_KANJI_DIGITS = {
+    '〇': 0, '零': 0, '一': 1, '二': 2, '三': 3, '四': 4,
+    '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10,
+    '百': 100, '千': 1000,
+}
+
+
+def _kanji_to_int(text: str) -> int | None:
+    """將漢數字字串轉為整數。支援「八」「十二」「百二十三」等格式。"""
+    if not text:
+        return None
+    # 先嘗試直接轉阿拉伯數字
+    if text.isdigit():
+        return int(text)
+
+    result = 0
+    current = 0
+    for ch in text:
+        val = _KANJI_DIGITS.get(ch)
+        if val is None:
+            return None
+        if val >= 10:
+            # 十百千 — 乘算單位
+            if current == 0:
+                current = 1
+            result += current * val
+            current = 0
+        else:
+            current = val
+    result += current
+    return result if result > 0 or text == '〇' or text == '零' else None
+
+
 def check_chapter_number(text_first_lines: str) -> str | None:
     """掃描文字的前幾行，尋找「第N話」或「番外編N」格式。
+
+    支援阿拉伯數字與漢數字（例如「第八話」「第十二話」「第百二十三話」）。
 
     Returns:
         章節號碼字串或 None。
     """
+    # 阿拉伯數字優先
     match = re.search(r'第\s*(\d+)\s*話', text_first_lines)
-    if not match:
-        match = re.search(r'番外編\s*(\d+)', text_first_lines)
     if match:
-        try:
-            return str(int(match.group(1)))
-        except ValueError:
-            pass
+        return str(int(match.group(1)))
+
+    # 漢數字
+    match = re.search(r'第\s*([〇零一二三四五六七八九十百千]+)\s*話', text_first_lines)
+    if match:
+        num = _kanji_to_int(match.group(1))
+        if num is not None:
+            return str(num)
+
+    # 番外編
+    match = re.search(r'番外編\s*(\d+)', text_first_lines)
+    if not match:
+        match = re.search(r'番外編\s*([〇零一二三四五六七八九十百千]+)', text_first_lines)
+    if match:
+        num = _kanji_to_int(match.group(1))
+        if num is not None:
+            return str(num)
+
     return None

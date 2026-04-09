@@ -6,6 +6,9 @@ import re
 import math
 import os
 import html
+import subprocess
+import sys
+import tempfile
 import threading
 
 from aa_tool.constants import (
@@ -103,6 +106,8 @@ class AATranslationTool(ctk.CTk):
         self.btn_mode_translate.pack(side="left", padx=2)
         self.btn_mode_batch = ctk.CTkButton(mode_frame, text="批次搜尋", width=80, height=28, font=self.ui_small_font, fg_color="#555555", hover_color="#444444", command=lambda: self.switch_mode("batch"))
         self.btn_mode_batch.pack(side="left", padx=2)
+        self.btn_batch_qt = ctk.CTkButton(mode_frame, text="批次搜尋(Qt)", width=95, height=28, font=self.ui_small_font, fg_color="#6f42c1", hover_color="#5a3299", command=self.open_batch_search_qt)
+        self.btn_batch_qt.pack(side="left", padx=2)
 
         self.experimental_edit_tab = ctk.CTkSwitch(mode_frame, text="實驗:內嵌編輯", font=self.ui_small_font, width=40)
         self.experimental_edit_tab.pack(side="left", padx=8)
@@ -402,6 +407,53 @@ class AATranslationTool(ctk.CTk):
         folder = filedialog.askdirectory(title="選取 HTML 檔案所在的資料夾")
         if folder:
             self.batch_folder_var.set(folder)
+
+    # ── PyQt6 批次搜尋（獨立 process） ──
+
+    def open_batch_search_qt(self):
+        """啟動獨立的 PyQt6 批次搜尋視窗，並開始 IPC 輪詢。"""
+        cmd_file = os.path.join(tempfile.gettempdir(), "aa_batch_cmd.json")
+        # 確保舊命令檔不存在
+        if os.path.exists(cmd_file):
+            os.remove(cmd_file)
+
+        folder = self.batch_folder_var.get().strip()
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aa_batch_search_qt.py")
+
+        args = [sys.executable, script, "--cmd-file", cmd_file]
+        if folder and os.path.isdir(folder):
+            args.extend(["--folder", folder])
+
+        self._batch_qt_process = subprocess.Popen(args)
+        self._batch_cmd_file = cmd_file
+        self._poll_batch_commands()
+
+    def _poll_batch_commands(self):
+        """每 500ms 檢查 IPC 命令檔，收到開啟命令則開啟 result modal。"""
+        # 若 subprocess 已結束，停止輪詢
+        if hasattr(self, '_batch_qt_process') and self._batch_qt_process.poll() is not None:
+            self._batch_qt_process = None
+            return
+
+        cmd_file = getattr(self, '_batch_cmd_file', '')
+        if cmd_file and os.path.exists(cmd_file):
+            try:
+                with open(cmd_file, 'r', encoding='utf-8') as f:
+                    cmd = json.load(f)
+                os.remove(cmd_file)
+
+                if cmd.get('action') == 'open':
+                    file_path = cmd.get('file_path', '')
+                    line = cmd.get('line')
+                    text = self.read_html_pre_content(file_path)
+                    if text:
+                        self.show_result_modal(text, source_file=file_path, scroll_to_line=line)
+                    else:
+                        self.show_toast("❌ 無法讀取檔案！", color="#dc3545")
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        self.after(500, self._poll_batch_commands)
 
     def read_html_pre_content(self, file_path):
         return read_html_pre_content(file_path)

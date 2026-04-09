@@ -1,11 +1,16 @@
-"""網頁抓取與 HTML 解析 — 純 I/O 與純邏輯，不依賴任何 UI 框架。"""
+"""網頁抓取與 HTML 解析 — 純 I/O 與純邏輯，不依賴任何 UI 框架。
+
+支援的網域：
+  - 預設格式（article div + relate_dl）
+  - himanatokiniyaruo.com（dt[id] / dd 結構 + related-entries）
+"""
 from __future__ import annotations
 
 import gzip
 import html
 import re
 import urllib.request
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 # ════════════════════════════════════════════════════════════════
 #  HTTP 請求
@@ -41,39 +46,17 @@ def fetch_url(url: str, *, timeout: int = 20) -> str:
 
 
 # ════════════════════════════════════════════════════════════════
-#  HTML 解析
+#  共用輔助
 # ════════════════════════════════════════════════════════════════
 
-def parse_page_html(
-    page_html: str,
-    base_url: str,
-) -> tuple[str | None, list[dict], str]:
-    """解析頁面 HTML，回傳 (文本內容, 關聯連結列表, 頁面標題)。
+def _extract_dt_dd_posts(container_html: str) -> list[str]:
+    """從含有 <dt>/<dd> 的 HTML 片段提取貼文列表。
 
-    - 文本內容：從 ``<div class="article">`` 區塊提取的純文字。
-      找不到時回傳 ``(None, [], "")``.
-    - 關聯連結：``[{'title': ..., 'url': ... or None, 'is_current': bool}, ...]``
-    - 頁面標題：清理後的 ``<title>`` 內容。
+    回傳格式：['dt文字\n內文行1\n內文行2', ...]
     """
-    m = re.search(r'<div\s+class="article">', page_html)
-    if not m:
-        return None, [], ""
-
-    start = m.start()
-    # 結束邊界：relate_dl（關聯記事）或第二個 div.article，取較前者
-    m_relate = re.search(r'<dl\s+class="relate_dl">', page_html[start + 1:])
-    m2 = re.search(r'<div\s+class="article">', page_html[start + 1:])
-    candidates = []
-    if m_relate:
-        candidates.append(start + 1 + m_relate.start())
-    if m2:
-        candidates.append(start + 1 + m2.start())
-    end = min(candidates) if candidates else len(page_html)
-    article_html = page_html[start:end]
-
     posts = re.finditer(
-        r'<dt(?:\s[^>]*)?>(.+?)</dt>\s*<dd(?:\s[^>]*)?>(.*?)(?=<dt|</dl>)',
-        article_html, re.DOTALL,
+        r'<dt(?:\s[^>]*)?>(.+?)</dt>\s*<dd(?:\s[^>]*)?>(.*?)(?=<dt|</dl>|$)',
+        container_html, re.DOTALL,
     )
 
     lines_out: list[str] = []
@@ -94,6 +77,31 @@ def parse_page_html(
         if dd_lines:
             lines_out.append(dt_text + '\n' + '\n'.join(dd_lines))
 
+    return lines_out
+
+
+# ════════════════════════════════════════════════════════════════
+#  解析器：預設格式
+# ════════════════════════════════════════════════════════════════
+
+def _parse_default(page_html: str, base_url: str) -> tuple[str | None, list[dict], str]:
+    """解析預設格式：<div class="article"> + <dl class="relate_dl">。"""
+    m = re.search(r'<div\s+class="article">', page_html)
+    if not m:
+        return None, [], ""
+
+    start = m.start()
+    m_relate = re.search(r'<dl\s+class="relate_dl">', page_html[start + 1:])
+    m2 = re.search(r'<div\s+class="article">', page_html[start + 1:])
+    candidates = []
+    if m_relate:
+        candidates.append(start + 1 + m_relate.start())
+    if m2:
+        candidates.append(start + 1 + m2.start())
+    end = min(candidates) if candidates else len(page_html)
+    article_html = page_html[start:end]
+
+    lines_out = _extract_dt_dd_posts(article_html)
     text_content = '\n\n'.join(lines_out)
 
     # 頁面標題
@@ -123,4 +131,103 @@ def parse_page_html(
                 nav_links.append({'title': title, 'url': None, 'is_current': True})
         nav_links.reverse()
 
+    return text_content or None, nav_links, page_title
+
+
+# ════════════════════════════════════════════════════════════════
+#  解析器：himanatokiniyaruo.com
+# ════════════════════════════════════════════════════════════════
+
+def _parse_himanatokiniyaruo(page_html: str, base_url: str) -> tuple[str | None, list[dict], str]:
+    """解析 himanatokiniyaruo.com 格式。
+
+    內文：<dt id="N"> ... </dt><dd> ... </dd> 結構
+    標題：<h2><a class="kjax" ...>TITLE</a></h2>
+    關聯：<div class="related-entries"> ... </div>
+    """
+    # ── 標題 ──
+    title_m = re.search(
+        r'<h2[^>]*>\s*<a[^>]+class="kjax"[^>]*>([^<]+)</a>\s*</h2>',
+        page_html,
+    )
+    if title_m:
+        page_title = html.unescape(title_m.group(1)).strip()
+    else:
+        # fallback: <title> タグ
+        t_m = re.search(r'<title>([^<]+)</title>', page_html)
+        page_title = html.unescape(t_m.group(1)).strip() if t_m else ""
+
+    # ── 內文：找第一個 <dt id="數字"> 的所在區段 ──
+    first_dt = re.search(r'<dt\s+id="\d+"', page_html)
+    if not first_dt:
+        return None, [], page_title
+
+    # 往前找最近的開標籤容器（最多往前 2000 字元）
+    search_start = max(0, first_dt.start() - 2000)
+    prefix = page_html[search_start:first_dt.start()]
+
+    # 找內文區塊結束點：related div 或 related-entries
+    end_m = re.search(
+        r'<div\s+class="related[^"]*"',
+        page_html[first_dt.start():],
+    )
+    content_end = first_dt.start() + end_m.start() if end_m else len(page_html)
+    content_html = page_html[first_dt.start():content_end]
+
+    lines_out = _extract_dt_dd_posts(content_html)
+    text_content = '\n\n'.join(lines_out) if lines_out else None
+
+    # ── 關聯連結 ──
+    nav_links: list[dict] = []
+    related_m = re.search(
+        r'<div\s+class="related-entries">(.*?)</div>',
+        page_html, re.DOTALL,
+    )
+    if related_m:
+        related_html = related_m.group(1)
+        for a_m in re.finditer(
+            r'<a\s+href="([^"]+)"[^>]*>(.*?)</a>',
+            related_html, re.DOTALL,
+        ):
+            href = urljoin(base_url, a_m.group(1))
+            title = html.unescape(re.sub(r'<[^>]+>', '', a_m.group(2))).strip()
+            if not title:
+                continue
+            is_current = href.rstrip('/') == base_url.rstrip('/')
+            nav_links.append({'title': title, 'url': href, 'is_current': is_current})
+
     return text_content, nav_links, page_title
+
+
+# ════════════════════════════════════════════════════════════════
+#  公開入口
+# ════════════════════════════════════════════════════════════════
+
+# 網域 → 解析函式的對應表
+_DOMAIN_PARSERS: dict[str, callable] = {
+    'himanatokiniyaruo.com': _parse_himanatokiniyaruo,
+}
+
+
+def parse_page_html(
+    page_html: str,
+    base_url: str,
+) -> tuple[str | None, list[dict], str]:
+    """解析頁面 HTML，回傳 (文本內容, 關聯連結列表, 頁面標題)。
+
+    依據 base_url 的網域自動選擇對應的解析器；
+    若無匹配則使用預設解析器。
+
+    - 文本內容：提取的純文字，找不到時為 ``None``
+    - 關聯連結：``[{'title': ..., 'url': ... or None, 'is_current': bool}, ...]``
+    - 頁面標題：清理後的標題字串
+    """
+    domain = urlparse(base_url).netloc.lower()
+    # 移除 www. 前綴後再匹配
+    domain = re.sub(r'^www\.', '', domain)
+
+    for key, parser in _DOMAIN_PARSERS.items():
+        if key in domain:
+            return parser(page_html, base_url)
+
+    return _parse_default(page_html, base_url)

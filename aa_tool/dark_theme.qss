@@ -1,0 +1,166 @@
+/* AA 漫畫翻譯輔助工具 — PyQt6 暗色主題 */
+
+/* ── 全域 ── */
+QWidget {
+    background-color: #2b2b2b;
+    color: #dce4ee;
+    font-family: "Microsoft JhengHei";
+}
+
+QMainWindow {
+    background-color: #2b2b2b;
+}
+
+/* ── 文字輸入 ── */
+QPlainTextEdit, QTextEdit {
+    background-color: #343638;
+    color: #dce4ee;
+    border: 1px solid #555555;
+    border-radius: 4px;
+    selection-background-color: #1f6aa5;
+    selection-color: #ffffff;
+}
+
+QPlainTextEdit:read-only {
+    background-color: #1e2b3c;
+    color: #a0aab5;
+}
+
+QLineEdit {
+    background-color: #343638;
+    color: #dce4ee;
+    border: 1px solid #555555;
+    border-radius: 4px;
+    padding: 4px 6px;
+    selection-background-color: #1f6aa5;
+}
+
+/* ── 標籤 ── */
+QLabel {
+    background-color: transparent;
+    border: none;
+}
+
+/* ── 按鈕（預設） ── */
+QPushButton {
+    background-color: #3a7ebf;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 5px 12px;
+}
+
+QPushButton:hover {
+    background-color: #325882;
+}
+
+QPushButton:pressed {
+    background-color: #2a4a6e;
+}
+
+QPushButton:disabled {
+    background-color: #555555;
+    color: #888888;
+}
+
+/* ── 核取方塊 / 開關 ── */
+QCheckBox {
+    spacing: 6px;
+    color: #dce4ee;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #555555;
+    border-radius: 3px;
+    background-color: #343638;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #1f6aa5;
+    border-color: #1f6aa5;
+}
+
+/* ── 框架 ── */
+QFrame {
+    border: none;
+}
+
+/* ── 捲軸 ── */
+QScrollBar:vertical {
+    background: #2b2b2b;
+    width: 10px;
+    margin: 0;
+}
+
+QScrollBar::handle:vertical {
+    background: #555555;
+    min-height: 30px;
+    border-radius: 5px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #777777;
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical,
+QScrollBar::add-page:vertical,
+QScrollBar::sub-page:vertical {
+    background: none;
+    height: 0;
+}
+
+QScrollBar:horizontal {
+    background: #2b2b2b;
+    height: 10px;
+    margin: 0;
+}
+
+QScrollBar::handle:horizontal {
+    background: #555555;
+    min-width: 30px;
+    border-radius: 5px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background: #777777;
+}
+
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal,
+QScrollBar::add-page:horizontal,
+QScrollBar::sub-page:horizontal {
+    background: none;
+    width: 0;
+}
+
+/* ── 滾動區域 ── */
+QScrollArea {
+    border: none;
+}
+
+/* ── 分割器 ── */
+QSplitter::handle {
+    background-color: #555555;
+    width: 2px;
+    height: 2px;
+}
+
+QSplitter::handle:hover {
+    background-color: #1f6aa5;
+}
+
+/* ── 工具列區域 ── */
+QWidget[objectName="toolbar"] {
+    background-color: #343a40;
+}
+
+/* ── 工具提示 ── */
+QToolTip {
+    background-color: #343a40;
+    color: #dce4ee;
+    border: 1px solid #555555;
+    padding: 4px;
+}

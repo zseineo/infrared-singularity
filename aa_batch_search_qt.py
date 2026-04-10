@@ -47,12 +47,14 @@ class BatchSearchWindow(QMainWindow):
     _sig_progress = pyqtSignal(str)
     _sig_done = pyqtSignal(list, int)
 
-    def __init__(self, *, folder: str = "", cmd_file: str = ""):
+    def __init__(self, *, folder: str = "", cmd_file: str = "",
+                 reverse_cmd_file: str = ""):
         super().__init__()
         self.setWindowTitle("AA 批次搜尋")
         self.resize(1000, 700)
 
         self._cmd_file = cmd_file
+        self._reverse_cmd_file = reverse_cmd_file
 
         # 連接信號
         self._sig_progress.connect(self._on_progress)
@@ -71,6 +73,12 @@ class BatchSearchWindow(QMainWindow):
 
         if folder:
             self.folder_entry.setText(folder)
+
+        # 輪詢反向命令檔（主程式 → 批次搜尋）
+        if self._reverse_cmd_file:
+            self._reverse_timer = QTimer(self)
+            self._reverse_timer.timeout.connect(self._poll_reverse_commands)
+            self._reverse_timer.start(500)
 
     # ────────────────────────────────────────────────────────
     #  UI 建構
@@ -151,7 +159,7 @@ class BatchSearchWindow(QMainWindow):
 
         lbl_h_op = QLabel("操作")
         lbl_h_op.setFont(self.ui_small_font)
-        lbl_h_op.setFixedWidth(100)
+        lbl_h_op.setFixedWidth(140)
         header.addWidget(lbl_h_op)
 
         lbl_h_ctx = QLabel("搜尋結果")
@@ -330,6 +338,12 @@ class BatchSearchWindow(QMainWindow):
         lbl_name.setStyleSheet("color: #6f42c1;")
         row_layout.addWidget(lbl_name)
 
+        btn_dismiss = make_button("✕", color="#6c757d", hover="#5a6268",
+                                   font=self.ui_small_font, width=30)
+        btn_dismiss.setFixedHeight(26)
+        btn_dismiss.clicked.connect(lambda checked=False, m=mi: self._dismiss_match(m))
+        row_layout.addWidget(btn_dismiss)
+
         btn_replace = make_button("替換", color="#dc3545", hover="#c82333",
                                   font=self.ui_small_font, width=55)
         btn_replace.setFixedHeight(26)
@@ -412,8 +426,91 @@ class BatchSearchWindow(QMainWindow):
     #  開啟（IPC 命令）
     # ────────────────────────────────────────────────────────
 
+    # ────────────────────────────────────────────────────────
+    #  關閉時同步資料夾
+    # ────────────────────────────────────────────────────────
+
+    def closeEvent(self, event):
+        """關閉視窗時，透過 IPC 將當前資料夾同步回主程式。"""
+        if self._cmd_file:
+            folder = self.folder_entry.text().strip()
+            if folder:
+                cmd = {"action": "sync_folder", "folder": folder}
+                try:
+                    with open(self._cmd_file, 'w', encoding='utf-8') as f:
+                        json.dump(cmd, f, ensure_ascii=False)
+                except OSError:
+                    pass
+        event.accept()
+
+    # ────────────────────────────────────────────────────────
+    #  排除（不替換此筆）
+    # ────────────────────────────────────────────────────────
+
+    def _dismiss_match(self, mi: dict):
+        """將此筆結果從替換範圍中移除，並在 UI 標示為已排除。"""
+        self.batch_matches = [m for m in self.batch_matches if m is not mi]
+        row = mi.get('_row')
+        if row:
+            row_layout = row.layout()
+            while row_layout.count():
+                item = row_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+
+            lbl_name = QLabel(mi['short_name'])
+            lbl_name.setFont(self.ui_small_font)
+            lbl_name.setFixedWidth(120)
+            lbl_name.setStyleSheet("color: #6c757d;")
+            row_layout.addWidget(lbl_name)
+
+            lbl_status = QLabel("已排除")
+            lbl_status.setFont(self.ui_small_font)
+            lbl_status.setStyleSheet("color: #6c757d;")
+            row_layout.addWidget(lbl_status)
+
+            btn_restore = make_button("恢復", color="#17a2b8", hover="#138496",
+                                      font=self.ui_small_font, width=55)
+            btn_restore.setFixedHeight(26)
+            btn_restore.clicked.connect(lambda checked=False, m=mi: self._restore_dismissed(m))
+            row_layout.addWidget(btn_restore)
+
+            lbl_ctx = QLabel(f"{mi['ctx_before']}{mi['matched_text']}{mi['ctx_after']}")
+            lbl_ctx.setFont(self.ui_small_font)
+            lbl_ctx.setStyleSheet("color: #6c757d;")
+            row_layout.addWidget(lbl_ctx)
+
+            row_layout.addStretch()
+
+    def _restore_dismissed(self, mi: dict):
+        """恢復已排除的結果。"""
+        self.batch_matches.append(mi)
+        row = mi.get('_row')
+        if row:
+            self._rebuild_row_as_active(row, mi)
+
+    # ────────────────────────────────────────────────────────
+    #  反向 IPC（主程式 → 批次搜尋）
+    # ────────────────────────────────────────────────────────
+
+    def _poll_reverse_commands(self):
+        """輪詢反向命令檔，處理主程式傳來的指令。"""
+        if not self._reverse_cmd_file or not os.path.exists(self._reverse_cmd_file):
+            return
+        try:
+            with open(self._reverse_cmd_file, 'r', encoding='utf-8') as f:
+                cmd = json.load(f)
+            os.remove(self._reverse_cmd_file)
+
+            if cmd.get('action') == 'restore':
+                self.showNormal()
+                self.activateWindow()
+                self.raise_()
+        except (json.JSONDecodeError, OSError):
+            pass
+
     def _open_file(self, mi: dict):
-        """寫入 IPC 命令檔，通知主程式開啟檔案並跳到該行。"""
+        """寫入 IPC 命令檔，通知主程式開啟檔案並跳到該行，然後縮小自己。"""
         if not self._cmd_file:
             self._toast("未指定命令檔路徑，無法開啟", color="#dc3545")
             return
@@ -423,11 +520,12 @@ class BatchSearchWindow(QMainWindow):
             "file_path": mi['file_path'],
             "line": mi['line_idx'] + 1,
             "raise": True,
+            "folder": self.folder_entry.text().strip(),
         }
         try:
             with open(self._cmd_file, 'w', encoding='utf-8') as f:
                 json.dump(cmd, f, ensure_ascii=False)
-            self._toast("已傳送開啟指令")
+            self.showMinimized()
         except Exception as e:
             self._toast(f"寫入命令檔失敗: {e}", color="#dc3545")
 
@@ -607,12 +705,14 @@ def main():
     parser = argparse.ArgumentParser(description="AA 批次搜尋（PyQt6）")
     parser.add_argument("--folder", default="", help="預設資料夾路徑")
     parser.add_argument("--cmd-file", default="", help="IPC 命令檔路徑")
+    parser.add_argument("--reverse-cmd-file", default="", help="反向 IPC 命令檔路徑")
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
     app.setStyleSheet(_load_qss())
 
-    win = BatchSearchWindow(folder=args.folder, cmd_file=args.cmd_file)
+    win = BatchSearchWindow(folder=args.folder, cmd_file=args.cmd_file,
+                            reverse_cmd_file=args.reverse_cmd_file)
     win.show()
 
     sys.exit(app.exec())

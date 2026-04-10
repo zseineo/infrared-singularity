@@ -57,6 +57,9 @@ def show_result_modal(
         app.save_cache()
         app.title("AA 漫畫翻譯輔助工具")
         app.switch_mode(app._previous_mode)
+        # 若批次搜尋視窗在背景，恢復顯示
+        if hasattr(app, '_restore_batch_qt_window'):
+            app._restore_batch_qt_window()
 
     # ── Toast 輔助 ──
     def show_toast(message, color="#28a745", duration=3000):

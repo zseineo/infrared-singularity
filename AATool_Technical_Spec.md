@@ -26,10 +26,11 @@
 *   **Step 5**: 進入全螢幕或內嵌預覽視窗，在最終文本上進行微調（自動對話框、選區上色、對齊等），完成後點擊儲存匯出為 `.html`。
 
 ## 3. 主要模式 (Application Modes)
-`switch_mode(mode_name)` 切換三種模式，對應 `_current_mode` 屬性：
+`switch_mode(mode_name)` 切換兩種模式，對應 `_current_mode` 屬性：
 *   **`"translate"`** (翻譯模式，預設)：主面板 `main_frame` + 底部執行列 `gen_bar`
-*   **`"batch"`** (批次搜尋)：`batch_frame`，跨資料夾 HTML 搜尋與取代
-*   **`"edit"`** (內嵌編輯，實驗性)：由 `experimental_edit_tab` 開關啟用，將 `show_result_modal()` 的預覽區嵌入主視窗 `edit_frame` 而非開新視窗
+*   **`"edit"`** (內嵌編輯)：`show_result_modal()` 的預覽區嵌入主視窗 `edit_frame`（始終使用此模式，無跳出式視窗）
+
+批次搜尋功能由獨立的 PyQt6 視窗 (`aa_batch_search_qt.py`) 提供，以 subprocess 方式啟動，透過 JSON 命令檔（IPC）與主程式雙向溝通。
 
 ## 4. 核心模組與對應 Function 解析 (Core Functions)
 未來若要修改特定功能，請參考此清單尋找對應的 Python function。主程式類別為 `AATranslationTool(ctk.CTk)`。
@@ -72,7 +73,7 @@
 *   **對應 Function**: `def show_result_modal(self, text, source_file="", scroll_to_line=None):`
 *   `source_file` 參數：由批次模式開啟時傳入，儲存時直接覆寫原檔。
 *   `scroll_to_line` 參數：開啟後自動捲動並選取指定行（用於批次搜尋跳轉）。
-*   **顯示方式**: 一般狀況開全螢幕 Toplevel (`modal.state("zoomed")`)；若 `experimental_edit_tab` 開啟則嵌入 `edit_frame` 不開新視窗。
+*   **顯示方式**: 始終嵌入 `edit_frame`（內嵌編輯模式），不開獨立視窗。從編輯模式返回時，若有批次搜尋視窗在背景，會自動恢復顯示。
 *   預覽視窗上方有 Toolbar，操作以 Nested function 定義，分三群組：
 
     **群組 1 — 全文替換:**
@@ -113,12 +114,17 @@
 *   **章節號碼自動偵測 (`check_chapter_number()`)**: 貼上或讀取文字後，掃描前五行尋找 `第N話` 或 `番外編N` 格式，自動填入話數欄位。
 *   **複製網址 (`copy_current_url()`)**: 複製目前讀取的網址至剪貼簿。
 
-### 4.6 批次搜尋模式 (Batch Mode)
-*   **設定 UI**: `setup_batch_ui()` — 建立批次模式 UI（預設隱藏）
-*   **批次搜尋 (`batch_search()`)**: 在指定資料夾所有 HTML 的 `<pre>` 內容中搜尋，支援字串或正則，最多回傳 500 筆結果。**使用背景執行緒搜尋，主執行緒分批渲染**結果列表以避免 UI 凍結。
-*   **單筆替換 (`replace_single_match()`)**: 替換特定搜尋結果，直接寫回 HTML 檔案，並更新 UI 列表顯示替換後內容。
-*   **全部替換 (`batch_replace_all()`)**: 依檔案分組，由行尾至行首逐筆替換，避免位置偏移，寫回所有涉及的 HTML 檔案。
-*   **開啟並跳轉 (`open_file_at_match()`)**: 從批次結果列表直接開啟對應 HTML 並跳至結果所在行 (`show_result_modal(scroll_to_line=...)`)。
+### 4.6 批次搜尋（獨立 PyQt6 視窗）
+*   **檔案**: `aa_batch_search_qt.py` — `BatchSearchWindow(QMainWindow)`
+*   **啟動方式**: 主程式透過 `open_batch_search_qt()` 以 subprocess 啟動，傳入 `--cmd-file`（Qt→主程式）、`--reverse-cmd-file`（主程式→Qt）、`--folder` 參數。
+*   **IPC 雙向通訊**:
+    *   Qt→主程式（`cmd_file`）：`open`（開啟檔案並跳行）、`sync_folder`（同步資料夾路徑）
+    *   主程式→Qt（`reverse_cmd_file`）：`restore`（恢復視窗顯示）
+*   **搜尋**: 在指定資料夾所有 HTML 的 `<pre>` 內容中搜尋，支援字串或正則，最多 500 筆結果。背景執行緒搜尋 + 分批渲染。
+*   **單筆替換 / 全部替換 / 復原**: 與舊版邏輯相同，另支援檔案層級的復原（`_undo_backups`）。
+*   **排除功能（✕ 按鈕）**: 可將特定搜尋結果從替換範圍中移除（不會被「全部替換」影響），並可隨時恢復。
+*   **開啟並跳轉**: 點擊「開啟」後，Qt 視窗自動縮小，主程式開啟檔案進入編輯模式；從編輯模式返回時，Qt 視窗自動恢復顯示。
+*   **資料夾同步**: Qt 視窗中選擇的資料夾會在開啟檔案與關閉視窗時同步回主程式，並持久化至暫存。
 
 ### 4.7 狀態讀寫裝載管理
 *   **讀取/儲存暫存**:
@@ -149,7 +155,7 @@
 *   `self.doc_title`: 標題輸入欄（用於 HTML 檔名）
 *   `self.doc_num`: 話數輸入欄（支援 +/- 按鈕；貼上/讀取時自動偵測）
 *   `self.auto_copy_switch`: 提取後自動複製開關
-*   `self.experimental_edit_tab`: 內嵌編輯模式開關（實驗性）
+*   `self.batch_folder_var`: 批次搜尋資料夾路徑（透過 IPC 與 Qt 批次搜尋視窗同步）
 *   `self.bg_color` / `self.fg_color`: 預覽視窗背景/文字色（持久化至暫存）
 *   `self.preview_text_cache`: 預覽視窗關閉前的文字暫存（關閉時寫入 `save_cache()`，下次開啟可選擇恢復）
 *   `self.url_history`: URL 讀取歷史（最多 50 筆）

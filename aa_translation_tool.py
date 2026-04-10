@@ -373,19 +373,23 @@ class AATranslationTool(ctk.CTk):
     def open_batch_search_qt(self):
         """啟動獨立的 PyQt6 批次搜尋視窗，並開始 IPC 輪詢。"""
         cmd_file = os.path.join(tempfile.gettempdir(), "aa_batch_cmd.json")
+        reverse_cmd_file = os.path.join(tempfile.gettempdir(), "aa_batch_reverse_cmd.json")
         # 確保舊命令檔不存在
-        if os.path.exists(cmd_file):
-            os.remove(cmd_file)
+        for f in (cmd_file, reverse_cmd_file):
+            if os.path.exists(f):
+                os.remove(f)
 
         folder = self.batch_folder_var.get().strip()
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aa_batch_search_qt.py")
 
-        args = [sys.executable, script, "--cmd-file", cmd_file]
+        args = [sys.executable, script, "--cmd-file", cmd_file,
+                "--reverse-cmd-file", reverse_cmd_file]
         if folder and os.path.isdir(folder):
             args.extend(["--folder", folder])
 
         self._batch_qt_process = subprocess.Popen(args)
         self._batch_cmd_file = cmd_file
+        self._batch_reverse_cmd_file = reverse_cmd_file
         self._poll_batch_commands()
 
     def _poll_batch_commands(self):
@@ -401,6 +405,11 @@ class AATranslationTool(ctk.CTk):
                 with open(cmd_file, 'r', encoding='utf-8') as f:
                     cmd = json.load(f)
                 os.remove(cmd_file)
+
+                # 同步資料夾（開啟或關閉時都可能帶 folder）
+                folder = cmd.get('folder', '')
+                if folder:
+                    self.batch_folder_var.set(folder)
 
                 if cmd.get('action') == 'open':
                     file_path = cmd.get('file_path', '')
@@ -419,6 +428,16 @@ class AATranslationTool(ctk.CTk):
                 pass
 
         self.after(500, self._poll_batch_commands)
+
+    def _restore_batch_qt_window(self):
+        """通知 PyQt6 批次搜尋視窗恢復顯示。"""
+        reverse_file = getattr(self, '_batch_reverse_cmd_file', '')
+        if reverse_file and hasattr(self, '_batch_qt_process') and self._batch_qt_process and self._batch_qt_process.poll() is None:
+            try:
+                with open(reverse_file, 'w', encoding='utf-8') as f:
+                    json.dump({"action": "restore"}, f, ensure_ascii=False)
+            except OSError:
+                pass
 
     def read_html_pre_content(self, file_path):
         return read_html_pre_content(file_path)

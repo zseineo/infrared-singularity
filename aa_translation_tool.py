@@ -23,6 +23,7 @@ from aa_tool.text_extraction import (
     analyze_extraction as _analyze_extraction,
     validate_ai_text as _validate_ai_text,
     check_chapter_number as _check_chapter_number,
+    extract_work_title as _extract_work_title,
 )
 from aa_tool.translation_engine import (
     parse_glossary,
@@ -53,15 +54,46 @@ class AATranslationTool(ctk.CTk):
         self.preview_text_cache = ""
 
         self.settings_mgr = SettingsManager(os.path.dirname(os.path.abspath(__file__)))
-        
+
+        # 記錄上次儲存至 AA_Settings.json 時的行數（用於關閉時比對）
+        self._saved_glossary_lines = 0
+        self._saved_glossary_temp_lines = 0
+        self._saved_filter_lines = 0
+
         self.setup_ui()
         self.load_cache()  # 啟動時先讀取暫存檔 (保底)
         self.load_settings_at_startup()  # 從 AA_Settings.json 讀取設定檔並覆蓋 (優先)
-        
+
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
-        
+
+    @staticmethod
+    def _count_nonempty_lines(text: str) -> int:
+        return sum(1 for line in text.strip().splitlines() if line.strip())
+
     def on_closing(self):
         self.save_cache()
+        # 比對目前 UI 內容的行數與上次儲存至設定檔的行數
+        cur_glossary_lines = self._count_nonempty_lines(self.glossary_text.get("1.0", tk.END))
+        cur_glossary_temp_lines = self._count_nonempty_lines(self.glossary_text_temp.get("1.0", tk.END))
+        cur_filter_lines = self._count_nonempty_lines(self.filter_text.get("1.0", tk.END))
+
+        parts = []
+        if cur_glossary_lines > self._saved_glossary_lines:
+            parts.append(f"術語表（目前 {cur_glossary_lines} 行，已儲存 {self._saved_glossary_lines} 行）")
+        if cur_glossary_temp_lines > self._saved_glossary_temp_lines:
+            parts.append(f"臨時術語表（目前 {cur_glossary_temp_lines} 行，已儲存 {self._saved_glossary_temp_lines} 行）")
+        if cur_filter_lines > self._saved_filter_lines:
+            parts.append(f"自訂過濾規則（目前 {cur_filter_lines} 行，已儲存 {self._saved_filter_lines} 行）")
+
+        if parts:
+            detail = "、".join(parts)
+            answer = messagebox.askyesno(
+                "儲存設定？",
+                f"以下項目有未儲存的新增內容：\n{detail}\n\n是否在關閉前儲存至 AA_Settings.json？",
+            )
+            if answer:
+                self.export_settings()
+
         self.destroy()
 
     def show_toast(self, message, color="#28a745", duration=3000):
@@ -104,13 +136,8 @@ class AATranslationTool(ctk.CTk):
         mode_frame.pack(side="left", padx=10)
         self.btn_mode_translate = ctk.CTkButton(mode_frame, text="翻譯模式", width=80, height=28, font=self.ui_small_font, fg_color="#ff9800", hover_color="#e68a00", command=lambda: self.switch_mode("translate"))
         self.btn_mode_translate.pack(side="left", padx=2)
-        self.btn_mode_batch = ctk.CTkButton(mode_frame, text="批次搜尋", width=80, height=28, font=self.ui_small_font, fg_color="#555555", hover_color="#444444", command=lambda: self.switch_mode("batch"))
-        self.btn_mode_batch.pack(side="left", padx=2)
         self.btn_batch_qt = ctk.CTkButton(mode_frame, text="批次搜尋(Qt)", width=95, height=28, font=self.ui_small_font, fg_color="#6f42c1", hover_color="#5a3299", command=self.open_batch_search_qt)
         self.btn_batch_qt.pack(side="left", padx=2)
-
-        self.experimental_edit_tab = ctk.CTkSwitch(mode_frame, text="實驗:內嵌編輯", font=self.ui_small_font, width=40)
-        self.experimental_edit_tab.pack(side="left", padx=8)
         
         btn_import = ctk.CTkButton(toolbar, text="📥 讀取設定", command=self.import_settings, fg_color="#17a2b8", hover_color="#138496", font=self.ui_font)
         btn_import.pack(side="right", padx=5)
@@ -302,64 +329,8 @@ class AATranslationTool(ctk.CTk):
         self.current_invalid_regex = self.default_invalid_regex
         self.current_symbol_regex = self.default_symbol_regex
 
-        # Setup batch search UI (hidden by default)
-        self.setup_batch_ui()
-        # Setup edit tab UI (experimental, hidden by default)
+        # Setup edit tab UI (for inline editing mode)
         self.setup_edit_ui()
-
-    def setup_batch_ui(self):
-        """建立批次搜尋模式的 UI（預設隱藏）。"""
-        self.batch_frame = ctk.CTkFrame(self)
-        # Don't grid yet — switch_mode will show it
-
-        # --- Top: folder selector ---
-        folder_row = ctk.CTkFrame(self.batch_frame, fg_color="transparent")
-        folder_row.pack(fill="x", padx=10, pady=(10, 5))
-        ctk.CTkLabel(folder_row, text="資料夾:", font=self.ui_font).pack(side="left")
-        self.batch_folder_var = tk.StringVar()
-        self.batch_folder_entry = ctk.CTkEntry(folder_row, textvariable=self.batch_folder_var, font=self.ui_small_font, width=400)
-        self.batch_folder_entry.pack(side="left", padx=5, fill="x", expand=True)
-        ctk.CTkButton(folder_row, text="瀏覽…", width=70, font=self.ui_small_font, fg_color="#6c757d", hover_color="#5a6268",
-                       command=self._batch_browse_folder).pack(side="left", padx=5)
-
-        # --- Search / Replace row ---
-        search_row = ctk.CTkFrame(self.batch_frame, fg_color="transparent")
-        search_row.pack(fill="x", padx=10, pady=5)
-
-        ctk.CTkLabel(search_row, text="搜尋:", font=self.ui_font).pack(side="left")
-        self.batch_search_var = tk.StringVar()
-        ctk.CTkEntry(search_row, textvariable=self.batch_search_var, font=self.ui_small_font, width=250).pack(side="left", padx=5)
-
-        self.batch_regex_switch = ctk.CTkSwitch(search_row, text="正則", font=self.ui_small_font, width=40)
-        self.batch_regex_switch.pack(side="left", padx=5)
-
-        ctk.CTkLabel(search_row, text="替換:", font=self.ui_font).pack(side="left", padx=(15, 0))
-        self.batch_replace_var = tk.StringVar()
-        ctk.CTkEntry(search_row, textvariable=self.batch_replace_var, font=self.ui_small_font, width=250).pack(side="left", padx=5)
-
-        self.batch_search_btn = ctk.CTkButton(search_row, text="🔍 搜尋", width=80, font=self.ui_font, fg_color="#007bff", hover_color="#0069d9",
-                       command=self.batch_search)
-        self.batch_search_btn.pack(side="left", padx=5)
-        ctk.CTkButton(search_row, text="全部替換", width=80, font=self.ui_font, fg_color="#dc3545", hover_color="#c82333",
-                       command=self.batch_replace_all).pack(side="left", padx=5)
-
-        # --- Status label ---
-        self.batch_status_label = ctk.CTkLabel(self.batch_frame, text="", font=self.ui_small_font, text_color="#888888")
-        self.batch_status_label.pack(fill="x", padx=15)
-
-        # --- Results area ---
-        # Header row
-        header = ctk.CTkFrame(self.batch_frame, fg_color="transparent")
-        header.pack(fill="x", padx=10, pady=(5, 0))
-        ctk.CTkLabel(header, text="檔名", font=self.ui_small_font, width=120, anchor="w").pack(side="left", padx=5)
-        ctk.CTkLabel(header, text="操作", font=self.ui_small_font, width=100, anchor="w").pack(side="left", padx=2)
-        ctk.CTkLabel(header, text="搜尋結果", font=self.ui_small_font, anchor="w").pack(side="left", padx=5, fill="x", expand=True)
-
-        self.batch_results_frame = ctk.CTkScrollableFrame(self.batch_frame)
-        self.batch_results_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-
-        # Store matches for replace operations
-        self.batch_matches: list[dict] = []
 
     def setup_edit_ui(self):
         """建立內嵌編輯模式的框架（預設隱藏，實驗性功能）。"""
@@ -367,25 +338,24 @@ class AATranslationTool(ctk.CTk):
         self._current_mode = "translate"
         self._previous_mode = "translate"
         self.edit_tab_textbox = None
+        self.batch_folder_var = tk.StringVar()
 
     def switch_mode(self, mode_name):
-        """切換翻譯模式 / 批次搜尋模式 / 內嵌編輯模式。"""
+        """切換翻譯模式 / 內嵌編輯模式。"""
         self._previous_mode = getattr(self, '_current_mode', 'translate')
         self._current_mode = mode_name
 
         # 離開 edit 模式時，解除綁定在主視窗上的快捷鍵
-        if getattr(self, '_current_mode', '') == 'edit' and mode_name != 'edit':
+        if self._previous_mode == 'edit' and mode_name != 'edit':
             if hasattr(self, '_edit_tab_unbind'):
                 self._edit_tab_unbind()
                 del self._edit_tab_unbind
 
         self.main_frame.grid_forget()
         self.gen_bar.grid_forget()
-        self.batch_frame.grid_forget()
         self.edit_frame.grid_forget()
 
         self.btn_mode_translate.configure(fg_color="#555555")
-        self.btn_mode_batch.configure(fg_color="#555555")
 
         if mode_name == "translate":
             self.grid_rowconfigure(0, weight=0)
@@ -393,20 +363,10 @@ class AATranslationTool(ctk.CTk):
             self.main_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=5)
             self.gen_bar.grid(row=3, column=0, sticky="ew", padx=10, pady=5)
             self.btn_mode_translate.configure(fg_color="#ff9800")
-        elif mode_name == "batch":
-            self.grid_rowconfigure(0, weight=0)
-            self.toolbar.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
-            self.batch_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=5)
-            self.btn_mode_batch.configure(fg_color="#007bff")
         elif mode_name == "edit":
             self.grid_rowconfigure(0, weight=1)
             self.toolbar.grid_forget()
             self.edit_frame.grid(row=0, column=0, rowspan=4, sticky="nsew", padx=0, pady=0)
-
-    def _batch_browse_folder(self):
-        folder = filedialog.askdirectory(title="選取 HTML 檔案所在的資料夾")
-        if folder:
-            self.batch_folder_var.set(folder)
 
     # ── PyQt6 批次搜尋（獨立 process） ──
 
@@ -445,6 +405,11 @@ class AATranslationTool(ctk.CTk):
                 if cmd.get('action') == 'open':
                     file_path = cmd.get('file_path', '')
                     line = cmd.get('line')
+                    # 將主視窗提到最上層
+                    if cmd.get('raise'):
+                        self.deiconify()
+                        self.lift()
+                        self.focus_force()
                     text = self.read_html_pre_content(file_path)
                     if text:
                         self.show_result_modal(text, source_file=file_path, scroll_to_line=line)
@@ -460,287 +425,6 @@ class AATranslationTool(ctk.CTk):
 
     def write_html_file(self, file_path, text_content):
         write_html_file(file_path, text_content)
-
-    def batch_search(self):
-        """在指定資料夾中搜尋所有 HTML 的 <pre> 內容（背景執行緒 + 分批渲染）。"""
-        folder = self.batch_folder_var.get().strip()
-        if not folder or not os.path.isdir(folder):
-            self.show_toast("⚠️ 請先選擇有效的資料夾！", color="#f39c12")
-            return
-
-        query = self.batch_search_var.get()
-        if not query:
-            self.show_toast("⚠️ 請輸入搜尋內容！", color="#f39c12")
-            return
-
-        use_regex = self.batch_regex_switch.get()
-        if use_regex:
-            try:
-                pattern = re.compile(query)
-            except re.error as e:
-                self.show_toast(f"⚠️ 正則語法錯誤: {e}", color="#dc3545")
-                return
-        else:
-            pattern = re.compile(re.escape(query))
-
-        # Clear previous results and reset scroll to top
-        for w in self.batch_results_frame.winfo_children():
-            w.destroy()
-        self.batch_matches.clear()
-        try:
-            self.batch_results_frame._parent_canvas.yview_moveto(0)
-        except Exception:
-            pass
-
-        html_files = [f for f in os.listdir(folder) if f.lower().endswith('.html')]
-        html_files.sort()
-        file_count = len(html_files)
-
-        # 禁用搜尋按鈕，顯示搜尋中狀態
-        self.batch_search_btn.configure(state="disabled")
-        self.batch_status_label.configure(text=f"🔍 搜尋中... (0 / {file_count} 個檔案)", text_color="#888888")
-
-        def _search():
-            """在背景執行緒中掃描檔案，不直接操作任何 UI。"""
-            matches = []
-            for i, fname in enumerate(html_files):
-                fpath = os.path.join(folder, fname)
-                text = self.read_html_pre_content(fpath)
-                if text is None:
-                    continue
-
-                lines = text.split('\n')
-                for line_idx, line in enumerate(lines):
-                    for m in pattern.finditer(line):
-                        match_start = m.start()
-                        match_end = m.end()
-                        matched_text = m.group(0)
-
-                        ctx_start = max(0, match_start - 10)
-                        ctx_end = min(len(line), match_end + 10)
-                        before = line[ctx_start:match_start]
-                        after = line[match_end:ctx_end]
-
-                        stem = os.path.splitext(fname)[0]
-                        short_name = stem if len(stem) <= 12 else "…" + stem[-10:]
-
-                        matches.append({
-                            'file_path': fpath,
-                            'file_name': fname,
-                            'line_idx': line_idx,
-                            'match_start': match_start,
-                            'match_end': match_end,
-                            'matched_text': matched_text,
-                            'ctx_before': ("…" + before) if ctx_start > 0 else before,
-                            'ctx_after': (after + "…") if ctx_end < len(line) else after,
-                            'short_name': short_name,
-                        })
-                        if len(matches) >= 500:
-                            break
-                    if len(matches) >= 500:
-                        break
-                if len(matches) >= 500:
-                    break
-
-                # 每 10 個檔案回報一次進度
-                if (i + 1) % 10 == 0 or i + 1 == file_count:
-                    progress_i = i + 1
-                    self.after(0, lambda p=progress_i: self.batch_status_label.configure(
-                        text=f"🔍 搜尋中... ({p} / {file_count} 個檔案)", text_color="#888888"))
-
-            self.after(0, lambda: _search_done(matches))
-
-        def _search_done(matches):
-            """搜尋完成後在主執行緒中啟動分批渲染。"""
-            self.batch_matches = matches
-            self.batch_search_btn.configure(state="normal")
-            total = len(matches)
-
-            if total == 0:
-                self.batch_status_label.configure(text="找不到符合結果", text_color="#f39c12")
-                return
-
-            capped = total >= 500
-            status_text = f"找到 {total} 筆結果" + ("（已達上限 500 筆）" if capped else "") + f"，共掃描 {file_count} 個檔案"
-            self.batch_status_label.configure(text=f"{status_text}，渲染中...", text_color="#888888")
-            _render_batch(0, total, status_text)
-
-        def _render_batch(start, total, status_text, batch_size=30):
-            """分批建立 widget，每次建立 batch_size 筆後讓出事件循環。"""
-            end = min(start + batch_size, total)
-            for mi in self.batch_matches[start:end]:
-                self._build_batch_result_row(mi)
-            if end < total:
-                self.batch_status_label.configure(
-                    text=f"{status_text}，渲染中 {end}/{total}...", text_color="#888888")
-                self.after(0, lambda: _render_batch(end, total, status_text, batch_size))
-            else:
-                self.batch_status_label.configure(
-                    text=status_text, text_color="#28a745")
-
-        threading.Thread(target=_search, daemon=True).start()
-
-    def _build_batch_result_row(self, mi, insert_after=None):
-        """建立一行搜尋結果 UI。"""
-        row = ctk.CTkFrame(self.batch_results_frame, fg_color="transparent")
-        if insert_after:
-            row.pack(fill="x", pady=1, after=insert_after)
-        else:
-            row.pack(fill="x", pady=1)
-
-        # Store reference so replace can find and update it
-        mi['_row'] = row
-
-        ctk.CTkLabel(row, text=mi['short_name'], font=self.ui_small_font, width=120, anchor="w",
-                     text_color="#6f42c1").pack(side="left", padx=5)
-
-        ctk.CTkButton(row, text="替換", width=45, height=22, font=self.ui_small_font,
-                      fg_color="#dc3545", hover_color="#c82333",
-                      command=lambda m=mi: self.replace_single_match(m)).pack(side="left", padx=2)
-        ctk.CTkButton(row, text="開啟", width=45, height=22, font=self.ui_small_font,
-                      fg_color="#007bff", hover_color="#0069d9",
-                      command=lambda m=mi: self.open_file_at_match(m)).pack(side="left", padx=2)
-
-        # Context: before (grey) + match (highlighted) + after (grey)
-        ctx_frame = ctk.CTkFrame(row, fg_color="transparent")
-        ctx_frame.pack(side="left", padx=5, fill="x", expand=True)
-        ctk.CTkLabel(ctx_frame, text=mi['ctx_before'], font=self.ui_small_font, anchor="w",
-                     text_color="#888888").pack(side="left")
-        ctk.CTkLabel(ctx_frame, text=mi['matched_text'],
-                     font=ctk.CTkFont(family="Microsoft JhengHei", size=12, weight="bold"), anchor="w",
-                     text_color="#ff6b6b").pack(side="left")
-        ctk.CTkLabel(ctx_frame, text=mi['ctx_after'], font=self.ui_small_font, anchor="w",
-                     text_color="#888888").pack(side="left")
-
-    def open_file_at_match(self, match_info):
-        """開啟 HTML 檔案到編輯模式，並跳到搜尋結果所在行。"""
-        text = self.read_html_pre_content(match_info['file_path'])
-        if text is None:
-            self.show_toast("❌ 無法讀取檔案！", color="#dc3545")
-            return
-        self.show_result_modal(text, source_file=match_info['file_path'], scroll_to_line=match_info['line_idx'] + 1)
-
-    def replace_single_match(self, match_info):
-        """替換單一搜尋結果，儲存檔案，並重新讀取顯示該行結果。"""
-        replacement = self.batch_replace_var.get()
-        fpath = match_info['file_path']
-
-        text = self.read_html_pre_content(fpath)
-        if text is None:
-            self.show_toast("❌ 無法讀取檔案！", color="#dc3545")
-            return
-
-        lines = text.split('\n')
-        li = match_info['line_idx']
-        if li < len(lines):
-            line = lines[li]
-            lines[li] = line[:match_info['match_start']] + replacement + line[match_info['match_end']:]
-
-        new_text = '\n'.join(lines)
-        try:
-            self.write_html_file(fpath, new_text)
-        except Exception as e:
-            self.show_toast(f"❌ 儲存失敗: {e}", color="#dc3545")
-            return
-
-        # Update the row to show the replaced result
-        old_row = match_info.get('_row')
-        self.batch_matches = [m for m in self.batch_matches if m is not match_info]
-
-        if old_row:
-            # Clear old row content and rebuild as a "replaced" display
-            for w in old_row.winfo_children():
-                w.destroy()
-
-            ctk.CTkLabel(old_row, text=match_info['short_name'], font=self.ui_small_font, width=120, anchor="w",
-                         text_color="#6f42c1").pack(side="left", padx=5)
-
-            ctk.CTkLabel(old_row, text="✔ 已替換", font=self.ui_small_font,
-                         text_color="#28a745").pack(side="left", padx=2)
-            ctk.CTkButton(old_row, text="開啟", width=45, height=22, font=self.ui_small_font,
-                          fg_color="#007bff", hover_color="#0069d9",
-                          command=lambda m=match_info: self.open_file_at_match(m)).pack(side="left", padx=2)
-
-            # Show: before + replaced text (green) + after
-            ctx_frame = ctk.CTkFrame(old_row, fg_color="transparent")
-            ctx_frame.pack(side="left", padx=5, fill="x", expand=True)
-            ctk.CTkLabel(ctx_frame, text=match_info['ctx_before'], font=self.ui_small_font, anchor="w",
-                         text_color="#888888").pack(side="left")
-            ctk.CTkLabel(ctx_frame, text=replacement if replacement else "（刪除）",
-                         font=ctk.CTkFont(family="Microsoft JhengHei", size=12, weight="bold"), anchor="w",
-                         text_color="#28a745").pack(side="left")
-            ctk.CTkLabel(ctx_frame, text=match_info['ctx_after'], font=self.ui_small_font, anchor="w",
-                         text_color="#888888").pack(side="left")
-
-        self.show_toast("✅ 已替換並儲存")
-
-    def batch_replace_all(self):
-        """替換所有搜尋結果。"""
-        if not self.batch_matches:
-            self.show_toast("⚠️ 沒有可替換的結果！", color="#f39c12")
-            return
-
-        replacement = self.batch_replace_var.get()
-
-        # Group by file
-        by_file: dict[str, list[dict]] = {}
-        for mi in self.batch_matches:
-            by_file.setdefault(mi['file_path'], []).append(mi)
-
-        replaced_count = 0
-        file_count = 0
-        for fpath, matches in by_file.items():
-            text = self.read_html_pre_content(fpath)
-            if text is None:
-                continue
-
-            lines = text.split('\n')
-            # Sort matches by line then by position descending (to replace from end to start)
-            matches.sort(key=lambda m: (m['line_idx'], -m['match_start']))
-
-            for mi in matches:
-                li = mi['line_idx']
-                if li < len(lines):
-                    line = lines[li]
-                    lines[li] = line[:mi['match_start']] + replacement + line[mi['match_end']:]
-                    replaced_count += 1
-
-            new_text = '\n'.join(lines)
-            try:
-                self.write_html_file(fpath, new_text)
-                file_count += 1
-            except Exception:
-                pass
-
-        # Update each row to show replaced result (same as single replace)
-        for mi in self.batch_matches:
-            old_row = mi.get('_row')
-            if old_row:
-                for w in old_row.winfo_children():
-                    w.destroy()
-
-                ctk.CTkLabel(old_row, text=mi['short_name'], font=self.ui_small_font, width=120, anchor="w",
-                             text_color="#6f42c1").pack(side="left", padx=5)
-
-                ctk.CTkLabel(old_row, text="✔ 已替換", font=self.ui_small_font,
-                             text_color="#28a745").pack(side="left", padx=2)
-                ctk.CTkButton(old_row, text="開啟", width=45, height=22, font=self.ui_small_font,
-                              fg_color="#007bff", hover_color="#0069d9",
-                              command=lambda m=mi: self.open_file_at_match(m)).pack(side="left", padx=2)
-
-                ctx_frame = ctk.CTkFrame(old_row, fg_color="transparent")
-                ctx_frame.pack(side="left", padx=5, fill="x", expand=True)
-                ctk.CTkLabel(ctx_frame, text=mi['ctx_before'], font=self.ui_small_font, anchor="w",
-                             text_color="#888888").pack(side="left")
-                ctk.CTkLabel(ctx_frame, text=replacement if replacement else "（刪除）",
-                             font=ctk.CTkFont(family="Microsoft JhengHei", size=12, weight="bold"), anchor="w",
-                             text_color="#28a745").pack(side="left")
-                ctk.CTkLabel(ctx_frame, text=mi['ctx_after'], font=self.ui_small_font, anchor="w",
-                             text_color="#888888").pack(side="left")
-
-        self.batch_matches.clear()
-        self.batch_status_label.configure(text=f"✅ 已替換 {replaced_count} 筆，涉及 {file_count} 個檔案", text_color="#28a745")
-        self.show_toast(f"✅ 全部替換完成！共 {replaced_count} 筆")
 
     def get_settings_file(self):
         return self.settings_mgr.get_settings_file()
@@ -760,6 +444,10 @@ class AATranslationTool(ctk.CTk):
         self.current_base_regex = settings.base_regex
         self.current_invalid_regex = settings.invalid_regex
         self.current_symbol_regex = settings.symbol_regex
+        # 記錄此次從設定檔載入的行數作為基準
+        self._saved_glossary_lines = self._count_nonempty_lines(settings.glossary)
+        self._saved_glossary_temp_lines = self._count_nonempty_lines(settings.glossary_temp)
+        self._saved_filter_lines = self._count_nonempty_lines(settings.filter_text)
 
     def save_regex_to_settings(self):
         """將目前的正則表達式寫回 AA_Settings.json。"""
@@ -818,7 +506,6 @@ class AATranslationTool(ctk.CTk):
             current_url=getattr(self, 'current_url', ''),
             auto_copy=bool(self.auto_copy_switch.get()) if hasattr(self, 'auto_copy_switch') else False,
             batch_folder=self.batch_folder_var.get() if hasattr(self, 'batch_folder_var') else '',
-            experimental_edit_tab=bool(self.experimental_edit_tab.get()) if hasattr(self, 'experimental_edit_tab') else False,
         )
 
     def _apply_cache(self, cache: AppCache, load_preview_text: bool = False):
@@ -858,8 +545,6 @@ class AATranslationTool(ctk.CTk):
             self.auto_copy_switch.select()
         if cache.batch_folder and hasattr(self, 'batch_folder_var'):
             self.batch_folder_var.set(cache.batch_folder)
-        if cache.experimental_edit_tab and hasattr(self, 'experimental_edit_tab'):
-            self.experimental_edit_tab.select()
 
     def save_cache(self):
         self.settings_mgr.save_cache(self._gather_cache())
@@ -1042,11 +727,13 @@ class AATranslationTool(ctk.CTk):
                     def _apply():
                         # Put text into source_text, with title as first line
                         self.source_text.delete("1.0", tk.END)
-                        if page_title:
-                            self.source_text.insert("1.0", page_title + "\n\n" + text_content)
+                        display_title = _extract_work_title(page_title) if page_title else ""
+                        if display_title:
+                            self.source_text.insert("1.0", display_title + "\n\n" + text_content)
                         else:
                             self.source_text.insert("1.0", text_content)
                         self.after(50, self.check_chapter_number)
+                        self._update_work_title(display_title)
 
                         # Update related links (and persist)
                         self.url_related_links = nav_links
@@ -1142,11 +829,13 @@ class AATranslationTool(ctk.CTk):
 
                 def _apply():
                     self.source_text.delete("1.0", tk.END)
-                    if page_title:
-                        self.source_text.insert("1.0", page_title + "\n\n" + text_content)
+                    display_title = _extract_work_title(page_title) if page_title else ""
+                    if display_title:
+                        self.source_text.insert("1.0", display_title + "\n\n" + text_content)
                     else:
                         self.source_text.insert("1.0", text_content)
                     self.after(50, self.check_chapter_number)
+                    self._update_work_title(display_title)
 
                     self.url_related_links = nav_links
                     self.current_url = next_url
@@ -1179,6 +868,10 @@ class AATranslationTool(ctk.CTk):
         )
         try:
             self.settings_mgr.save_settings(settings)
+            # 更新已儲存行數基準
+            self._saved_glossary_lines = self._count_nonempty_lines(settings.glossary)
+            self._saved_glossary_temp_lines = self._count_nonempty_lines(settings.glossary_temp)
+            self._saved_filter_lines = self._count_nonempty_lines(settings.filter_text)
             self.show_toast("✅ 設定儲存成功！")
         except Exception as e:
             self.show_toast(f"❌ 設定儲存失敗: {e}", color="#dc3545")
@@ -1293,6 +986,14 @@ class AATranslationTool(ctk.CTk):
         if result is not None:
             self.doc_num.delete(0, tk.END)
             self.doc_num.insert(0, result)
+
+    def _update_work_title(self, work_title: str = ""):
+        """更新主視窗標題列，顯示目前作品名稱。"""
+        base = "AA 漫畫翻譯輔助工具"
+        if work_title:
+            self.title(f"{base} — {work_title}")
+        else:
+            self.title(base)
 
     def validate_ai_text(self):
         """貼上 AI 翻譯後，自動檢查 ID 格式與行數是否正確。"""

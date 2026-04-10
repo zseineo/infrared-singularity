@@ -23,6 +23,7 @@ from .translation_engine import (
     apply_glossary_to_text,
     _replace_with_padding,
 )
+from .text_extraction import extract_work_title
 
 if TYPE_CHECKING:
     from ..aa_translation_tool import AATranslationTool
@@ -34,50 +35,34 @@ def show_result_modal(
     source_file: str = "",
     scroll_to_line: int | None = None,
 ) -> None:
-    """建立並顯示最終結果預覽視窗（或內嵌分頁）。"""
-    use_tab = hasattr(app, 'experimental_edit_tab') and app.experimental_edit_tab.get()
+    """建立並顯示內嵌編輯分頁。"""
+    # 從文字首行提取作品標題
+    first_line = ""
+    for line in text.split('\n'):
+        line = line.strip()
+        if line:
+            first_line = line
+            break
+    work_title = extract_work_title(first_line) if first_line else ""
+    title_suffix = f" — {work_title}" if work_title else ""
 
-    if use_tab:
-        for w in app.edit_frame.winfo_children():
-            w.destroy()
-        container = app.edit_frame
-        modal = None
-    else:
-        modal = ctk.CTkToplevel(app)
-        container = modal
-
-        match = re.search(r'第\s*(\d+)\s*話', text[:500])
-        if match:
-            chapter_str = f" - 第{match.group(1)}話"
-        else:
-            match = re.search(r'番外編\s*(\d+)', text[:500])
-            if match:
-                chapter_str = f" - 番外編{match.group(1)}"
-            else:
-                chapter_str = ""
-
-        modal.title(f"✨ 最終結果預覽 (全螢幕){chapter_str}")
-        modal.state("zoomed")
+    for w in app.edit_frame.winfo_children():
+        w.destroy()
+    container = app.edit_frame
+    app.title(f"AA 漫畫翻譯輔助工具{title_suffix}")
 
     # ── 關閉動作 ──
     def close_action():
         app.preview_text_cache = final_textbox.get("1.0", tk.END).rstrip('\n')
         app.save_cache()
-        if modal:
-            modal.destroy()
-        else:
-            app.switch_mode(app._previous_mode)
-
-    if modal:
-        modal.bind("<Escape>", lambda e: close_action())
-        modal.protocol("WM_DELETE_WINDOW", close_action)
-        modal.transient(app)
+        app.title("AA 漫畫翻譯輔助工具")
+        app.switch_mode(app._previous_mode)
 
     # ── Toast 輔助 ──
     def show_toast(message, color="#28a745", duration=3000):
-        target = modal if modal else app
+        target = app
         toast = ctk.CTkFrame(target, fg_color=color, corner_radius=8)
-        toast.place(relx=1.0, rely=0.0, anchor="ne", x=-20, y=60 if modal else 55)
+        toast.place(relx=1.0, rely=0.0, anchor="ne", x=-20, y=55)
         lbl = ctk.CTkLabel(toast, text=message, text_color="white", font=app.ui_font)
         lbl.pack(padx=20, pady=10)
         target.after(duration, toast.destroy)
@@ -444,8 +429,7 @@ def show_result_modal(
     ctk.CTkButton(grp3, text="底色", command=choose_bg_color, fg_color="#6c757d", hover_color="#5a6268", font=app.ui_small_font, width=45).pack(side="left", padx=2)
     ctk.CTkButton(grp3, text="文字色", command=choose_fg_color, fg_color="#17a2b8", hover_color="#138496", font=app.ui_small_font, width=45).pack(side="left", padx=2)
     ctk.CTkButton(grp3, text="💾 儲存", command=dl_html, fg_color="#28a745", hover_color="#218838", font=app.ui_small_font, width=60).pack(side="left", padx=5)
-    _close_text = "↩ 返回" if use_tab else "✖ 關閉"
-    ctk.CTkButton(grp3, text=_close_text, command=close_action, fg_color="#dc3545", hover_color="#c82333", font=app.ui_small_font, width=60).pack(side="left", padx=5)
+    ctk.CTkButton(grp3, text="↩ 返回", command=close_action, fg_color="#dc3545", hover_color="#c82333", font=app.ui_small_font, width=60).pack(side="left", padx=5)
 
     # ════════════════════════════════════════════════════════════
     #  搜尋列
@@ -520,22 +504,21 @@ def show_result_modal(
     final_textbox.pack(fill="both", expand=True, padx=10, pady=10)
     final_textbox.insert("1.0", text)
 
-    if use_tab:
-        app.edit_tab_textbox = final_textbox
-        app.bind("<Control-f>", toggle_search)
-        app.bind("<Control-F>", toggle_search)
-        app.bind("<Control-s>", save_shortcut)
-        app.bind("<Control-S>", save_shortcut)
-        app.bind("<Control-q>", handle_smart_action_event)
-        app.bind("<Control-Q>", handle_smart_action_event)
-        app.bind("<Escape>", lambda e: close_action())
-        app._edit_tab_unbind = lambda: [
-            app.unbind("<Control-f>"), app.unbind("<Control-F>"),
-            app.unbind("<Control-s>"), app.unbind("<Control-S>"),
-            app.unbind("<Control-q>"), app.unbind("<Control-Q>"),
-            app.unbind("<Escape>"),
-        ]
-        app.switch_mode("edit")
+    app.edit_tab_textbox = final_textbox
+    app.bind("<Control-f>", toggle_search)
+    app.bind("<Control-F>", toggle_search)
+    app.bind("<Control-s>", save_shortcut)
+    app.bind("<Control-S>", save_shortcut)
+    app.bind("<Control-q>", handle_smart_action_event)
+    app.bind("<Control-Q>", handle_smart_action_event)
+    app.bind("<Escape>", lambda e: close_action())
+    app._edit_tab_unbind = lambda: [
+        app.unbind("<Control-f>"), app.unbind("<Control-F>"),
+        app.unbind("<Control-s>"), app.unbind("<Control-S>"),
+        app.unbind("<Control-q>"), app.unbind("<Control-Q>"),
+        app.unbind("<Escape>"),
+    ]
+    app.switch_mode("edit")
 
     if scroll_to_line is not None:
         def _scroll():
@@ -544,4 +527,4 @@ def show_result_modal(
             final_textbox._textbox.mark_set(tk.INSERT, target)
             line_end = f"{scroll_to_line}.end"
             final_textbox._textbox.tag_add(tk.SEL, target, line_end)
-        (modal or app).after(100, _scroll)
+        app.after(100, _scroll)

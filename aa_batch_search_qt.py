@@ -63,6 +63,9 @@ class BatchSearchWindow(QMainWindow):
         self.ui_small_font = QFont("Microsoft JhengHei", 12)
 
         self.batch_matches: list[dict] = []
+        # 復原用：{file_path: original_text_content}
+        self._undo_backups: dict[str, str] = {}
+        self._undo_items: list[dict] = []
 
         self._build_ui()
 
@@ -90,7 +93,7 @@ class BatchSearchWindow(QMainWindow):
         folder_row.addWidget(self.folder_entry, 1)
 
         btn_browse = make_button("瀏覽…", color="#6c757d", hover="#5a6268",
-                                 font=self.ui_small_font, width=70)
+                                 font=self.ui_small_font, width=80)
         btn_browse.clicked.connect(self._browse_folder)
         folder_row.addWidget(btn_browse)
         layout.addLayout(folder_row)
@@ -121,12 +124,12 @@ class BatchSearchWindow(QMainWindow):
         search_row.addWidget(self.replace_entry)
 
         self.search_btn = make_button("搜尋", color="#007bff", hover="#0069d9",
-                                      font=self.ui_font, width=80)
+                                      font=self.ui_font, width=90)
         self.search_btn.clicked.connect(self._do_search)
         search_row.addWidget(self.search_btn)
 
         btn_replace_all = make_button("全部替換", color="#dc3545", hover="#c82333",
-                                      font=self.ui_font, width=80)
+                                      font=self.ui_font, width=100)
         btn_replace_all.clicked.connect(self._replace_all)
         search_row.addWidget(btn_replace_all)
 
@@ -328,14 +331,14 @@ class BatchSearchWindow(QMainWindow):
         row_layout.addWidget(lbl_name)
 
         btn_replace = make_button("替換", color="#dc3545", hover="#c82333",
-                                  font=self.ui_small_font, width=45)
-        btn_replace.setFixedHeight(22)
+                                  font=self.ui_small_font, width=55)
+        btn_replace.setFixedHeight(26)
         btn_replace.clicked.connect(lambda checked=False, m=mi: self._replace_single(m))
         row_layout.addWidget(btn_replace)
 
         btn_open = make_button("開啟", color="#007bff", hover="#0069d9",
-                               font=self.ui_small_font, width=45)
-        btn_open.setFixedHeight(22)
+                               font=self.ui_small_font, width=55)
+        btn_open.setFixedHeight(26)
         btn_open.clicked.connect(lambda checked=False, m=mi: self._open_file(m))
         row_layout.addWidget(btn_open)
 
@@ -376,9 +379,15 @@ class BatchSearchWindow(QMainWindow):
         lbl_done.setStyleSheet("color: #28a745;")
         layout.addWidget(lbl_done)
 
+        btn_undo = make_button("復原", color="#f39c12", hover="#d68910",
+                               font=self.ui_small_font, width=55)
+        btn_undo.setFixedHeight(26)
+        btn_undo.clicked.connect(lambda checked=False, m=mi: self._undo_single(m))
+        layout.addWidget(btn_undo)
+
         btn_open = make_button("開啟", color="#007bff", hover="#0069d9",
-                               font=self.ui_small_font, width=45)
-        btn_open.setFixedHeight(22)
+                               font=self.ui_small_font, width=55)
+        btn_open.setFixedHeight(26)
         btn_open.clicked.connect(lambda checked=False, m=mi: self._open_file(m))
         layout.addWidget(btn_open)
 
@@ -413,6 +422,7 @@ class BatchSearchWindow(QMainWindow):
             "action": "open",
             "file_path": mi['file_path'],
             "line": mi['line_idx'] + 1,
+            "raise": True,
         }
         try:
             with open(self._cmd_file, 'w', encoding='utf-8') as f:
@@ -433,6 +443,11 @@ class BatchSearchWindow(QMainWindow):
         if text is None:
             self._toast("無法讀取檔案", color="#dc3545")
             return
+
+        # 備份原始內容（每個檔案只備份一次）
+        if fpath not in self._undo_backups:
+            self._undo_backups[fpath] = text
+        self._undo_items.append(mi)
 
         lines = text.split('\n')
         li = mi['line_idx']
@@ -477,6 +492,10 @@ class BatchSearchWindow(QMainWindow):
             if text is None:
                 continue
 
+            # 備份原始內容
+            if fpath not in self._undo_backups:
+                self._undo_backups[fpath] = text
+
             lines = text.split('\n')
             matches.sort(key=lambda m: (m['line_idx'], -m['match_start']))
 
@@ -495,6 +514,7 @@ class BatchSearchWindow(QMainWindow):
                 pass
 
         for mi in self.batch_matches:
+            self._undo_items.append(mi)
             old_row = mi.get('_row')
             if old_row:
                 self._rebuild_row_as_replaced(old_row, mi, replacement)
@@ -503,6 +523,80 @@ class BatchSearchWindow(QMainWindow):
         self.status_label.setText(f"已替換 {replaced_count} 筆，涉及 {file_count} 個檔案")
         self.status_label.setStyleSheet("color: #28a745;")
         self._toast(f"全部替換完成！共 {replaced_count} 筆")
+
+    # ────────────────────────────────────────────────────────
+    #  復原
+    # ────────────────────────────────────────────────────────
+
+    def _undo_single(self, mi: dict):
+        """復原單筆替換：從備份還原該檔案的原始內容。"""
+        fpath = mi['file_path']
+        backup = self._undo_backups.get(fpath)
+        if backup is None:
+            self._toast("無備份可復原", color="#dc3545")
+            return
+
+        try:
+            write_html_file(fpath, backup)
+        except Exception as e:
+            self._toast(f"復原失敗: {e}", color="#dc3545")
+            return
+
+        # 移除此檔案所有相關的 undo 項目並恢復成可操作狀態
+        restored = [item for item in self._undo_items if item['file_path'] == fpath]
+        self._undo_items = [item for item in self._undo_items if item['file_path'] != fpath]
+        del self._undo_backups[fpath]
+
+        for item in restored:
+            row = item.get('_row')
+            if row:
+                self._rebuild_row_as_active(row, item)
+            self.batch_matches.append(item)
+
+        self._toast(f"已復原 {len(restored)} 筆（{os.path.basename(fpath)}）")
+
+    def _rebuild_row_as_active(self, row: QWidget, mi: dict):
+        """將已替換的行恢復為可操作狀態（替換＋開啟按鈕）。"""
+        layout = row.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        lbl_name = QLabel(mi['short_name'])
+        lbl_name.setFont(self.ui_small_font)
+        lbl_name.setFixedWidth(120)
+        lbl_name.setStyleSheet("color: #6f42c1;")
+        layout.addWidget(lbl_name)
+
+        btn_replace = make_button("替換", color="#dc3545", hover="#c82333",
+                                  font=self.ui_small_font, width=55)
+        btn_replace.setFixedHeight(26)
+        btn_replace.clicked.connect(lambda checked=False, m=mi: self._replace_single(m))
+        layout.addWidget(btn_replace)
+
+        btn_open = make_button("開啟", color="#007bff", hover="#0069d9",
+                               font=self.ui_small_font, width=55)
+        btn_open.setFixedHeight(26)
+        btn_open.clicked.connect(lambda checked=False, m=mi: self._open_file(m))
+        layout.addWidget(btn_open)
+
+        lbl_before = QLabel(mi['ctx_before'])
+        lbl_before.setFont(self.ui_small_font)
+        lbl_before.setStyleSheet("color: #888888;")
+        layout.addWidget(lbl_before)
+
+        lbl_match = QLabel(mi['matched_text'])
+        lbl_match.setFont(QFont("Microsoft JhengHei", 12, QFont.Weight.Bold))
+        lbl_match.setStyleSheet("color: #ff6b6b;")
+        layout.addWidget(lbl_match)
+
+        lbl_after = QLabel(mi['ctx_after'])
+        lbl_after.setFont(self.ui_small_font)
+        lbl_after.setStyleSheet("color: #888888;")
+        layout.addWidget(lbl_after)
+
+        layout.addStretch()
 
 
 # ════════════════════════════════════════════════════════════════

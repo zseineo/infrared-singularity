@@ -36,7 +36,6 @@ class AppCache:
     current_url: str = ""
     auto_copy: bool = False
     batch_folder: str = ""
-    experimental_edit_tab: bool = False
 
 
 class SettingsManager:
@@ -135,7 +134,6 @@ class SettingsManager:
             cache.current_url = data.get('current_url', '')
             cache.auto_copy = bool(data.get('auto_copy', False))
             cache.batch_folder = data.get('batch_folder', '')
-            cache.experimental_edit_tab = bool(data.get('experimental_edit_tab', False))
         except Exception as e:
             print("Cache load failed:", e)
         return cache
@@ -157,7 +155,6 @@ class SettingsManager:
             'current_url': cache.current_url,
             'auto_copy': cache.auto_copy,
             'batch_folder': cache.batch_folder,
-            'experimental_edit_tab': cache.experimental_edit_tab,
         }
         try:
             with open(self.get_cache_file(), 'w', encoding='utf-8') as f:

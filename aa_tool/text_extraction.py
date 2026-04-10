@@ -268,32 +268,71 @@ def _kanji_to_int(text: str) -> int | None:
 
 
 def check_chapter_number(text_first_lines: str) -> str | None:
-    """掃描文字的前幾行，尋找「第N話」或「番外編N」格式。
+    """掃描文字的前幾行，尋找話數格式，回傳章節號碼字串。
 
-    支援阿拉伯數字與漢數字（例如「第八話」「第十二話」「第百二十三話」）。
+    支援格式：第N話、番外編N、その N（阿拉伯數字＋漢數字＋全角數字）。
 
     Returns:
         章節號碼字串或 None。
     """
-    # 阿拉伯數字優先
+    result = get_chapter_display(text_first_lines)
+    if result:
+        return result[0]
+    return None
+
+
+def get_chapter_display(text_first_lines: str) -> tuple[str, str] | None:
+    """掃描文字的前幾行，尋找話數格式。
+
+    Returns:
+        (number_str, display_label) 元組，例如 ("8", "第8話")、("3", "番外編3")、
+        ("216", "その216")，或 None。
+    """
+    # 第N話 — 阿拉伯數字
     match = re.search(r'第\s*(\d+)\s*話', text_first_lines)
     if match:
-        return str(int(match.group(1)))
+        n = str(int(match.group(1)))
+        return (n, f"第{n}話")
 
-    # 漢數字
+    # 第N話 — 漢數字
     match = re.search(r'第\s*([〇零一二三四五六七八九十百千]+)\s*話', text_first_lines)
     if match:
         num = _kanji_to_int(match.group(1))
         if num is not None:
-            return str(num)
+            return (str(num), f"第{num}話")
 
-    # 番外編
+    # 番外編 N
     match = re.search(r'番外編\s*(\d+)', text_first_lines)
     if not match:
         match = re.search(r'番外編\s*([〇零一二三四五六七八九十百千]+)', text_first_lines)
     if match:
         num = _kanji_to_int(match.group(1))
         if num is not None:
-            return str(num)
+            return (str(num), f"番外編{num}")
+
+    # その N（全角・半角数字）— FC2 Blog タイトル形式
+    match = re.search(r'その\s*([０-９\d]+)', text_first_lines)
+    if match:
+        num_str = match.group(1).translate(str.maketrans('０１２３４５６７８９', '0123456789'))
+        n = str(int(num_str))
+        return (n, f"その{n}")
 
     return None
+
+
+# 已知的站名前綴 — 出現在標題最前方時應被忽略
+_SITE_NAME_PREFIXES = [
+    '安価でやるお！',
+    'やる夫達のいる日常',
+    'やる夫まとめくす',
+    'やる夫短編集',
+]
+
+_SITE_PREFIX_RE = re.compile(
+    r'^(?:' + '|'.join(re.escape(s) for s in _SITE_NAME_PREFIXES) + r')\s*'
+)
+
+
+def extract_work_title(title: str) -> str:
+    """從頁面標題中去除站名前綴，回傳作品名稱部分。"""
+    return _SITE_PREFIX_RE.sub('', title).strip()

@@ -3,6 +3,7 @@
 支援的網域：
   - 預設格式（article div + relate_dl）
   - himanatokiniyaruo.com（dt[id] / dd 結構 + related-entries）
+  - blog.fc2.com（ently_text div + relate_dl，含 web.archive.org 封存版）
 """
 from __future__ import annotations
 
@@ -200,13 +201,95 @@ def _parse_himanatokiniyaruo(page_html: str, base_url: str) -> tuple[str | None,
 
 
 # ════════════════════════════════════════════════════════════════
+#  解析器：FC2 Blog
+# ════════════════════════════════════════════════════════════════
+
+def _parse_fc2blog(page_html: str, base_url: str) -> tuple[str | None, list[dict], str]:
+    """解析 FC2 Blog 格式（含 web.archive.org 封存版）。
+
+    內文：<div class="ently_text">，截止於 fc2button-clap div 或 relate_dl。
+    標題：<title>...</title>
+    關聯：<dl class="relate_dl ..."> 中的 <li class="relate_li">
+    """
+    # ── 標題 ──
+    title_m = re.search(r'<title>([^<]+)</title>', page_html)
+    page_title = html.unescape(title_m.group(1)).strip() if title_m else ""
+
+    # ── 內文 ──
+    ently_m = re.search(r'<div\s+class="ently_text">', page_html)
+    if not ently_m:
+        return None, [], page_title
+
+    content_start = ently_m.end()
+    end_m = re.search(
+        r'<div\s+class="fc2button-clap[^"]*"|<dl\s+class="relate_dl|<!--/ently_text-->',
+        page_html[content_start:],
+    )
+    content_end = content_start + end_m.start() if end_m else len(page_html)
+    content_html = page_html[content_start:content_end]
+
+    # 移除 <a> 連結整段（含導覽文字如 Next/Back/前往目錄）
+    content_html = re.sub(r'<a\s[^>]*>.*?</a>', '', content_html, flags=re.DOTALL)
+    content_text = re.sub(r'<br\s*/?>', '\n', content_html)
+    content_text = re.sub(r'<[^>]+>', '', content_text)
+    content_text = html.unescape(content_text)
+
+    lines = content_text.split('\n')
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    text_content = '\n'.join(lines) if lines else None
+
+    # ── 關聯連結 ──
+    nav_links: list[dict] = []
+    relate_m = re.search(r'<dl\s+class="relate_dl[^"]*">(.*?)</dl>', page_html, re.DOTALL)
+    if relate_m:
+        relate_html = relate_m.group(1)
+        for li in re.finditer(
+            r'<li\s+class="(relate_li(?:_nolink)?)"[^>]*>(.*?)</li>',
+            relate_html, re.DOTALL,
+        ):
+            li_class = li.group(1)
+            li_inner = li.group(2)
+            if li_class == 'relate_li':
+                a_m = re.search(r'<a\s+href="([^"]+)"[^>]*>(.*?)</a>', li_inner, re.DOTALL)
+                if a_m:
+                    href = urljoin(base_url, a_m.group(1))
+                    title = html.unescape(re.sub(r'<[^>]+>', '', a_m.group(2))).strip()
+                    nav_links.append({'title': title, 'url': href, 'is_current': False})
+            else:
+                title = html.unescape(re.sub(r'<[^>]+>', '', li_inner)).strip()
+                nav_links.append({'title': title, 'url': None, 'is_current': True})
+        nav_links.reverse()
+
+    return text_content or None, nav_links, page_title
+
+
+# ════════════════════════════════════════════════════════════════
 #  公開入口
 # ════════════════════════════════════════════════════════════════
 
 # 網域 → 解析函式的對應表
 _DOMAIN_PARSERS: dict[str, callable] = {
     'himanatokiniyaruo.com': _parse_himanatokiniyaruo,
+    'blog.fc2.com': _parse_fc2blog,
 }
+
+
+def _resolve_domain(base_url: str) -> str:
+    """從 URL 提取有效網域（自動處理 web.archive.org 封存 URL）。"""
+    domain = urlparse(base_url).netloc.lower()
+    domain = re.sub(r'^www\.', '', domain)
+
+    # web.archive.org 封存網址 → 從路徑提取原始網域
+    if domain == 'web.archive.org':
+        orig_m = re.search(r'/web/\d+/(https?://[^/\s]+)', base_url)
+        if orig_m:
+            orig_domain = urlparse(orig_m.group(1)).netloc.lower()
+            return re.sub(r'^www\.', '', orig_domain)
+
+    return domain
 
 
 def parse_page_html(
@@ -217,14 +300,13 @@ def parse_page_html(
 
     依據 base_url 的網域自動選擇對應的解析器；
     若無匹配則使用預設解析器。
+    支援 web.archive.org 封存 URL 的網域識別。
 
     - 文本內容：提取的純文字，找不到時為 ``None``
     - 關聯連結：``[{'title': ..., 'url': ... or None, 'is_current': bool}, ...]``
     - 頁面標題：清理後的標題字串
     """
-    domain = urlparse(base_url).netloc.lower()
-    # 移除 www. 前綴後再匹配
-    domain = re.sub(r'^www\.', '', domain)
+    domain = _resolve_domain(base_url)
 
     for key, parser in _DOMAIN_PARSERS.items():
         if key in domain:

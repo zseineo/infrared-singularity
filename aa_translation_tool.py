@@ -87,10 +87,13 @@ class AATranslationTool(ctk.CTk):
 
         if parts:
             detail = "、".join(parts)
-            answer = messagebox.askyesno(
+            answer = messagebox.askyesnocancel(
                 "儲存設定？",
                 f"以下項目有未儲存的新增內容：\n{detail}\n\n是否在關閉前儲存至 AA_Settings.json？",
             )
+            if answer is None:
+                # 取消 → 不關閉程式
+                return
             if answer:
                 self.export_settings()
 

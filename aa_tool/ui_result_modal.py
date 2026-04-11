@@ -396,7 +396,24 @@ def show_result_modal(
             final_textbox.configure(text_color=color_code)
             app.save_cache()
 
-    def dl_html():
+    def save_direct():
+        """Ctrl+S：直接覆蓋原檔（若有 source_file），否則走另存新檔。"""
+        raw_text = final_textbox.get("1.0", tk.END).rstrip('\n')
+        if not raw_text:
+            show_toast("⚠️ 預覽視窗沒有內容！", color="#f39c12")
+            return
+
+        if source_file:
+            try:
+                app.write_html_file(source_file, raw_text)
+                show_toast(f"✅ 已儲存：{os.path.basename(source_file)}", color="#28a745")
+            except Exception as e:
+                show_toast(f"❌ 無法儲存: {e}", color="#dc3545", duration=5000)
+        else:
+            save_as()
+
+    def save_as():
+        """另存新檔對話框。"""
         raw_text = final_textbox.get("1.0", tk.END).rstrip('\n')
         if not raw_text:
             show_toast("⚠️ 預覽視窗沒有內容！", color="#f39c12")
@@ -431,7 +448,7 @@ def show_result_modal(
 
     ctk.CTkButton(grp3, text="底色", command=choose_bg_color, fg_color="#6c757d", hover_color="#5a6268", font=app.ui_small_font, width=45).pack(side="left", padx=2)
     ctk.CTkButton(grp3, text="文字色", command=choose_fg_color, fg_color="#17a2b8", hover_color="#138496", font=app.ui_small_font, width=45).pack(side="left", padx=2)
-    ctk.CTkButton(grp3, text="💾 儲存", command=dl_html, fg_color="#28a745", hover_color="#218838", font=app.ui_small_font, width=60).pack(side="left", padx=5)
+    ctk.CTkButton(grp3, text="💾 另存", command=save_as, fg_color="#28a745", hover_color="#218838", font=app.ui_small_font, width=60).pack(side="left", padx=5)
     ctk.CTkButton(grp3, text="↩ 返回", command=close_action, fg_color="#dc3545", hover_color="#c82333", font=app.ui_small_font, width=60).pack(side="left", padx=5)
 
     # ════════════════════════════════════════════════════════════
@@ -489,7 +506,7 @@ def show_result_modal(
         return "break"
 
     def save_shortcut(event=None):
-        dl_html()
+        save_direct()
         return "break"
 
     container.bind("<Control-f>", toggle_search)

@@ -94,13 +94,13 @@
 
     **群組 3 — 視窗控制:**
     *   **底色/文字色**: `choose_bg_color()` / `choose_fg_color()` 調整預覽視窗的背景色與文字色，設定持久化至暫存。
-    *   **儲存 HTML (`dl_html()`)**: 將預覽內容封裝進帶有 CSS 的 HTML 並儲存；利用 `write_html_file()` 逸出 `< >`，同時保全 `<span>` tag。
+    *   **💾 另存 (`save_as()`)**: 另存新檔對話框，將預覽內容封裝進帶有 CSS 的 HTML 並儲存。
     *   **關閉/返回**: 關閉前自動將當前預覽內容寫入 `preview_text_cache` 並呼叫 `save_cache()`。
 
     **搜尋列 (預設隱藏，`Ctrl+F` 切換):**
     *   `find_next()`: 在預覽文字中循環搜尋（不分大小寫）。
     *   **骰子搜尋**: 快速搜尋殘留的 `1D10:10` 骰子格式。
-    *   `Ctrl+S` 快捷鍵觸發儲存 HTML。
+    *   `Ctrl+S` 快捷鍵觸發直接存檔（覆蓋原檔，若有 `source_file`），否則走另存新檔。
 
 ### 4.5 網址讀取功能 (`open_url_fetch_dialog()`)
 *   **對應 Function**: `def open_url_fetch_dialog(self):`
@@ -138,7 +138,7 @@
 *   **外部裝載 (`import_html()`)**: 「打開已儲存的 HTML」，利用 `read_html_pre_content()` 從已生成的 HTML 中提取 `<pre>` 區塊內容並解碼，載入回預覽器繼續作業。
 *   **HTML 讀寫 Helpers**:
     *   `read_html_pre_content(file_path)`: 讀取 HTML 並以 `re.search(r'<pre>...<\/pre>')` 擷取 `<pre>` 內容並 `html.unescape`。
-    *   `write_html_file(file_path, text_content)`: 封裝 HTML（CSS 字體設定為 `MS PGothic`/`Meiryo` monospace, 16px），用分割保全 `<span>` tag 後 `html.escape` 其他內容。
+    *   `write_html_file(file_path, text_content)`: 封裝 HTML（CSS 字體設定為 `MS PGothic`/`Meiryo` monospace, 16px），用分割保全 `<span>` tag 後 `html.escape` 其他內容。包含 `viewport` meta 與手機 RWD 樣式（768px 以下字體縮小至 10px），支援觸控橫向捲動。
 
 ### 4.8 UI 通知系統
 *   **`show_toast(message, color, duration)`**: 在主視窗右上角顯示浮動提示，`duration` ms 後自動關閉。

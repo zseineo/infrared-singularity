@@ -134,9 +134,7 @@ class AATranslationTool(ctk.CTk):
         # Mode switch buttons
         mode_frame = ctk.CTkFrame(toolbar, fg_color="transparent")
         mode_frame.pack(side="left", padx=10)
-        self.btn_mode_translate = ctk.CTkButton(mode_frame, text="翻譯模式", width=80, height=28, font=self.ui_small_font, fg_color="#ff9800", hover_color="#e68a00", command=lambda: self.switch_mode("translate"))
-        self.btn_mode_translate.pack(side="left", padx=2)
-        self.btn_batch_qt = ctk.CTkButton(mode_frame, text="批次搜尋(Qt)", width=95, height=28, font=self.ui_small_font, fg_color="#6f42c1", hover_color="#5a3299", command=self.open_batch_search_qt)
+        self.btn_batch_qt = ctk.CTkButton(mode_frame, text="批次搜尋", width=95, height=28, font=self.ui_small_font, fg_color="#6f42c1", hover_color="#5a3299", command=self.open_batch_search_qt)
         self.btn_batch_qt.pack(side="left", padx=2)
         
         btn_import = ctk.CTkButton(toolbar, text="📥 讀取設定", command=self.import_settings, fg_color="#17a2b8", hover_color="#138496", font=self.ui_font)
@@ -188,8 +186,12 @@ class AATranslationTool(ctk.CTk):
         self.doc_num.insert(0, "1")
         self.doc_num.bind("<KeyRelease>", lambda e: self.schedule_save())
 
+        self.author_name_entry = ctk.CTkEntry(src_top, placeholder_text="作者名稱", font=self.ui_small_font, width=120)
+        self.author_name_entry.pack(side="right", padx=(0, 5))
+        self.author_name_entry.bind("<KeyRelease>", lambda e: self.schedule_save())
+
         self.doc_title = ctk.CTkEntry(src_top, placeholder_text="輸入標題 (選填)", font=self.ui_small_font, width=150)
-        self.doc_title.pack(side="right", padx=10)
+        self.doc_title.pack(side="right", padx=(10, 5))
         self.doc_title.bind("<KeyRelease>", lambda e: self.schedule_save())
 
         self.source_text = ctk.CTkTextbox(src_frame, font=self.aa_font, wrap="none", undo=True)
@@ -355,14 +357,11 @@ class AATranslationTool(ctk.CTk):
         self.gen_bar.grid_forget()
         self.edit_frame.grid_forget()
 
-        self.btn_mode_translate.configure(fg_color="#555555")
-
         if mode_name == "translate":
             self.grid_rowconfigure(0, weight=0)
             self.toolbar.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
             self.main_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=5)
             self.gen_bar.grid(row=3, column=0, sticky="ew", padx=10, pady=5)
-            self.btn_mode_translate.configure(fg_color="#ff9800")
         elif mode_name == "edit":
             self.grid_rowconfigure(0, weight=1)
             self.toolbar.grid_forget()
@@ -525,6 +524,7 @@ class AATranslationTool(ctk.CTk):
             current_url=getattr(self, 'current_url', ''),
             auto_copy=bool(self.auto_copy_switch.get()) if hasattr(self, 'auto_copy_switch') else False,
             batch_folder=self.batch_folder_var.get() if hasattr(self, 'batch_folder_var') else '',
+            author_name=self.author_name_entry.get() if hasattr(self, 'author_name_entry') else '',
         )
 
     def _apply_cache(self, cache: AppCache, load_preview_text: bool = False):
@@ -564,6 +564,9 @@ class AATranslationTool(ctk.CTk):
             self.auto_copy_switch.select()
         if cache.batch_folder and hasattr(self, 'batch_folder_var'):
             self.batch_folder_var.set(cache.batch_folder)
+        if cache.author_name and hasattr(self, 'author_name_entry'):
+            self.author_name_entry.delete(0, tk.END)
+            self.author_name_entry.insert(0, cache.author_name)
 
     def save_cache(self):
         self.settings_mgr.save_cache(self._gather_cache())
@@ -735,7 +738,8 @@ class AATranslationTool(ctk.CTk):
             def _fetch():
                 try:
                     page_html = _fetch_url(raw_url)
-                    text_content, nav_links, page_title = _parse_page_html(page_html, raw_url)
+                    author = self.author_name_entry.get().strip()
+                    text_content, nav_links, page_title = _parse_page_html(page_html, raw_url, author_name=author)
 
                     if text_content is None:
                         dialog.after(0, lambda: status_label.configure(
@@ -840,7 +844,8 @@ class AATranslationTool(ctk.CTk):
         def _fetch_next():
             try:
                 page_html = _fetch_url(next_url)
-                text_content, nav_links, page_title = _parse_page_html(page_html, next_url)
+                author = self.author_name_entry.get().strip()
+                text_content, nav_links, page_title = _parse_page_html(page_html, next_url, author_name=author)
 
                 if text_content is None:
                     self.after(0, lambda: self.show_toast("❌ 找不到 article 區塊！", color="#dc3545"))

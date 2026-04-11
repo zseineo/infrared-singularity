@@ -154,7 +154,7 @@ class BatchSearchWindow(QMainWindow):
         header = QHBoxLayout()
         lbl_h_name = QLabel("檔名")
         lbl_h_name.setFont(self.ui_small_font)
-        lbl_h_name.setFixedWidth(120)
+        lbl_h_name.setFixedWidth(180)
         header.addWidget(lbl_h_name)
 
         lbl_h_op = QLabel("操作")
@@ -251,7 +251,7 @@ class BatchSearchWindow(QMainWindow):
                         after = line[match_end:ctx_end]
 
                         stem = os.path.splitext(fname)[0]
-                        short_name = stem if len(stem) <= 12 else "…" + stem[-10:]
+                        short_name = stem if len(stem) <= 18 else "…" + stem[-16:]
 
                         matches.append({
                             'file_path': fpath,
@@ -334,7 +334,7 @@ class BatchSearchWindow(QMainWindow):
 
         lbl_name = QLabel(mi['short_name'])
         lbl_name.setFont(self.ui_small_font)
-        lbl_name.setFixedWidth(120)
+        lbl_name.setFixedWidth(180)
         lbl_name.setStyleSheet("color: #6f42c1;")
         row_layout.addWidget(lbl_name)
 
@@ -384,7 +384,7 @@ class BatchSearchWindow(QMainWindow):
 
         lbl_name = QLabel(mi['short_name'])
         lbl_name.setFont(self.ui_small_font)
-        lbl_name.setFixedWidth(120)
+        lbl_name.setFixedWidth(180)
         lbl_name.setStyleSheet("color: #6f42c1;")
         layout.addWidget(lbl_name)
 
@@ -460,7 +460,7 @@ class BatchSearchWindow(QMainWindow):
 
             lbl_name = QLabel(mi['short_name'])
             lbl_name.setFont(self.ui_small_font)
-            lbl_name.setFixedWidth(120)
+            lbl_name.setFixedWidth(180)
             lbl_name.setStyleSheet("color: #6c757d;")
             row_layout.addWidget(lbl_name)
 
@@ -663,7 +663,7 @@ class BatchSearchWindow(QMainWindow):
 
         lbl_name = QLabel(mi['short_name'])
         lbl_name.setFont(self.ui_small_font)
-        lbl_name.setFixedWidth(120)
+        lbl_name.setFixedWidth(180)
         lbl_name.setStyleSheet("color: #6f42c1;")
         layout.addWidget(lbl_name)
 

@@ -182,18 +182,18 @@ def _filter_color_by_author(text: str, author_name: str, *, author_only: bool = 
     is_author_block = False
 
     for line in lines:
-        if _POST_HEADER_RE.search(line):
-            # 先移除 span 標籤再判斷作者（標頭行可能含 color span）
-            clean_header = _COLOR_SPAN_RE.sub('', line)
-            is_author_block = _is_author_post(clean_header, author_name)
+        # 先移除 span 標籤再判斷標頭（標頭行可能被 color span 包住）
+        clean_line = _COLOR_SPAN_RE.sub('', line)
+        if _POST_HEADER_RE.search(clean_line):
+            is_author_block = _is_author_post(clean_line, author_name)
             if author_only and not is_author_block:
                 continue
             # 標頭行本身不保留顏色
-            result.append(clean_header)
+            result.append(clean_line)
         elif is_author_block:
             result.append(line)
         elif not author_only:
-            result.append(_COLOR_SPAN_RE.sub('', line))
+            result.append(clean_line)
 
     return _cleanup_unmatched_spans('\n'.join(result))
 

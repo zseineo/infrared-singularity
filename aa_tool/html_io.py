@@ -27,30 +27,15 @@ def write_html_file(file_path: str, text_content: str) -> None:
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AA_Translated</title>
     <style>
-        body {{
-            background-color: #fff;
-            color: #000;
-            padding: 10px;
-            margin: 0;
-        }}
+        body {{ background-color: #fff; color: #000; padding: 20px; }}
         pre {{
-            font-family: 'MS PGothic', 'Meiryo', 'Hiragino Kaku Gothic Pro', monospace;
+            font-family: 'MS PGothic', 'Meiryo', monospace;
             font-size: 16px;
             line-height: 1.2;
             white-space: pre;
             word-wrap: normal;
-            overflow-x: auto;
-            -webkit-overflow-scrolling: touch;
-        }}
-        @media (max-width: 768px) {{
-            body {{ padding: 5px; }}
-            pre {{
-                font-size: 10px;
-                line-height: 1.15;
-            }}
         }}
     </style>
 </head>

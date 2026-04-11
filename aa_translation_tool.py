@@ -528,6 +528,7 @@ class AATranslationTool(ctk.CTk):
             auto_copy=bool(self.auto_copy_switch.get()) if hasattr(self, 'auto_copy_switch') else False,
             batch_folder=self.batch_folder_var.get() if hasattr(self, 'batch_folder_var') else '',
             author_name=self.author_name_entry.get() if hasattr(self, 'author_name_entry') else '',
+            author_only=getattr(self, '_author_only', False),
         )
 
     def _apply_cache(self, cache: AppCache, load_preview_text: bool = False):
@@ -570,6 +571,7 @@ class AATranslationTool(ctk.CTk):
         if cache.author_name and hasattr(self, 'author_name_entry'):
             self.author_name_entry.delete(0, tk.END)
             self.author_name_entry.insert(0, cache.author_name)
+        self._author_only = cache.author_only
 
     def save_cache(self):
         self.settings_mgr.save_cache(self._gather_cache())
@@ -597,8 +599,14 @@ class AATranslationTool(ctk.CTk):
         top_frame.pack(fill="x", padx=10, pady=(10, 5))
 
         ctk.CTkLabel(top_frame, text="網址:", font=self.ui_small_font).pack(side="left")
-        url_entry = ctk.CTkEntry(top_frame, font=self.ui_small_font, width=420)
+        url_entry = ctk.CTkEntry(top_frame, font=self.ui_small_font, width=350)
         url_entry.pack(side="left", padx=5, fill="x", expand=True)
+
+        author_only_switch = ctk.CTkSwitch(top_frame, text="忽略留言", font=self.ui_small_font, width=40,
+                                            command=lambda: setattr(self, '_author_only', bool(author_only_switch.get())))
+        author_only_switch.pack(side="left", padx=5)
+        if getattr(self, '_author_only', False):
+            author_only_switch.select()
 
         status_label = ctk.CTkLabel(dialog, text="", font=self.ui_small_font, text_color="#888888")
         status_label.pack(fill="x", padx=15)
@@ -742,7 +750,8 @@ class AATranslationTool(ctk.CTk):
                 try:
                     page_html = _fetch_url(raw_url)
                     author = self.author_name_entry.get().strip()
-                    text_content, nav_links, page_title = _parse_page_html(page_html, raw_url, author_name=author)
+                    skip_comments = bool(author_only_switch.get())
+                    text_content, nav_links, page_title = _parse_page_html(page_html, raw_url, author_name=author, author_only=skip_comments)
 
                     if text_content is None:
                         dialog.after(0, lambda: status_label.configure(
@@ -848,7 +857,7 @@ class AATranslationTool(ctk.CTk):
             try:
                 page_html = _fetch_url(next_url)
                 author = self.author_name_entry.get().strip()
-                text_content, nav_links, page_title = _parse_page_html(page_html, next_url, author_name=author)
+                text_content, nav_links, page_title = _parse_page_html(page_html, next_url, author_name=author, author_only=getattr(self, '_author_only', False))
 
                 if text_content is None:
                     self.after(0, lambda: self.show_toast("❌ 找不到 article 區塊！", color="#dc3545"))

@@ -36,6 +36,8 @@ class AppCache:
     current_url: str = ""
     auto_copy: bool = False
     batch_folder: str = ""
+    author_name: str = ""
+    author_only: bool = False
 
 
 class SettingsManager:
@@ -134,6 +136,8 @@ class SettingsManager:
             cache.current_url = data.get('current_url', '')
             cache.auto_copy = bool(data.get('auto_copy', False))
             cache.batch_folder = data.get('batch_folder', '')
+            cache.author_name = data.get('author_name', '')
+            cache.author_only = bool(data.get('author_only', False))
         except Exception as e:
             print("Cache load failed:", e)
         return cache
@@ -155,6 +159,8 @@ class SettingsManager:
             'current_url': cache.current_url,
             'auto_copy': cache.auto_copy,
             'batch_folder': cache.batch_folder,
+            'author_name': cache.author_name,
+            'author_only': cache.author_only,
         }
         try:
             with open(self.get_cache_file(), 'w', encoding='utf-8') as f:

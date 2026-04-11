@@ -50,10 +50,164 @@ def fetch_url(url: str, *, timeout: int = 20) -> str:
 #  共用輔助
 # ════════════════════════════════════════════════════════════════
 
-def _extract_dt_dd_posts(container_html: str) -> list[str]:
+def _normalize_color_tags(text: str) -> str:
+    """將各種顏色標籤統一為 <span style="color:VALUE"> 格式。
+
+    支援：
+    - <span style="...color:VALUE..."> （含混合屬性）
+    - <font color="VALUE"> / </font>
+    """
+    # <font color="..."> → <span style="color:...">
+    text = re.sub(
+        r'<font\s+color="([^"]+)"[^>]*>',
+        lambda m: f'<span style="color:{m.group(1)}">',
+        text,
+    )
+    text = text.replace('</font>', '</span>')
+
+    # <span style="...color:VALUE..."> → <span style="color:VALUE">
+    def _repl(m: re.Match) -> str:
+        style = m.group(1)
+        cm = re.search(r'color\s*:\s*([^;"]+)', style)
+        if cm:
+            return f'<span style="color:{cm.group(1).strip()}">'
+        return ''
+    text = re.sub(r'<span\s+style="([^"]*color[^"]*)">', _repl, text)
+
+    return text
+
+
+_BLACK_SPAN_RE = re.compile(
+    r'<span\s+style="color:\s*(?:#0{3,6}|black)\s*">(.*?)</span>',
+    re.DOTALL,
+)
+
+
+def _strip_tags_keep_color(text: str) -> str:
+    """移除 HTML 標籤，但保留 <span style="color:..."> 和 </span>。
+
+    黑色（#000, #000000, black）的 span 會被移除（只保留內文）。
+    """
+    text = _normalize_color_tags(text)
+    text = _BLACK_SPAN_RE.sub(r'\1', text)
+    return re.sub(r'<(?!span\s+style="color:|/span>)[^>]+>', '', text)
+
+
+def _strip_all_tags(text: str) -> str:
+    """移除所有 HTML 標籤（不保留任何 span）。"""
+    return re.sub(r'<[^>]+>', '', text)
+
+
+_OPEN_COLOR_RE = re.compile(r'<span\s+style="color:[^"]*">')
+_CLOSE_COLOR_RE = re.compile(r'</span>')
+
+
+def _cleanup_unmatched_spans(text: str) -> str:
+    """移除不配對的 color span 開/閉標籤。
+
+    處理跨 dt/dd 邊界的 span：
+    - 開標籤在作者 dd 中，閉標籤在下一個 dt 中被移除 → 孤兒開標籤
+    - 閉標籤在 dd 中，開標籤在 dt 中被移除 → 孤兒閉標籤
+    """
+    opens = list(_OPEN_COLOR_RE.finditer(text))
+    closes = list(_CLOSE_COLOR_RE.finditer(text))
+
+    # 從左到右配對，找出孤兒
+    events: list[tuple[int, int, str]] = []  # (pos, end, kind)
+    for m in opens:
+        events.append((m.start(), m.end(), 'open'))
+    for m in closes:
+        events.append((m.start(), m.end(), 'close'))
+    events.sort(key=lambda e: e[0])
+
+    remove_ranges: list[tuple[int, int]] = []
+    stack: list[tuple[int, int]] = []  # open tag (start, end)
+
+    for pos, end, kind in events:
+        if kind == 'open':
+            stack.append((pos, end))
+        else:
+            if stack:
+                stack.pop()
+            else:
+                # 孤兒 </span>
+                remove_ranges.append((pos, end))
+
+    # 剩餘未關閉的 <span>
+    for pos, end in stack:
+        remove_ranges.append((pos, end))
+
+    if not remove_ranges:
+        return text
+
+    # 從後往前移除
+    result = list(text)
+    for start, end in sorted(remove_ranges, reverse=True):
+        result[start:end] = []
+    return ''.join(result)
+
+
+# 貼文標頭行 — 用於在非 dt/dd 結構中分割貼文
+_POST_HEADER_RE = re.compile(r'^\s*\d+\s*(?:名前|Name)\s*[：:]')
+_COLOR_SPAN_RE = re.compile(r'<span\s+style="color:[^"]*">|</span>')
+
+# 從標頭提取投稿者名稱：「N 名前：NAME[...]」→ NAME
+_POSTER_NAME_RE = re.compile(r'(?:名前|Name)\s*[：:]\s*(.+?)(?:\[|投稿日|$)')
+
+
+def _is_author_post(header_text: str, author_name: str) -> bool:
+    """判斷貼文標頭是否屬於指定作者。
+
+    從「N 名前：POSTER_NAME[...]」格式中提取投稿者名稱，
+    再與 author_name 精確比對（去除前後空白後完全一致）。
+    """
+    if not author_name:
+        return False
+    m = _POSTER_NAME_RE.search(header_text)
+    if not m:
+        return author_name in header_text  # fallback
+    poster_name = m.group(1).strip()
+    # 精確比對：提取的名稱必須與 author_name 完全一致
+    return poster_name == author_name
+
+
+def _filter_color_by_author(text: str, author_name: str, *, author_only: bool = False) -> str:
+    """在無 dt/dd 結構的文字中，僅保留作者貼文的顏色標記。
+
+    以「N 名前：」行作為貼文分界，判斷該貼文是否為指定作者。
+    若 author_only=True，則完全跳過非作者的貼文。
+    """
+    lines = text.split('\n')
+    result: list[str] = []
+    is_author_block = False
+
+    for line in lines:
+        if _POST_HEADER_RE.search(line):
+            is_author_block = _is_author_post(line, author_name)
+            if author_only and not is_author_block:
+                continue
+            # 標頭行本身不保留顏色
+            result.append(_COLOR_SPAN_RE.sub('', line))
+        elif is_author_block:
+            result.append(line)
+        elif not author_only:
+            result.append(_COLOR_SPAN_RE.sub('', line))
+
+    return _cleanup_unmatched_spans('\n'.join(result))
+
+
+def _extract_dt_dd_posts(
+    container_html: str,
+    author_name: str = "",
+    author_only: bool = False,
+) -> list[str]:
     """從含有 <dt>/<dd> 的 HTML 片段提取貼文列表。
 
     回傳格式：['dt文字\n內文行1\n內文行2', ...]
+
+    若指定 author_name，僅保留該作者貼文的顏色標記；
+    其他貼文的 HTML 標籤全部移除。
+    若 author_only=True 且指定 author_name，則完全跳過非作者貼文。
     """
     posts = re.finditer(
         r'<dt(?:\s[^>]*)?>(.+?)</dt>\s*<dd(?:\s[^>]*)?>(.*?)(?=<dt|</dl>|$)',
@@ -66,9 +220,20 @@ def _extract_dt_dd_posts(container_html: str) -> list[str]:
         dt_text = re.sub(r'<[^>]+>', '', dt_content)
         dt_text = html.unescape(dt_text).strip()
 
+        # 判斷是否為指定作者的貼文
+        is_author = _is_author_post(dt_text, author_name)
+
+        # 忽略非作者貼文
+        if author_only and author_name and not is_author:
+            continue
+
         dd_content = post.group(2)
         dd_text = re.sub(r'<br\s*/?>', '\n', dd_content)
-        dd_text = re.sub(r'<[^>]+>', '', dd_text)
+        if is_author:
+            dd_text = _strip_tags_keep_color(dd_text)
+            dd_text = _cleanup_unmatched_spans(dd_text)
+        else:
+            dd_text = _strip_all_tags(dd_text)
         dd_text = html.unescape(dd_text)
         dd_lines = dd_text.split('\n')
         while dd_lines and not dd_lines[-1].strip():
@@ -85,7 +250,7 @@ def _extract_dt_dd_posts(container_html: str) -> list[str]:
 #  解析器：預設格式
 # ════════════════════════════════════════════════════════════════
 
-def _parse_default(page_html: str, base_url: str) -> tuple[str | None, list[dict], str]:
+def _parse_default(page_html: str, base_url: str, *, author_name: str = "", author_only: bool = False) -> tuple[str | None, list[dict], str]:
     """解析預設格式：<div class="article"> + <dl class="relate_dl">。"""
     m = re.search(r'<div\s+class="article">', page_html)
     if not m:
@@ -102,7 +267,7 @@ def _parse_default(page_html: str, base_url: str) -> tuple[str | None, list[dict
     end = min(candidates) if candidates else len(page_html)
     article_html = page_html[start:end]
 
-    lines_out = _extract_dt_dd_posts(article_html)
+    lines_out = _extract_dt_dd_posts(article_html, author_name=author_name, author_only=author_only)
     text_content = '\n\n'.join(lines_out)
 
     # 頁面標題
@@ -139,7 +304,7 @@ def _parse_default(page_html: str, base_url: str) -> tuple[str | None, list[dict
 #  解析器：himanatokiniyaruo.com
 # ════════════════════════════════════════════════════════════════
 
-def _parse_himanatokiniyaruo(page_html: str, base_url: str) -> tuple[str | None, list[dict], str]:
+def _parse_himanatokiniyaruo(page_html: str, base_url: str, *, author_name: str = "", author_only: bool = False) -> tuple[str | None, list[dict], str]:
     """解析 himanatokiniyaruo.com 格式。
 
     內文：<dt id="N"> ... </dt><dd> ... </dd> 結構
@@ -175,7 +340,7 @@ def _parse_himanatokiniyaruo(page_html: str, base_url: str) -> tuple[str | None,
     content_end = first_dt.start() + end_m.start() if end_m else len(page_html)
     content_html = page_html[first_dt.start():content_end]
 
-    lines_out = _extract_dt_dd_posts(content_html)
+    lines_out = _extract_dt_dd_posts(content_html, author_name=author_name, author_only=author_only)
     text_content = '\n\n'.join(lines_out) if lines_out else None
 
     # ── 關聯連結 ──
@@ -204,7 +369,7 @@ def _parse_himanatokiniyaruo(page_html: str, base_url: str) -> tuple[str | None,
 #  解析器：FC2 Blog
 # ════════════════════════════════════════════════════════════════
 
-def _parse_fc2blog(page_html: str, base_url: str) -> tuple[str | None, list[dict], str]:
+def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", author_only: bool = False) -> tuple[str | None, list[dict], str]:
     """解析 FC2 Blog 格式（含 web.archive.org 封存版）。
 
     內文：<div class="ently_text">，截止於 fc2button-clap div 或 relate_dl。
@@ -231,8 +396,14 @@ def _parse_fc2blog(page_html: str, base_url: str) -> tuple[str | None, list[dict
     # 移除 <a> 連結整段（含導覽文字如 Next/Back/前往目錄）
     content_html = re.sub(r'<a\s[^>]*>.*?</a>', '', content_html, flags=re.DOTALL)
     content_text = re.sub(r'<br\s*/?>', '\n', content_html)
-    content_text = re.sub(r'<[^>]+>', '', content_text)
+    content_text = _strip_tags_keep_color(content_text)
     content_text = html.unescape(content_text)
+
+    # 依作者名稱過濾顏色：非作者貼文移除 color span（或完全跳過）
+    if author_name:
+        content_text = _filter_color_by_author(content_text, author_name, author_only=author_only)
+    else:
+        content_text = re.sub(r'<span\s+style="color:[^"]*">|</span>', '', content_text)
 
     lines = content_text.split('\n')
     while lines and not lines[0].strip():
@@ -295,12 +466,18 @@ def _resolve_domain(base_url: str) -> str:
 def parse_page_html(
     page_html: str,
     base_url: str,
+    *,
+    author_name: str = "",
+    author_only: bool = False,
 ) -> tuple[str | None, list[dict], str]:
     """解析頁面 HTML，回傳 (文本內容, 關聯連結列表, 頁面標題)。
 
     依據 base_url 的網域自動選擇對應的解析器；
     若無匹配則使用預設解析器。
     支援 web.archive.org 封存 URL 的網域識別。
+
+    若指定 author_name，僅保留該作者貼文的顏色標記。
+    若 author_only=True 且指定 author_name，則完全排除非作者貼文。
 
     - 文本內容：提取的純文字，找不到時為 ``None``
     - 關聯連結：``[{'title': ..., 'url': ... or None, 'is_current': bool}, ...]``
@@ -310,6 +487,6 @@ def parse_page_html(
 
     for key, parser in _DOMAIN_PARSERS.items():
         if key in domain:
-            return parser(page_html, base_url)
+            return parser(page_html, base_url, author_name=author_name, author_only=author_only)
 
-    return _parse_default(page_html, base_url)
+    return _parse_default(page_html, base_url, author_name=author_name, author_only=author_only)

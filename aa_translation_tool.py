@@ -162,8 +162,8 @@ class AATranslationTool(ctk.CTk):
         
         main_frame.grid_rowconfigure(0, weight=4) # Top section height
         main_frame.grid_rowconfigure(2, weight=3) # Bottom section height
-        main_frame.grid_columnconfigure(0, weight=6) # Left side width
-        main_frame.grid_columnconfigure(1, weight=4) # Right side width
+        main_frame.grid_columnconfigure(0, weight=5) # Left side width
+        main_frame.grid_columnconfigure(1, weight=5) # Right side width
         
         # === Top Segment ===
         # Left: Source Text
@@ -173,7 +173,7 @@ class AATranslationTool(ctk.CTk):
         src_top = ctk.CTkFrame(src_frame, fg_color="transparent")
         src_top.pack(fill="x", padx=5, pady=2)
         ctk.CTkLabel(src_top, text="1. 原始文本 (貼上來源):", font=self.ui_font).pack(side="left")
-        ctk.CTkButton(src_top, text="🌐 網址讀取", command=self.open_url_fetch_dialog, fg_color="#6f42c1", hover_color="#5a32a3", text_color="white", font=self.ui_small_font, width=90, height=26).pack(side="left", padx=(8, 2))
+        ctk.CTkButton(src_top, text="🌐 網址讀取", command=self.open_url_fetch_qt, fg_color="#6f42c1", hover_color="#5a32a3", text_color="white", font=self.ui_small_font, width=90, height=26).pack(side="left", padx=(8, 2))
         self.btn_next_chapter = ctk.CTkButton(src_top, text="下一話 ▶", command=self.fetch_next_chapter, fg_color="#0d6efd", hover_color="#0b5ed7", text_color="white", font=self.ui_small_font, width=75, height=26)
         self.btn_next_chapter.pack(side="left", padx=2)
         ctk.CTkButton(src_top, text="📋 複製網址", command=self.copy_current_url, fg_color="#6c757d", hover_color="#5a6268", text_color="white", font=self.ui_small_font, width=85, height=26).pack(side="left", padx=2)
@@ -221,6 +221,12 @@ class AATranslationTool(ctk.CTk):
         glossary_header.grid(row=2, column=0, sticky="ew", padx=5, pady=2)
         ctk.CTkLabel(glossary_header, text="術語表 (日文=中文):", font=self.ui_font).pack(side="left")
 
+        self._glossary_dup_label = ctk.CTkLabel(glossary_header, text="", font=self.ui_small_font, text_color="#ff4444")
+        self._glossary_dup_label.pack(side="left", padx=5)
+        self._glossary_dup_btn = ctk.CTkButton(glossary_header, text="跳到重複", width=70, height=22, font=self.ui_small_font, fg_color="#e67e22", hover_color="#d35400", command=self._jump_to_glossary_dup)
+        self._glossary_dup_positions: list[tuple[str, int]] = []  # (tab, line_idx)
+        self._glossary_dup_cycle_idx = 0
+
         self.glossary_tab_var = tk.StringVar(value="一般")
         glossary_container = ctk.CTkFrame(right_frame)
         glossary_container.grid(row=3, column=0, sticky="nsew", padx=5, pady=5)
@@ -234,6 +240,8 @@ class AATranslationTool(ctk.CTk):
         self.glossary_text_temp = ctk.CTkTextbox(glossary_container, font=self.aa_font, wrap="none", fg_color="#3b2a2a", undo=True)
         self.glossary_text.bind("<KeyRelease>", lambda e: self.schedule_save())
         self.glossary_text_temp.bind("<KeyRelease>", lambda e: self.schedule_save())
+        self.glossary_text.bind("<<Paste>>", lambda e: self.after(50, self._check_glossary_duplicates))
+        self.glossary_text_temp.bind("<<Paste>>", lambda e: self.after(50, self._check_glossary_duplicates))
 
         def switch_glossary_tab(tab_name):
             self.glossary_tab_var.set(tab_name)
@@ -441,6 +449,56 @@ class AATranslationTool(ctk.CTk):
             except OSError:
                 pass
 
+    # ── PyQt6 編輯器（獨立 process，Phase A） ──
+
+    def open_edit_qt(self, html_path: str, reload_target=None):
+        """啟動獨立的 PyQt6 編輯器視窗，編輯結束後重新載入內容。
+
+        reload_target: customtkinter CTkTextbox，subprocess 結束後重讀檔案
+                       內容並覆蓋此 widget。為 None 則不重載。
+        """
+        script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "aa_edit_qt.py")
+        if not os.path.exists(script):
+            self.show_toast("❌ 找不到 aa_edit_qt.py", color="#dc3545")
+            return
+
+        args = [sys.executable, script, "--html-file", html_path]
+        try:
+            self._edit_qt_process = subprocess.Popen(args)
+        except OSError as e:
+            self.show_toast(f"❌ 啟動失敗: {e}", color="#dc3545", duration=5000)
+            return
+        self._edit_qt_html_path = html_path
+        self._edit_qt_reload_target = reload_target
+        self.after(500, self._poll_edit_qt)
+
+    def _poll_edit_qt(self):
+        """輪詢 PyQt6 編輯器 subprocess；結束後重新載入 HTML 至原編輯器。"""
+        proc = getattr(self, '_edit_qt_process', None)
+        if proc is None:
+            return
+        if proc.poll() is not None:
+            # 進程結束，重新載入
+            self._edit_qt_process = None
+            html_path = getattr(self, '_edit_qt_html_path', '')
+            target = getattr(self, '_edit_qt_reload_target', None)
+            if html_path and os.path.exists(html_path):
+                try:
+                    new_text = read_html_pre_content(html_path) or ""
+                except OSError as e:
+                    self.show_toast(f"❌ 重新載入失敗: {e}", color="#dc3545")
+                    return
+                if target is not None:
+                    try:
+                        target.delete("1.0", "end")
+                        target.insert("1.0", new_text)
+                        self.show_toast("✅ 已從 Qt 編輯器重新載入", color="#28a745")
+                    except Exception:
+                        pass
+            return
+        self.after(500, self._poll_edit_qt)
+
     def read_html_pre_content(self, file_path):
         return read_html_pre_content(file_path)
 
@@ -501,6 +559,70 @@ class AATranslationTool(ctk.CTk):
         g2 = self.glossary_text_temp.get("1.0", tk.END).strip()
         parts = [p for p in [g1, g2] if p]
         return '\n'.join(parts)
+
+    def _check_glossary_duplicates(self):
+        """檢查兩個術語表中等號左邊是否有重複的原文。"""
+        g1_lines = self.glossary_text.get("1.0", tk.END).strip().split('\n')
+        g2_lines = self.glossary_text_temp.get("1.0", tk.END).strip().split('\n')
+
+        # 收集所有 key 及其位置: (tab_name, line_index_0based)
+        key_positions: dict[str, list[tuple[str, int]]] = {}
+        for i, line in enumerate(g1_lines):
+            if '=' in line:
+                key = line.split('=', 1)[0].strip()
+                if key:
+                    key_positions.setdefault(key, []).append(("一般", i))
+        for i, line in enumerate(g2_lines):
+            if '=' in line:
+                key = line.split('=', 1)[0].strip()
+                if key:
+                    key_positions.setdefault(key, []).append(("臨時", i))
+
+        # 找出有重複的 key
+        dup_positions: list[tuple[str, int]] = []
+        dup_keys: list[str] = []
+        for key, positions in key_positions.items():
+            if len(positions) >= 2:
+                dup_keys.append(key)
+                dup_positions.extend(positions)
+
+        self._glossary_dup_positions = dup_positions
+        self._glossary_dup_cycle_idx = 0
+
+        if dup_keys:
+            self._glossary_dup_label.configure(text=f"⚠ 重複原文: {', '.join(dup_keys[:5])}{'...' if len(dup_keys) > 5 else ''}")
+            self._glossary_dup_btn.pack(side="left", padx=2)
+        else:
+            self._glossary_dup_label.configure(text="")
+            self._glossary_dup_btn.pack_forget()
+
+    def _jump_to_glossary_dup(self):
+        """循環跳到下一個重複術語位置。"""
+        if not self._glossary_dup_positions:
+            return
+        tab_name, line_idx = self._glossary_dup_positions[self._glossary_dup_cycle_idx]
+        self._glossary_dup_cycle_idx = (self._glossary_dup_cycle_idx + 1) % len(self._glossary_dup_positions)
+
+        # 切換到對應的 tab
+        current_tab = self.glossary_tab_var.get()
+        if current_tab != tab_name:
+            # 找到 switch_glossary_tab 中建立的 tab 按鈕來切換
+            if tab_name == "一般":
+                self.glossary_text_temp.grid_forget()
+                self.glossary_text.grid(row=1, column=0, sticky="nsew")
+            else:
+                self.glossary_text.grid_forget()
+                self.glossary_text_temp.grid(row=1, column=0, sticky="nsew")
+            self.glossary_tab_var.set(tab_name)
+
+        # 選取目標行
+        target_widget = self.glossary_text if tab_name == "一般" else self.glossary_text_temp
+        target_widget.tag_remove("sel", "1.0", tk.END)
+        line_start = f"{line_idx + 1}.0"
+        line_end = f"{line_idx + 1}.end"
+        target_widget.tag_add("sel", line_start, line_end)
+        target_widget.see(line_start)
+        target_widget.focus()
 
     def schedule_save(self):
         if self._save_timer is not None:
@@ -580,239 +702,171 @@ class AATranslationTool(ctk.CTk):
         cache = self.settings_mgr.load_cache()
         self._apply_cache(cache, load_preview_text)
 
-    def open_url_fetch_dialog(self):
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("🌐 網址讀取")
-        dialog.geometry("700x600")
-        dialog.transient(self)
-        dialog.grab_set()
-        dialog.focus_force()
+    def open_url_fetch_qt(self):
+        """啟動獨立的 PyQt6 網址讀取視窗，並開始 IPC 輪詢。
 
-        # --- URL history & related links (load from attribute) ---
+        Qt 子行程只負責 UI；實際抓取與解析由主程式執行，
+        以確保作者名稱 (`self.author_name_entry`) 總是取最新值。
+        """
         if not hasattr(self, 'url_history'):
             self.url_history = []
         if not hasattr(self, 'url_related_links'):
             self.url_related_links = []
 
-        # --- Top: URL input + fetch button ---
-        top_frame = ctk.CTkFrame(dialog, fg_color="transparent")
-        top_frame.pack(fill="x", padx=10, pady=(10, 5))
-
-        ctk.CTkLabel(top_frame, text="網址:", font=self.ui_small_font).pack(side="left")
-        url_entry = ctk.CTkEntry(top_frame, font=self.ui_small_font, width=350)
-        url_entry.pack(side="left", padx=5, fill="x", expand=True)
-
-        author_only_switch = ctk.CTkSwitch(top_frame, text="忽略留言", font=self.ui_small_font, width=40,
-                                            command=lambda: setattr(self, '_author_only', bool(author_only_switch.get())))
-        author_only_switch.pack(side="left", padx=5)
-        if getattr(self, '_author_only', False):
-            author_only_switch.select()
-
-        status_label = ctk.CTkLabel(dialog, text="", font=self.ui_small_font, text_color="#888888")
-        status_label.pack(fill="x", padx=15)
-
-        # --- Middle: Related links navigation ---
-        nav_frame = ctk.CTkFrame(dialog)
-        nav_frame.pack(fill="x", padx=10, pady=5)
-        ctk.CTkLabel(nav_frame, text="關聯記事:", font=self.ui_small_font).pack(anchor="w", padx=5, pady=2)
-
-        nav_scroll = ctk.CTkScrollableFrame(nav_frame, height=160)
-        nav_scroll.pack(fill="x", padx=5, pady=(0, 5))
-
-        # --- Bottom: URL history ---
-        hist_frame = ctk.CTkFrame(dialog)
-        hist_frame.pack(fill="both", expand=True, padx=10, pady=5)
-
-        hist_top = ctk.CTkFrame(hist_frame, fg_color="transparent")
-        hist_top.pack(fill="x", padx=5, pady=2)
-        ctk.CTkLabel(hist_top, text="讀取紀錄:", font=self.ui_small_font).pack(side="left")
-
-        def clear_history():
-            self.url_history.clear()
-            self.schedule_save()
-            refresh_history()
-
-        ctk.CTkButton(hist_top, text="清除紀錄", width=70, height=22,
-                       fg_color="#dc3545", hover_color="#c82333",
-                       font=self.ui_small_font, command=clear_history).pack(side="right")
-
-        hist_scroll = ctk.CTkScrollableFrame(hist_frame, height=150)
-        hist_scroll.pack(fill="both", expand=True, padx=5, pady=(0, 5))
-
-        def refresh_history():
-            for w in hist_scroll.winfo_children():
-                w.destroy()
-            for entry in reversed(self.url_history):
-                row = ctk.CTkFrame(hist_scroll, fg_color="transparent")
-                row.pack(fill="x", pady=1)
-                title_text = entry.get('title', entry['url'])
-                if len(title_text) > 60:
-                    title_text = title_text[:60] + "…"
-                lbl = ctk.CTkLabel(row, text=title_text, font=self.ui_small_font,
-                                   text_color="#6f42c1", cursor="hand2", anchor="w")
-                lbl.pack(side="left", fill="x", expand=True, padx=5)
-                _url = entry['url']
-                lbl.bind("<Button-1>", lambda e, u=_url: (url_entry.delete(0, tk.END),
-                                                           url_entry.insert(0, u)))
-                ctk.CTkButton(row, text="讀取", width=45, height=20,
-                              fg_color="#17a2b8", hover_color="#138496",
-                              font=self.ui_small_font,
-                              command=lambda u=_url: (url_entry.delete(0, tk.END),
-                                                       url_entry.insert(0, u),
-                                                       do_fetch())).pack(side="right", padx=2)
-
-        def refresh_nav(links):
-            for w in nav_scroll.winfo_children():
-                w.destroy()
-            if not links:
-                ctk.CTkLabel(nav_scroll, text="（尚未讀取或無關聯記事）",
-                             font=self.ui_small_font, text_color="#888888").pack(anchor="w", padx=5)
-                return
-
-            # Find current page index
-            current_idx = -1
-            for i, lk in enumerate(links):
-                if lk.get('is_current'):
-                    current_idx = i
-                    break
-
-            for i, lk in enumerate(links):
-                row = ctk.CTkFrame(nav_scroll, fg_color="transparent")
-                row.pack(fill="x", pady=1)
-
-                # Indicator
-                if lk.get('is_current'):
-                    indicator = "▶ "
-                    text_color = "#dc3545"
-                else:
-                    indicator = "　"
-                    text_color = "#0d6efd"
-
-                title = indicator + lk['title']
-                if len(title) > 65:
-                    title = title[:65] + "…"
-
-                if lk.get('url'):
-                    lbl = ctk.CTkLabel(row, text=title, font=self.ui_small_font,
-                                       text_color=text_color, cursor="hand2", anchor="w")
-                    lbl.pack(side="left", fill="x", expand=True, padx=2)
-                    _url = lk['url']
-                    lbl.bind("<Button-1>", lambda e, u=_url: (url_entry.delete(0, tk.END),
-                                                               url_entry.insert(0, u),
-                                                               do_fetch()))
-                else:
-                    # Current page (no link)
-                    lbl = ctk.CTkLabel(row, text=title, font=self.ui_small_font,
-                                       text_color=text_color, anchor="w")
-                    lbl.pack(side="left", fill="x", expand=True, padx=2)
-
-            # Prev / Next buttons
-            btn_row = ctk.CTkFrame(nav_scroll, fg_color="transparent")
-            btn_row.pack(fill="x", pady=(5, 0))
-
-            if current_idx > 0:
-                prev_lk = links[current_idx - 1]
-                if prev_lk.get('url'):
-                    ctk.CTkButton(btn_row, text="▲ 上一話", width=90, height=26,
-                                  fg_color="#0d6efd", hover_color="#0b5ed7",
-                                  font=self.ui_small_font,
-                                  command=lambda u=prev_lk['url']: (
-                                      url_entry.delete(0, tk.END),
-                                      url_entry.insert(0, u),
-                                      do_fetch())).pack(side="left", padx=5)
-
-            if current_idx >= 0 and current_idx < len(links) - 1:
-                next_lk = links[current_idx + 1]
-                if next_lk.get('url'):
-                    ctk.CTkButton(btn_row, text="▼ 下一話", width=90, height=26,
-                                  fg_color="#0d6efd", hover_color="#0b5ed7",
-                                  font=self.ui_small_font,
-                                  command=lambda u=next_lk['url']: (
-                                      url_entry.delete(0, tk.END),
-                                      url_entry.insert(0, u),
-                                      do_fetch())).pack(side="left", padx=5)
-
-        def do_fetch():
-            raw_url = url_entry.get().strip()
-            if not raw_url:
-                status_label.configure(text="⚠️ 請輸入網址！", text_color="#f39c12")
-                return
-            if not raw_url.startswith('http'):
-                raw_url = 'https://' + raw_url
-                url_entry.delete(0, tk.END)
-                url_entry.insert(0, raw_url)
-
-            status_label.configure(text="⏳ 讀取中…", text_color="#17a2b8")
-            fetch_btn.configure(state="disabled")
-            dialog.update_idletasks()
-
-            def _fetch():
+        cmd_file = os.path.join(tempfile.gettempdir(), "aa_url_fetch_cmd.json")
+        reverse_cmd_file = os.path.join(tempfile.gettempdir(), "aa_url_fetch_reverse_cmd.json")
+        init_file = os.path.join(tempfile.gettempdir(), "aa_url_fetch_init.json")
+        for f in (cmd_file, reverse_cmd_file, init_file):
+            if os.path.exists(f):
                 try:
-                    page_html = _fetch_url(raw_url)
-                    author = self.author_name_entry.get().strip()
-                    skip_comments = bool(author_only_switch.get())
-                    text_content, nav_links, page_title = _parse_page_html(page_html, raw_url, author_name=author, author_only=skip_comments)
+                    os.remove(f)
+                except OSError:
+                    pass
 
-                    if text_content is None:
-                        dialog.after(0, lambda: status_label.configure(
-                            text="❌ 找不到 article 區塊！", text_color="#dc3545"))
-                        dialog.after(0, lambda: fetch_btn.configure(state="normal"))
-                        return
+        init_data = {
+            "url_history": self.url_history,
+            "url_related_links": self.url_related_links,
+            "current_url": getattr(self, 'current_url', ''),
+            "author_only": bool(getattr(self, '_author_only', False)),
+            "initial_url": getattr(self, 'current_url', ''),
+        }
+        try:
+            with open(init_file, "w", encoding="utf-8") as f:
+                json.dump(init_data, f, ensure_ascii=False)
+        except OSError:
+            pass
 
-                    def _apply():
-                        # Put text into source_text, with title as first line
-                        self.source_text.delete("1.0", tk.END)
-                        display_title = _extract_work_title(page_title) if page_title else ""
-                        if display_title:
-                            self.source_text.insert("1.0", display_title + "\n\n" + text_content)
-                        else:
-                            self.source_text.insert("1.0", text_content)
-                        self.after(50, self.check_chapter_number)
-                        self._update_work_title(display_title)
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aa_url_fetch_qt.py")
+        args = [sys.executable, script,
+                "--cmd-file", cmd_file,
+                "--reverse-cmd-file", reverse_cmd_file,
+                "--init-file", init_file]
 
-                        # Update related links (and persist)
-                        self.url_related_links = nav_links
-                        self.schedule_save()
-                        refresh_nav(nav_links)
+        self._url_fetch_qt_process = subprocess.Popen(args)
+        self._url_fetch_cmd_file = cmd_file
+        self._url_fetch_reverse_cmd_file = reverse_cmd_file
+        self._poll_url_fetch_commands()
 
-                        # Track current URL and add to history
-                        self.current_url = raw_url
-                        hist_entry = {'url': raw_url, 'title': page_title or raw_url}
-                        self.url_history = [h for h in self.url_history if h['url'] != raw_url]
-                        self.url_history.append(hist_entry)
-                        # Keep last 50
-                        if len(self.url_history) > 50:
-                            self.url_history = self.url_history[-50:]
-                        self.schedule_save()
-                        refresh_history()
+    def _poll_url_fetch_commands(self):
+        """每 500ms 檢查 IPC 命令檔；subprocess 結束即停止輪詢。"""
+        proc = getattr(self, '_url_fetch_qt_process', None)
+        if proc and proc.poll() is not None:
+            self._url_fetch_qt_process = None
+            return
 
-                        line_count = text_content.count('\n') + 1
-                        self.show_toast(f"✅ 網址讀取成功！共 {line_count} 行")
-                        fetch_btn.configure(state="normal")
+        cmd_file = getattr(self, '_url_fetch_cmd_file', '')
+        if cmd_file and os.path.exists(cmd_file):
+            try:
+                with open(cmd_file, 'r', encoding='utf-8') as f:
+                    cmd = json.load(f)
+                os.remove(cmd_file)
+            except (json.JSONDecodeError, OSError):
+                cmd = None
 
-                        # Auto-close dialog after successful fetch
-                        dialog.after(300, lambda: dialog.destroy() if dialog.winfo_exists() else None)
+            if cmd:
+                action = cmd.get('action')
+                if action == 'fetch_request':
+                    self._handle_url_fetch_request(
+                        cmd.get('url', ''),
+                        bool(cmd.get('author_only', False)),
+                    )
+                elif action == 'clear_history':
+                    self.url_history = []
+                    self.schedule_save()
+                    self._write_url_fetch_reverse({
+                        'action': 'history_cleared',
+                        'url_history': self.url_history,
+                    })
+                elif action == 'close_sync':
+                    self._author_only = bool(cmd.get('author_only', False))
+                    self.schedule_save()
 
-                    dialog.after(0, _apply)
+        self.after(500, self._poll_url_fetch_commands)
 
-                except Exception as ex:
-                    dialog.after(0, lambda: status_label.configure(
-                        text=f"❌ 讀取失敗: {ex}", text_color="#dc3545"))
-                    dialog.after(0, lambda: fetch_btn.configure(state="normal"))
+    def _write_url_fetch_reverse(self, cmd: dict, retries: int = 20):
+        """寫入反向命令檔；若 Qt 尚未消費，延後重試。"""
+        rev = getattr(self, '_url_fetch_reverse_cmd_file', '')
+        if not rev:
+            return
+        if os.path.exists(rev):
+            if retries > 0:
+                self.after(100, lambda: self._write_url_fetch_reverse(cmd, retries - 1))
+            return
+        try:
+            with open(rev, 'w', encoding='utf-8') as f:
+                json.dump(cmd, f, ensure_ascii=False)
+        except OSError:
+            pass
 
-            threading.Thread(target=_fetch, daemon=True).start()
+    def _handle_url_fetch_request(self, raw_url: str, author_only: bool):
+        """背景抓取 + 解析，完成後套用到主視窗並回報 Qt 子行程。"""
+        self._author_only = author_only
+        self.schedule_save()
 
-        fetch_btn = ctk.CTkButton(top_frame, text="讀取", width=60, height=28,
-                                   fg_color="#28a745", hover_color="#218838",
-                                   font=self.ui_small_font, command=do_fetch)
-        fetch_btn.pack(side="left", padx=5)
+        author = self.author_name_entry.get().strip()
 
-        # Also allow Enter key to trigger fetch
-        url_entry.bind("<Return>", lambda e: do_fetch())
+        def _bg():
+            try:
+                page_html = _fetch_url(raw_url)
+                text_content, nav_links, page_title = _parse_page_html(
+                    page_html, raw_url, author_name=author, author_only=author_only)
+            except Exception as ex:
+                err = str(ex)
+                self.after(0, lambda: self._write_url_fetch_reverse({
+                    'action': 'fetch_done',
+                    'success': False,
+                    'status_message': f"❌ 讀取失敗: {err}",
+                    'status_color': '#dc3545',
+                }))
+                return
 
-        # Initialize displays
-        refresh_nav(self.url_related_links)
-        refresh_history()
+            if text_content is None:
+                self.after(0, lambda: self._write_url_fetch_reverse({
+                    'action': 'fetch_done',
+                    'success': False,
+                    'status_message': "❌ 找不到 article 區塊！",
+                    'status_color': '#dc3545',
+                }))
+                return
+
+            def _apply():
+                self.source_text.delete("1.0", tk.END)
+                display_title = _extract_work_title(page_title) if page_title else ""
+                if display_title:
+                    self.source_text.insert("1.0", display_title + "\n\n" + text_content)
+                else:
+                    self.source_text.insert("1.0", text_content)
+                self.after(50, self.check_chapter_number)
+                self._update_work_title(display_title)
+
+                self.url_related_links = nav_links
+                self.current_url = raw_url
+
+                hist_entry = {'url': raw_url, 'title': page_title or raw_url}
+                self.url_history = [h for h in self.url_history if h['url'] != raw_url]
+                self.url_history.append(hist_entry)
+                if len(self.url_history) > 50:
+                    self.url_history = self.url_history[-50:]
+
+                self.schedule_save()
+
+                line_count = text_content.count('\n') + 1
+                self.show_toast(f"✅ 網址讀取成功！共 {line_count} 行")
+
+                self._write_url_fetch_reverse({
+                    'action': 'fetch_done',
+                    'success': True,
+                    'status_message': f"✅ 讀取成功！共 {line_count} 行",
+                    'status_color': '#28a745',
+                    'url_history': self.url_history,
+                    'url_related_links': self.url_related_links,
+                    'current_url': self.current_url,
+                    'auto_close': True,
+                })
+
+            self.after(0, _apply)
+
+        threading.Thread(target=_bg, daemon=True).start()
 
     def copy_current_url(self):
         url = getattr(self, 'current_url', '')
@@ -1056,10 +1110,15 @@ class AATranslationTool(ctk.CTk):
         self.save_cache()
         glossary = parse_glossary(self.get_combined_glossary())
         result = _apply_translation(source, extracted, translated, glossary)
-        self.show_result_modal(result)
+        self.show_result_modal(result, original_text=source.rstrip('\n'))
 
-    def show_result_modal(self, text, source_file="", scroll_to_line=None):
-        _show_result_modal(self, text, source_file=source_file, scroll_to_line=scroll_to_line)
+    def show_result_modal(self, text, source_file="", scroll_to_line=None, original_text=None):
+        _show_result_modal(
+            self, text,
+            source_file=source_file,
+            scroll_to_line=scroll_to_line,
+            original_text=original_text,
+        )
 
     def import_html(self):
         file_path = filedialog.askopenfilename(

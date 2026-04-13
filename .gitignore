@@ -9,6 +9,7 @@ __pycache__/
 # PyInstaller 打包輸出
 build/
 dist/
+fonts/
 
 # 輸出成品與草稿
 *.html

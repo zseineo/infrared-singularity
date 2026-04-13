@@ -4,6 +4,7 @@
   - 預設格式（article div + relate_dl）
   - himanatokiniyaruo.com（dt[id] / dd 結構 + related-entries）
   - blog.fc2.com（ently_text div + relate_dl，含 web.archive.org 封存版）
+  - yaruobook.jp（author-res-dt / author-res 結構 + relatedPostsWrap）
 """
 from __future__ import annotations
 
@@ -154,21 +155,28 @@ _COLOR_SPAN_RE = re.compile(r'<span\s+style="color:[^"]*">|</span>')
 # 從標頭提取投稿者名稱：「N 名前：NAME[...]」→ NAME
 _POSTER_NAME_RE = re.compile(r'(?:名前|Name)\s*[：:]\s*(.+?)(?:\[|投稿日|$)')
 
+# 替代格式：「N ： NAME ： YYYY/MM/DD...」→ NAME（yaruobook.jp 等無「名前」關鍵字的站點）
+_POSTER_NAME_RE_ALT = re.compile(r'^\s*\d+\s*[：:]\s*(.+?)\s*[：:]\s*\d{4}[/年]')
+
 
 def _is_author_post(header_text: str, author_name: str) -> bool:
     """判斷貼文標頭是否屬於指定作者。
 
-    從「N 名前：POSTER_NAME[...]」格式中提取投稿者名稱，
-    再與 author_name 精確比對（去除前後空白後完全一致）。
+    依序嘗試兩種標頭格式提取投稿者名稱：
+    1.「N 名前：POSTER_NAME[...]」（5ch 類型）
+    2.「N ： POSTER_NAME ： YYYY/MM/DD...」（yaruobook.jp 類型）
+    名稱比對時會將連續空白正規化為單一空白，避免 HTML 多空白差異造成失配。
     """
     if not author_name:
         return False
     m = _POSTER_NAME_RE.search(header_text)
     if not m:
+        m = _POSTER_NAME_RE_ALT.search(header_text)
+    if not m:
         return author_name in header_text  # fallback
-    poster_name = m.group(1).strip()
-    # 精確比對：提取的名稱必須與 author_name 完全一致
-    return poster_name == author_name
+    poster_name = re.sub(r'\s+', ' ', m.group(1).strip())
+    target = re.sub(r'\s+', ' ', author_name.strip())
+    return poster_name == target
 
 
 def _filter_color_by_author(text: str, author_name: str, *, author_only: bool = False) -> str:
@@ -440,6 +448,82 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
 
 
 # ════════════════════════════════════════════════════════════════
+#  解析器：yaruobook.jp
+# ════════════════════════════════════════════════════════════════
+
+def _parse_yaruobook(page_html: str, base_url: str, *, author_name: str = "", author_only: bool = False) -> tuple[str | None, list[dict], str]:
+    """解析 yaruobook.jp 格式。
+
+    內文：<dt class="author-res-dt"> ... </dt><dd class="author-res"> ... </dd>
+    標頭格式：「N ： AUTHOR ： YYYY/MM/DD(曜) HH:MM:SS.SS ID:XXX」
+    標題：<title>...</title>
+    關聯：<ul class="relatedPostsWrap relatedPostsPrev/Next">，<li class="currentPost"> 標記當前話。
+    """
+    # ── 標題 ──
+    title_m = re.search(r'<title>([^<]+)</title>', page_html)
+    page_title = html.unescape(title_m.group(1)).strip() if title_m else ""
+    # 去除常見站名後綴
+    page_title = re.sub(r'\s*[\|｜\-－–—]\s*やる夫ブック.*$', '', page_title)
+
+    # ── 內文區塊 ──
+    first_m = re.search(r'<dt\s+[^>]*class="[^"]*author-res-dt', page_html)
+    if not first_m:
+        return None, [], page_title
+
+    end_m = re.search(
+        r'<div\s+[^>]*class="[^"]*widget-single-content-bottom'
+        r'|<ul\s+[^>]*class="[^"]*relatedPostsWrap',
+        page_html[first_m.start():],
+    )
+    content_end = first_m.start() + end_m.start() if end_m else len(page_html)
+    content_html = page_html[first_m.start():content_end]
+
+    lines_out = _extract_dt_dd_posts(content_html, author_name=author_name, author_only=author_only)
+    text_content = '\n\n'.join(lines_out) if lines_out else None
+
+    # ── 關聯連結 ──
+    def _parse_related_ul(ul_html: str) -> list[dict]:
+        items: list[dict] = []
+        for li in re.finditer(
+            r'<li(?:\s+[^>]*class="([^"]*)")?[^>]*>(.*?)</li>',
+            ul_html, re.DOTALL,
+        ):
+            li_class = li.group(1) or ""
+            li_inner = li.group(2)
+            is_current = 'currentPost' in li_class
+            a_m = re.search(r'<a\s+href="([^"]+)"[^>]*>(.*?)</a>', li_inner, re.DOTALL)
+            if a_m:
+                href = urljoin(base_url, a_m.group(1))
+                title = html.unescape(re.sub(r'<[^>]+>', '', a_m.group(2))).strip()
+                if title:
+                    items.append({'title': title, 'url': href, 'is_current': is_current})
+            else:
+                title = html.unescape(re.sub(r'<[^>]+>', '', li_inner)).strip()
+                if title:
+                    items.append({'title': title, 'url': None, 'is_current': is_current})
+        return items
+
+    nav_links: list[dict] = []
+    prev_m = re.search(
+        r'<ul\s+[^>]*class="[^"]*relatedPostsWrap\s+relatedPostsPrev[^"]*"[^>]*>(.*?)</ul>',
+        page_html, re.DOTALL,
+    )
+    next_m = re.search(
+        r'<ul\s+[^>]*class="[^"]*relatedPostsWrap\s+relatedPostsNext[^"]*"[^>]*>(.*?)</ul>',
+        page_html, re.DOTALL,
+    )
+    # Prev 區塊原始順序為 [currentPost, 前一話, 前前話, ...]（當前最前，舊話倒序）；
+    # 反轉後變 [..., 前前話, 前一話, currentPost]，再接 Next 即為時間順序，
+    # 讓「下一話」按鈕可正確以 current_idx + 1 取得下一集。
+    if prev_m:
+        nav_links.extend(reversed(_parse_related_ul(prev_m.group(1))))
+    if next_m:
+        nav_links.extend(_parse_related_ul(next_m.group(1)))
+
+    return text_content, nav_links, page_title
+
+
+# ════════════════════════════════════════════════════════════════
 #  公開入口
 # ════════════════════════════════════════════════════════════════
 
@@ -447,6 +531,7 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
 _DOMAIN_PARSERS: dict[str, callable] = {
     'himanatokiniyaruo.com': _parse_himanatokiniyaruo,
     'blog.fc2.com': _parse_fc2blog,
+    'yaruobook.jp': _parse_yaruobook,
 }
 
 

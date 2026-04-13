@@ -47,6 +47,64 @@ def _postprocess_text(text: str) -> str:
     return text
 
 
+_BRACKET_PAIRS = {
+    '【': '】', '】': '【',
+    '「': '」', '」': '「',
+    '\u201c': '\u201d', '\u201d': '\u201c',  # ""
+    '\u2018': '\u2019', '\u2019': '\u2018',  # ''
+    '『': '』', '』': '『',
+    '（': '）', '）': '（',
+    '(': ')', ')': '(',
+}
+_OPEN_BRACKETS = set('【「\u201c\u2018『（(')
+_CLOSE_BRACKETS = set('】」\u201d\u2019』）)')
+
+
+def _complete_brackets(text: str, source_line: str) -> str:
+    """檢查 text 中的括號是否成對，視需要補上缺少的括號。
+
+    對每個未配對的括號，在原始行中定位 text 的位置，
+    再檢查緊鄰的相鄰字元是否恰好是該缺少的括號：
+    - 缺少左括號（有未配對的右括號）→ 檢查 text 前一個字元
+    - 缺少右括號（有未配對的左括號）→ 檢查 text 後一個字元
+    有就補上，沒有則維持原樣。
+    """
+    # 用 stack 找未配對的括號
+    stack: list[tuple[str, int]] = []  # (bracket_char, index)
+    for i, ch in enumerate(text):
+        if ch in _OPEN_BRACKETS:
+            stack.append((ch, i))
+        elif ch in _CLOSE_BRACKETS:
+            expected_open = _BRACKET_PAIRS[ch]
+            if stack and stack[-1][0] == expected_open:
+                stack.pop()
+            else:
+                stack.append((ch, i))
+
+    if not stack:
+        return text  # 全部配對完成
+
+    # 在 source_line 中定位 text
+    pos = source_line.find(text)
+    if pos < 0:
+        return text  # 無法定位，維持原樣
+
+    result = text
+    for bracket, _idx in stack:
+        if bracket in _CLOSE_BRACKETS:
+            # 有未配對的右括號 → 缺少左括號 → 檢查 text 前一個字元
+            if pos > 0 and source_line[pos - 1] == _BRACKET_PAIRS[bracket]:
+                result = _BRACKET_PAIRS[bracket] + result
+                pos -= 1  # 補上後 result 在 source_line 中的起始位置前移
+        else:
+            # 有未配對的左括號 → 缺少右括號 → 檢查 text 後一個字元
+            end = pos + len(result)
+            if end < len(source_line) and source_line[end] == _BRACKET_PAIRS[bracket]:
+                result = result + _BRACKET_PAIRS[bracket]
+
+    return result
+
+
 def extract_text(
     source: str,
     base_regex_str: str,
@@ -100,6 +158,8 @@ def extract_text(
 
                 if len(text) <= 2:
                     continue
+
+                text = _complete_brackets(text, line)
 
                 if text and text not in extracted_set:
                     extracted_set[text] = line_num

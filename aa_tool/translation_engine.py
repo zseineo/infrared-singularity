@@ -39,17 +39,28 @@ def _replace_with_padding(
 def apply_glossary_to_text(text: str, glossary: dict[str, str]) -> str:
     """對任意文本套用術語表（含 Auto-Padding 與邊框判定）。
 
-    術語依長度遞減排序後逐條替換，避免短詞覆蓋長詞。
+    使用單輪掃描：把所有術語組成一條交替正則（長度遞減），
+    re.sub 一次跑完，避免多輪替換時「短 LHS 命中長 LHS 替換結果」
+    造成後續規則覆蓋前面成果的問題。
     """
-    sorted_glossary = sorted(glossary.items(), key=lambda x: len(x[0]), reverse=True)
+    if not glossary:
+        return text
+
+    sorted_items = sorted(glossary.items(), key=lambda x: len(x[0]), reverse=True)
+    term_map = {k: v for k, v in sorted_items}
+    pattern = re.compile('|'.join(re.escape(k) for k, _ in sorted_items))
+
     lines = text.split('\n')
-
-    for jp_term, tw_term in sorted_glossary:
-        len_diff = len(jp_term) - len(tw_term)
-        padded_tw = tw_term + ('　' * len_diff if len_diff > 0 else '')
-
-        for i in range(len(lines)):
-            lines[i] = _replace_with_padding(lines[i], jp_term, tw_term, padded_tw)
+    for i, line in enumerate(lines):
+        def repl(m, _line=line):
+            jp = m.group(0)
+            tw = term_map[jp]
+            len_diff = len(jp) - len(tw)
+            rest = _line[m.end():]
+            if len_diff > 0 and any(c in rest for c in BORDER_CHARS):
+                return tw + ('　' * len_diff)
+            return tw
+        lines[i] = pattern.sub(repl, line)
 
     return '\n'.join(lines)
 

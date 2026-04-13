@@ -34,6 +34,7 @@ def show_result_modal(
     text: str,
     source_file: str = "",
     scroll_to_line: int | None = None,
+    original_text: str | None = None,
 ) -> None:
     """建立並顯示內嵌編輯分頁。"""
     # 從文字首行提取作品標題
@@ -89,6 +90,53 @@ def show_result_modal(
     quick_trans = ctk.CTkEntry(grp1, placeholder_text="翻譯", width=120, font=app.ui_font)
     quick_trans.pack(side="left", padx=2)
 
+    def _attach_entry_undo(entry: ctk.CTkEntry) -> None:
+        """為 CTkEntry 加上 Ctrl+Z / Ctrl+Y 歷史堆疊支援。"""
+        var = tk.StringVar(value="")
+        entry.configure(textvariable=var)
+        history: list[str] = [""]
+        redo_stack: list[str] = []
+        suppress = {"v": False}
+
+        def on_change(*_args):
+            if suppress["v"]:
+                return
+            val = var.get()
+            if history[-1] != val:
+                history.append(val)
+                redo_stack.clear()
+
+        var.trace_add("write", on_change)
+
+        def do_undo(_event=None):
+            if len(history) > 1:
+                redo_stack.append(history.pop())
+                suppress["v"] = True
+                var.set(history[-1])
+                suppress["v"] = False
+                entry._entry.icursor(tk.END)
+            return "break"
+
+        def do_redo(_event=None):
+            if redo_stack:
+                val = redo_stack.pop()
+                history.append(val)
+                suppress["v"] = True
+                var.set(val)
+                suppress["v"] = False
+                entry._entry.icursor(tk.END)
+            return "break"
+
+        entry._entry.bind("<Control-z>", do_undo)
+        entry._entry.bind("<Control-Z>", do_undo)
+        entry._entry.bind("<Control-y>", do_redo)
+        entry._entry.bind("<Control-Y>", do_redo)
+        entry._entry.bind("<Control-Shift-Z>", do_redo)
+        entry._entry.bind("<Control-Shift-z>", do_redo)
+
+    _attach_entry_undo(quick_orig)
+    _attach_entry_undo(quick_trans)
+
     save_to_glossary_var = ctk.BooleanVar(value=True)
     ctk.CTkCheckBox(
         grp1, text="存入術語表", variable=save_to_glossary_var,
@@ -142,10 +190,11 @@ def show_result_modal(
         quick_orig.delete(0, tk.END)
         quick_trans.delete(0, tk.END)
 
-    ctk.CTkButton(
+    btn_quick_exec = ctk.CTkButton(
         grp1, text="執行", command=quick_replace,
         fg_color="#17a2b8", hover_color="#138496", font=app.ui_small_font, width=50,
-    ).pack(side="left", padx=5)
+    )
+    btn_quick_exec.pack(side="left", padx=5)
 
     # ── 重套術語 ──
     def reapply_glossary():
@@ -168,10 +217,11 @@ def show_result_modal(
         app.save_cache()
         show_toast("✅ 已套用術語表變更！", color="#28a745")
 
-    ctk.CTkButton(
+    btn_reapply = ctk.CTkButton(
         grp1, text="重套術語", command=reapply_glossary,
         fg_color="#28a745", hover_color="#218838", font=app.ui_small_font, width=60,
-    ).pack(side="left", padx=5)
+    )
+    btn_reapply.pack(side="left", padx=5)
 
     # ── 群組 2：選區操作 ──
     grp2 = ctk.CTkFrame(tb_inner, fg_color="transparent")
@@ -209,10 +259,11 @@ def show_result_modal(
         except tk.TclError:
             show_toast("⚠️ 請先選取想要上色的文字！", color="#f39c12")
 
-    ctk.CTkButton(
+    btn_color = ctk.CTkButton(
         grp2, text="上色", command=apply_color,
         fg_color="#6f42c1", hover_color="#5a32a3", font=app.ui_small_font, width=60,
-    ).pack(side="left", padx=5)
+    )
+    btn_color.pack(side="left", padx=5)
 
     def strip_spaces():
         try:
@@ -227,11 +278,12 @@ def show_result_modal(
         except tk.TclError:
             show_toast("⚠️ 請先選取想要消除空白的文字！", color="#f39c12")
 
-    ctk.CTkButton(
+    btn_strip = ctk.CTkButton(
         grp2, text="消空白", command=strip_spaces,
         fg_color="#e0a800", hover_color="#c82333", text_color="black",
         font=app.ui_small_font, width=60,
-    ).pack(side="left", padx=5)
+    )
+    btn_strip.pack(side="left", padx=5)
 
     def add_double_spaces():
         try:
@@ -248,11 +300,12 @@ def show_result_modal(
         except tk.TclError:
             show_toast("⚠️ 請先選取想要補空白的文字！", color="#f39c12")
 
-    ctk.CTkButton(
+    btn_pad = ctk.CTkButton(
         grp2, text="補空白", command=add_double_spaces,
         fg_color="#17a2b8", hover_color="#138496", text_color="white",
         font=app.ui_small_font, width=60,
-    ).pack(side="left", padx=5)
+    )
+    btn_pad.pack(side="left", padx=5)
 
     # ── 對話框修正 ──
     font_measurer = TkFontMeasurer(app.result_font)
@@ -283,11 +336,12 @@ def show_result_modal(
         except tk.TclError:
             show_toast("⚠️ 請先選取想要調整的對話框！", color="#f39c12")
 
-    ctk.CTkButton(
+    btn_bubble = ctk.CTkButton(
         grp2, text="對話框修正", command=adjust_bubble,
         fg_color="#28a745", hover_color="#218838", text_color="white",
         font=app.ui_small_font, width=80,
-    ).pack(side="left", padx=5)
+    )
+    btn_bubble.pack(side="left", padx=5)
 
     def align_to_prev_line():
         try:
@@ -323,11 +377,12 @@ def show_result_modal(
         except Exception as e:
             show_toast(f"❌ 無法對齊：{e}", color="#dc3545", duration=5000)
 
-    ctk.CTkButton(
+    btn_align = ctk.CTkButton(
         grp2, text="對齊上一行", command=align_to_prev_line,
         fg_color="#17a2b8", hover_color="#138496", text_color="white",
         font=app.ui_small_font, width=80,
-    ).pack(side="left", padx=5)
+    )
+    btn_align.pack(side="left", padx=5)
 
     def smart_action(event=None):
         try:
@@ -341,11 +396,12 @@ def show_result_modal(
         except tk.TclError:
             align_to_prev_line()
 
-    ctk.CTkButton(
+    btn_smart = ctk.CTkButton(
         grp2, text="自動判斷", command=smart_action,
         fg_color="#e67e22", hover_color="#d35400", text_color="white",
         font=app.ui_small_font, width=70,
-    ).pack(side="left", padx=5)
+    )
+    btn_smart.pack(side="left", padx=5)
 
     def adjust_all_bubbles():
         text_content = final_textbox.get("1.0", tk.END).rstrip('\n')
@@ -363,11 +419,12 @@ def show_result_modal(
         final_textbox._textbox.yview_moveto(scroll_pos[0])
         show_toast(f"✅ 已自動調整 {count} 個對話框！", color="#28a745")
 
-    ctk.CTkButton(
+    btn_bubble_all = ctk.CTkButton(
         grp2, text="對話框(全)", command=adjust_all_bubbles,
         fg_color="#20c997", hover_color="#17a085", text_color="white",
         font=app.ui_small_font, width=80,
-    ).pack(side="left", padx=5)
+    )
+    btn_bubble_all.pack(side="left", padx=5)
 
     def handle_smart_action_event(e=None):
         smart_action()
@@ -449,6 +506,27 @@ def show_result_modal(
     ctk.CTkButton(grp3, text="底色", command=choose_bg_color, fg_color="#6c757d", hover_color="#5a6268", font=app.ui_small_font, width=45).pack(side="left", padx=2)
     ctk.CTkButton(grp3, text="文字色", command=choose_fg_color, fg_color="#17a2b8", hover_color="#138496", font=app.ui_small_font, width=45).pack(side="left", padx=2)
     ctk.CTkButton(grp3, text="💾 另存", command=save_as, fg_color="#28a745", hover_color="#218838", font=app.ui_small_font, width=60).pack(side="left", padx=5)
+
+    def open_in_qt_editor():
+        """以 PyQt6 編輯器開啟目前內容（subprocess 模式）。"""
+        raw_text = final_textbox.get("1.0", tk.END).rstrip('\n')
+        if not raw_text:
+            show_toast("⚠️ 預覽視窗沒有內容！", color="#f39c12")
+            return
+        # 若無 source_file，先寫入暫存檔
+        target_file = source_file
+        if not target_file:
+            import tempfile as _tf
+            target_file = os.path.join(
+                _tf.gettempdir(), f"aa_edit_qt_{os.getpid()}.html")
+        try:
+            app.write_html_file(target_file, raw_text)
+        except Exception as e:
+            show_toast(f"❌ 寫入失敗: {e}", color="#dc3545", duration=5000)
+            return
+        app.open_edit_qt(target_file, reload_target=final_textbox)
+
+    ctk.CTkButton(grp3, text="Qt 編輯", command=open_in_qt_editor, fg_color="#6f42c1", hover_color="#5a32a3", font=app.ui_small_font, width=60).pack(side="left", padx=5)
     ctk.CTkButton(grp3, text="↩ 返回", command=close_action, fg_color="#dc3545", hover_color="#c82333", font=app.ui_small_font, width=60).pack(side="left", padx=5)
 
     # ════════════════════════════════════════════════════════════
@@ -503,6 +581,8 @@ def show_result_modal(
         else:
             search_frame.pack(fill="x", padx=10, pady=(0, 5), before=final_textbox)
             search_entry.focus_set()
+            if search_var.get():
+                search_entry._entry.selection_range(0, tk.END)
         return "break"
 
     def save_shortcut(event=None):
@@ -524,6 +604,113 @@ def show_result_modal(
     final_textbox.pack(fill="both", expand=True, padx=10, pady=10)
     final_textbox.insert("1.0", text)
 
+    # ════════════════════════════════════════════════════════════
+    #  原文比對模式（僅當呼叫者提供 original_text）
+    # ════════════════════════════════════════════════════════════
+    original_textbox: ctk.CTkTextbox | None = None
+    compare_state = {"active": False}
+
+    _edit_buttons = [
+        btn_quick_exec, btn_reapply,
+        btn_color, btn_strip, btn_pad,
+        btn_bubble, btn_align, btn_smart, btn_bubble_all,
+    ]
+
+    def _set_edit_controls_state(state: str) -> None:
+        for b in _edit_buttons:
+            try:
+                b.configure(state=state)
+            except Exception:
+                pass
+        try:
+            quick_orig.configure(state=state)
+            quick_trans.configure(state=state)
+        except Exception:
+            pass
+
+    if original_text is not None:
+        # 稍微偏暖的背景色，區分兩個面板
+        original_textbox = ctk.CTkTextbox(
+            container, font=app.result_font, wrap="none",
+            fg_color=app.bg_color, text_color=app.fg_color,
+        )
+        original_textbox._textbox.configure(spacing1=2, spacing3=2)
+        def _on_orig_mousewheel(event):
+            units = int(-(event.delta / 120) * 8)
+            original_textbox._textbox.yview_scroll(units, "units")
+            return "break"
+        original_textbox._textbox.bind("<MouseWheel>", _on_orig_mousewheel)
+        # 寫入內容後設為 disabled，仍可選取、複製、捲動，但無法編輯
+        original_textbox.insert("1.0", original_text)
+        original_textbox._textbox.configure(state="disabled")
+
+        def toggle_compare(event=None):
+            if not compare_state["active"]:
+                # 翻譯 → 原文
+                active_box = final_textbox._textbox
+                other = original_textbox._textbox
+                try:
+                    line_idx = int(active_box.index(tk.INSERT).split('.')[0])
+                except Exception:
+                    line_idx = 1
+                top_frac = active_box.yview()[0]
+
+                final_textbox.pack_forget()
+                original_textbox.pack(fill="both", expand=True, padx=10, pady=10)
+
+                # 定位：同行 + 同捲動位置
+                other.configure(state="normal")
+                last_line = int(other.index("end-1c").split('.')[0])
+                target_line = min(max(line_idx, 1), max(last_line, 1))
+                other.mark_set(tk.INSERT, f"{target_line}.0")
+                other.configure(state="disabled")
+                other.yview_moveto(top_frac)
+                other.focus_set()
+
+                _set_edit_controls_state("disabled")
+                toolbar.configure(fg_color="white")
+                compare_state["active"] = True
+                app.title(f"AA 漫畫翻譯輔助工具{title_suffix} — 原文比對中")
+            else:
+                # 原文 → 翻譯
+                active_box = original_textbox._textbox
+                other = final_textbox._textbox
+                try:
+                    line_idx = int(active_box.index(tk.INSERT).split('.')[0])
+                except Exception:
+                    line_idx = 1
+                top_frac = active_box.yview()[0]
+
+                original_textbox.pack_forget()
+                final_textbox.pack(fill="both", expand=True, padx=10, pady=10)
+
+                last_line = int(other.index("end-1c").split('.')[0])
+                target_line = min(max(line_idx, 1), max(last_line, 1))
+                other.mark_set(tk.INSERT, f"{target_line}.0")
+                other.yview_moveto(top_frac)
+                other.focus_set()
+
+                _set_edit_controls_state("normal")
+                toolbar.configure(fg_color="#343a40")
+                compare_state["active"] = False
+                app.title(f"AA 漫畫翻譯輔助工具{title_suffix}")
+            return "break"
+
+        container.bind("<Control-w>", toggle_compare)
+        container.bind("<Control-W>", toggle_compare)
+        final_textbox._textbox.bind("<Control-w>", toggle_compare)
+        final_textbox._textbox.bind("<Control-W>", toggle_compare)
+        original_textbox._textbox.bind("<Control-w>", toggle_compare)
+        original_textbox._textbox.bind("<Control-W>", toggle_compare)
+    else:
+        def toggle_compare(event=None):
+            show_toast("⚠️ 此檔案沒有原文可比對", color="#f39c12")
+            return "break"
+        container.bind("<Control-w>", toggle_compare)
+        container.bind("<Control-W>", toggle_compare)
+        final_textbox._textbox.bind("<Control-w>", toggle_compare)
+        final_textbox._textbox.bind("<Control-W>", toggle_compare)
+
     app.edit_tab_textbox = final_textbox
     app.bind("<Control-f>", toggle_search)
     app.bind("<Control-F>", toggle_search)
@@ -531,11 +718,14 @@ def show_result_modal(
     app.bind("<Control-S>", save_shortcut)
     app.bind("<Control-q>", handle_smart_action_event)
     app.bind("<Control-Q>", handle_smart_action_event)
+    app.bind("<Control-w>", toggle_compare)
+    app.bind("<Control-W>", toggle_compare)
     app.bind("<Escape>", lambda e: close_action())
     app._edit_tab_unbind = lambda: [
         app.unbind("<Control-f>"), app.unbind("<Control-F>"),
         app.unbind("<Control-s>"), app.unbind("<Control-S>"),
         app.unbind("<Control-q>"), app.unbind("<Control-Q>"),
+        app.unbind("<Control-w>"), app.unbind("<Control-W>"),
         app.unbind("<Escape>"),
     ]
     app.switch_mode("edit")

@@ -49,6 +49,7 @@
     *   移除結尾的骰子格式 `【數字D數字:數字】`
     *   移除開頭的「數字+點」格式（如 `１．`、`1.`）
     *   移除句尾 `|`、`（`、`(` 等符號
+*   **括號自動補完**: 提取後處理後，檢查文字中的括號（`【】「」""''『』（）()`）是否成對。若有未配對的括號，在 `source_line` 中定位 `text` 的位置，再檢查緊鄰的相鄰字元：有未配對的右括號時檢查 `text` 前一個字元，有未配對的左括號時檢查 `text` 後一個字元。字元吻合則補上，不吻合則維持原樣。對應 Function: `_complete_brackets(text, source_line)`。
 *   **資料去重與排版**: 將過濾後的字詞存入 Dict 作去重，以 `{行號:03d}-{流水號}|日文原文` 格式輸出，並顯示提取計數於 `ext_count_label`。
 *   **自動複製**: 若 `auto_copy_switch` 開啟，提取後自動複製至剪貼簿。
 *   **Debug 工具**: Toolbar 上的「提取 Debug」按鈕(`analyze_extraction()`)可對選取文字逐步分析提取流程，於 Modal 顯示報告。
@@ -102,10 +103,34 @@
     *   **骰子搜尋**: 快速搜尋殘留的 `1D10:10` 骰子格式。
     *   `Ctrl+S` 快捷鍵觸發直接存檔（覆蓋原檔，若有 `source_file`），否則走另存新檔。
 
-### 4.5 網址讀取功能 (`open_url_fetch_dialog()`)
-*   **對應 Function**: `def open_url_fetch_dialog(self):`
-*   開啟一個 Dialog，可輸入網址直接抓取日文 AA 漫畫的頁面文字。
-*   **網頁解析 (`_parse_page_html()`)**: 支援解析 5ch 類型網站 (`div.article` → `dt/dd` 結構)，提取文章內文、頁面標題、以及 `dl.relate_dl` 中的關聯記事導航連結。
+### 4.5 網址讀取功能 (`open_url_fetch_qt()` — 獨立 PyQt6 視窗)
+*   **對應 Function**: `def open_url_fetch_qt(self):`（主程式）、`UrlFetchWindow` 於 [aa_url_fetch_qt.py](aa_url_fetch_qt.py)
+*   主程式以 subprocess 啟動獨立的 PyQt6 視窗，透過 JSON 命令檔 (IPC) 雙向溝通；UI 與抓取職責分離，**實際抓取/解析由主程式執行**，以確保作者名稱 (`author_name_entry`) 總是取最新值。
+*   **IPC 通訊協定**:
+    *   啟動時傳入 `--cmd-file`（Qt→主程式）、`--reverse-cmd-file`（主程式→Qt）、`--init-file`（JSON 初始狀態）。
+    *   初始狀態 (`init_file`)：`url_history`、`url_related_links`、`current_url`、`author_only`、`initial_url`。
+    *   Qt→主程式：`fetch_request {url, author_only}`、`clear_history`、`close_sync {author_only}`。
+    *   主程式→Qt：`fetch_done {success, status_message, status_color, [url_history, url_related_links, current_url, auto_close]}`、`history_cleared {url_history}`。
+    *   碰撞避免：寫入方若發現檔案仍存在（接收方未消費），延後 100ms 重試（Qt 最多 20 次，主程式相同）。
+*   **主程式端處理**:
+    *   `_poll_url_fetch_commands()`：每 500ms 讀取 `cmd_file`，subprocess 結束即停止輪詢。
+    *   `_handle_url_fetch_request(url, author_only)`：更新 `_author_only`→`schedule_save`→背景執行緒執行 `fetch_url` + `parse_page_html`，成功後套用到 `source_text`、更新 `url_related_links`/`current_url`/`url_history`、觸發 `check_chapter_number`、`_update_work_title`、`show_toast`，最後以 `fetch_done` 回報 Qt 並要求 `auto_close`。
+    *   `_write_url_fetch_reverse()`：含重試邏輯的反向命令寫入。
+*   **Qt 端功能**:
+    *   URL 輸入 + 忽略留言 Checkbox + 讀取按鈕（綠）+ Enter 觸發。
+    *   關聯記事列表（含當前話標記 `▶`）+ 上一話/下一話按鈕。
+    *   讀取紀錄列表（最多 50 筆，倒序顯示）+ 清除紀錄按鈕（紅）。
+    *   點擊關聯/紀錄項目自動填入 URL 並觸發抓取。
+    *   成功後 400ms 自動關閉。
+    *   `closeEvent` 同步最終 `author_only` 狀態。
+*   **網頁解析 (`aa_tool/url_fetcher.py` → `parse_page_html()`)**: 依 URL 網域自動選擇解析器，由 `_DOMAIN_PARSERS` 對應表管理。目前支援：
+    *   **預設 (`_parse_default`)**: 5ch 類型 (`div.article` → `dt/dd` + `dl.relate_dl`)
+    *   **himanatokiniyaruo.com (`_parse_himanatokiniyaruo`)**: `dt[id=數字]` / `dd` + `div.related-entries`
+    *   **blog.fc2.com (`_parse_fc2blog`)**: `div.ently_text` + `dl.relate_dl`（含 `web.archive.org` 封存版）
+    *   **yaruobook.jp (`_parse_yaruobook`)**: `dt.author-res-dt` / `dd.author-res` + `ul.relatedPostsWrap.relatedPostsPrev/Next`；`li.currentPost` 標記當前話。**關聯清單排序**：原始 Prev 區塊為 `[currentPost, 前一話, 前前話, ...]`（當前在前、舊話倒序），解析時須將 Prev **反轉**後再接 Next，才能得到按時間順序排列的清單，供「下一話」按鈕以 `current_idx + 1` 正確取得下一集
+*   **作者名稱格式**: `_is_author_post()` 支援兩種標頭格式並自動正規化空白：
+    1.「N 名前：AUTHOR[...]」(5ch / FC2 / himana)
+    2.「N ： AUTHOR ： YYYY/MM/DD(曜) HH:MM:SS ID:XXX」(yaruobook)
 *   **編碼自動偵測**: 依序嘗試 `utf-8`、`cp932`、`euc-jp`、`shift_jis`。
 *   **Gzip 解壓縮**: 自動解壓縮伺服器回傳的 gzip 內容。
 *   **關聯記事導航**: 顯示同系列各話的連結清單，可直接點擊切換；提供上一話/下一話按鈕。
@@ -169,5 +194,6 @@
 2.  **效能考量**: 處理長文本時 `re.sub` 或大量 TextBox 修改 (`delete`, `insert`) 會造成一定延遲。必要時請以 string method 替代，或一次性取出大量 list 再 `'\n'.join()` 放回，減少 GUI 卡頓。
 3.  **保持替換長度優先排序規矩**: 修改 `apply_translation()` 邏輯時，必須延續「由原文長度遞減排序 (`valid_ids.sort`) 後再 replace」，否則疊加翻譯文將互相破壞（如先替「あ」再替「あはは」）。
 4.  **術語表有兩張**: 一般術語表 (`glossary_text`) 與臨時術語表 (`glossary_text_temp`)。所有需要套用術語的地方都應呼叫 `get_combined_glossary()` 合併後使用，而非只讀取其中一個。
+5.  **術語表重複偵測**: 貼上術語時，系統會自動掃描兩張術語表中等號左邊的原文是否重複。若偵測到重複，會在術語表標題旁顯示警告，並出現「跳到重複」按鈕，可循環跳躍至每個重複項目（含跨 tab 跳躍）。對應 Function: `_check_glossary_duplicates()`、`_jump_to_glossary_dup()`。
 5.  **批次操作的行號偏移**: `batch_replace_all()` 和 `adjust_all_bubbles()` 都採用「由下而上」或「由行尾至行首」逐筆替換策略，以避免替換後行號/字元位置偏移。新增類似功能時請維持此慣例。
-6.  **URL 讀取功能**: `_parse_page_html()` 的解析邏輯針對特定網站結構 (`div.article` / `dt`+`dd`)，若需支援其他網站，需另外擴充此函式的解析分支。
+6.  **URL 讀取功能**: `parse_page_html()`（於 `aa_tool/url_fetcher.py`）以 `_DOMAIN_PARSERS` 對應表分派到各網域專屬解析器 (`_parse_default` / `_parse_himanatokiniyaruo` / `_parse_fc2blog` / `_parse_yaruobook`)。新增網站支援時，需撰寫新的 `_parse_XXX` 函式並註冊至該對應表；若作者標頭格式不同，亦需擴充 `_is_author_post()` 的匹配規則。

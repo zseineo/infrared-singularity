@@ -1,10 +1,11 @@
 """對話框對齊演算法 — 純邏輯，不依賴任何 UI 框架。
 
 所有字寬量測透過 FontMeasurer 協議完成。
-支援三種對話框類型：
+支援四種對話框類型：
   - normal: 普通框（￣/＿）
   - shout:  吶喊框（_人/⌒Y）
   - slash:  斜線框（＼─|／）
+  - box:    方框（┌─┐ / │ / └─┘）
 """
 from __future__ import annotations
 
@@ -372,6 +373,109 @@ def process_normal(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
     return new_box
 
 
+_BOX_TOP_RE = re.compile(r'^(.*?)(┌)(─+)(┐)\s*$')
+_BOX_BOT_RE = re.compile(r'^(.*?)(└)(─+)(┘)\s*$')
+_BOX_CONTENT_RE = re.compile(r'^(.*?)(│)(.*)(│)\s*$')
+
+
+def _parse_box_lines(box_lines: list[str]) -> list[dict]:
+    """將方框框的各行解析為結構化字典。"""
+    parsed: list[dict] = []
+    for sl in box_lines:
+        sl_n = sl.rstrip('\r\n')
+        mt = _BOX_TOP_RE.match(sl_n)
+        mb = _BOX_BOT_RE.match(sl_n)
+        mc = _BOX_CONTENT_RE.match(sl_n)
+        if mt:
+            parsed.append({
+                'type': 'top',
+                'prefix': mt.group(1),
+                'dashes': mt.group(3),
+                'orig': sl_n,
+            })
+        elif mb:
+            parsed.append({
+                'type': 'bot',
+                'prefix': mb.group(1),
+                'dashes': mb.group(3),
+                'orig': sl_n,
+            })
+        elif mc:
+            inner = re.sub(r'[ 　.,]+$', '', mc.group(3))
+            parsed.append({
+                'type': 'content',
+                'prefix': mc.group(1),
+                'inner': inner,
+                'orig': sl_n,
+            })
+        else:
+            parsed.append({'type': 'other', 'orig': sl_n})
+    return parsed
+
+
+def process_box(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
+    """處理方框框（┌─┐/│/└─┘），回傳對齊後的各行。失敗回傳 None。"""
+    parsed = _parse_box_lines(box_lines)
+
+    # 原始邊框寬度（由第一個 top 的 ┌─...─┐ 量測）
+    obw = 0
+    prefix = ''
+    for ps in parsed:
+        if ps['type'] == 'top':
+            obw = m.measure('┌' + ps['dashes'] + '┐')
+            prefix = ps['prefix']
+            break
+    if obw == 0:
+        return None
+
+    # 內容所需最小寬度
+    mcw = 0
+    for ps in parsed:
+        if ps['type'] == 'content':
+            inner = ps['inner'].rstrip(' 　')
+            needed = m.measure('│' + inner + '　│')
+            if needed > mcw:
+                mcw = needed
+    tw = max(obw, mcw)
+
+    # 計算邊框需要幾個 ─
+    dash_w = m.measure('─')
+    lr_w = m.measure('┌') + m.measure('┐')
+    inner_target = max(tw - lr_w, dash_w)
+
+    # 重建
+    result: list[str] = []
+    for ps in parsed:
+        if ps['type'] == 'top':
+            dashes = ''
+            while m.measure(dashes + '─') <= inner_target:
+                dashes += '─'
+            # snap：若再多一個更接近目標則補上
+            d1 = inner_target - m.measure(dashes)
+            d2 = m.measure(dashes + '─') - inner_target
+            if d2 < d1:
+                dashes += '─'
+            result.append(ps['prefix'] + '┌' + dashes + '┐')
+        elif ps['type'] == 'bot':
+            dashes = ''
+            while m.measure(dashes + '─') <= inner_target:
+                dashes += '─'
+            d1 = inner_target - m.measure(dashes)
+            d2 = m.measure(dashes + '─') - inner_target
+            if d2 < d1:
+                dashes += '─'
+            result.append(ps['prefix'] + '└' + dashes + '┘')
+        elif ps['type'] == 'content':
+            inner = ps['inner'].rstrip(' 　')
+            side_w = m.measure('│') + m.measure('│')
+            tiw = max(tw - side_w, 0)
+            padded = _pad_to_width(inner, tiw, m)
+            result.append(ps['prefix'] + '│' + padded + '│')
+        else:
+            result.append(ps['orig'])
+    return result
+
+
 # ════════════════════════════════════════════════════════════════
 #  高階 API：單選對話框修正
 # ════════════════════════════════════════════════════════════════
@@ -402,6 +506,15 @@ def adjust_bubble(selected_text: str, m: FontMeasurer) -> str | None:
         result = process_slash(lines, m)
         if result is None:
             return '⚠️ 無法計算斜線框寬度！'
+        return '\n'.join(result)
+
+    # ── 方框（┌─┐） ──
+    has_box_top = any(_BOX_TOP_RE.match(ln.rstrip('\r\n')) for ln in lines)
+    has_box_bot = any(_BOX_BOT_RE.match(ln.rstrip('\r\n')) for ln in lines)
+    if has_box_top and has_box_bot:
+        result = process_box(lines, m)
+        if result is None:
+            return '⚠️ 無法計算方框寬度！'
         return '\n'.join(result)
 
     # ── 普通對話框 ──
@@ -507,7 +620,22 @@ def detect_all_boxes(all_lines: list[str]) -> list[tuple[int, int, str]]:
                     used_lines.add(k)
                 break
 
-    # ── 偵測 C: 普通對話框 ──
+    # ── 偵測 C: 方框（┌─┐） ──
+    for i, ln in enumerate(all_lines):
+        if i in used_lines:
+            continue
+        if not _BOX_TOP_RE.match(ln.rstrip('\r\n')):
+            continue
+        for j in range(i + 1, min(i + 31, len(all_lines))):
+            if j in used_lines:
+                continue
+            if _BOX_BOT_RE.match(all_lines[j].rstrip('\r\n')):
+                all_boxes.append((i, j, 'box'))
+                for k in range(i, j + 1):
+                    used_lines.add(k)
+                break
+
+    # ── 偵測 D: 普通對話框 ──
     n_borders: list[dict] = []
     for i, line in enumerate(all_lines):
         if i in used_lines:
@@ -572,6 +700,8 @@ def adjust_all_bubbles(text: str, m: FontMeasurer) -> tuple[str, int]:
             result = process_shout(box_lines, m)
         elif box_type == 'slash':
             result = process_slash(box_lines, m)
+        elif box_type == 'box':
+            result = process_box(box_lines, m)
         else:
             result = process_normal(box_lines, m)
         if result is not None:

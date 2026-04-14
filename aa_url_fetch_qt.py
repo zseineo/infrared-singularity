@@ -105,6 +105,11 @@ class UrlFetchWindow(QMainWindow):
         self.author_only_switch.setFont(self.ui_small_font)
         top.addWidget(self.author_only_switch)
 
+        self.skip_cache_switch = QCheckBox("不讀暫存")
+        self.skip_cache_switch.setFont(self.ui_small_font)
+        self.skip_cache_switch.setToolTip("勾選後強制重新從網路抓取，不使用本機暫存")
+        top.addWidget(self.skip_cache_switch)
+
         self.fetch_btn = make_button("讀取", color="#28a745", hover="#218838",
                                      font=self.ui_small_font, width=60)
         self.fetch_btn.setFixedHeight(28)
@@ -315,6 +320,7 @@ class UrlFetchWindow(QMainWindow):
             "action": "fetch_request",
             "url": raw,
             "author_only": self.author_only_switch.isChecked(),
+            "skip_cache": self.skip_cache_switch.isChecked(),
         })
 
     def _clear_history(self):

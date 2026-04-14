@@ -524,7 +524,8 @@ def show_result_modal(
         except Exception as e:
             show_toast(f"❌ 寫入失敗: {e}", color="#dc3545", duration=5000)
             return
-        app.open_edit_qt(target_file, reload_target=final_textbox)
+        app.open_edit_qt(target_file, reload_target=final_textbox,
+                         original_text=original_text)
 
     ctk.CTkButton(grp3, text="Qt 編輯", command=open_in_qt_editor, fg_color="#6f42c1", hover_color="#5a32a3", font=app.ui_small_font, width=60).pack(side="left", padx=5)
     ctk.CTkButton(grp3, text="↩ 返回", command=close_action, fg_color="#dc3545", hover_color="#c82333", font=app.ui_small_font, width=60).pack(side="left", padx=5)

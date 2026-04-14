@@ -404,10 +404,11 @@ class AATranslationTool(ctk.CTk):
 
     def _poll_batch_commands(self):
         """每 500ms 檢查 IPC 命令檔，收到開啟命令則開啟 result modal。"""
-        # 若 subprocess 已結束，停止輪詢
-        if hasattr(self, '_batch_qt_process') and self._batch_qt_process.poll() is not None:
-            self._batch_qt_process = None
-            return
+        proc_exited = (
+            hasattr(self, '_batch_qt_process')
+            and self._batch_qt_process is not None
+            and self._batch_qt_process.poll() is not None
+        )
 
         cmd_file = getattr(self, '_batch_cmd_file', '')
         if cmd_file and os.path.exists(cmd_file):
@@ -437,6 +438,9 @@ class AATranslationTool(ctk.CTk):
             except (json.JSONDecodeError, OSError):
                 pass
 
+        if proc_exited:
+            self._batch_qt_process = None
+            return
         self.after(500, self._poll_batch_commands)
 
     def _restore_batch_qt_window(self):
@@ -451,7 +455,8 @@ class AATranslationTool(ctk.CTk):
 
     # ── PyQt6 編輯器（獨立 process，Phase A） ──
 
-    def open_edit_qt(self, html_path: str, reload_target=None):
+    def open_edit_qt(self, html_path: str, reload_target=None,
+                     original_text: str | None = None):
         """啟動獨立的 PyQt6 編輯器視窗，編輯結束後重新載入內容。
 
         reload_target: customtkinter CTkTextbox，subprocess 結束後重讀檔案
@@ -463,7 +468,33 @@ class AATranslationTool(ctk.CTk):
             self.show_toast("❌ 找不到 aa_edit_qt.py", color="#dc3545")
             return
 
-        args = [sys.executable, script, "--html-file", html_path]
+        pid = os.getpid()
+        cmd_file = os.path.join(
+            tempfile.gettempdir(), f"aa_edit_cmd_{pid}.json")
+        reply_file = os.path.join(
+            tempfile.gettempdir(), f"aa_edit_reply_{pid}.json")
+        original_file = os.path.join(
+            tempfile.gettempdir(), f"aa_edit_original_{pid}.txt")
+        for f in (cmd_file, reply_file, original_file):
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
+        args = [
+            sys.executable, script,
+            "--html-file", html_path,
+            "--cmd-file", cmd_file,
+            "--reply-file", reply_file,
+        ]
+        if original_text:
+            try:
+                with open(original_file, 'w', encoding='utf-8') as f:
+                    f.write(original_text)
+                args.extend(["--original-file", original_file])
+            except OSError:
+                original_file = ""
         try:
             self._edit_qt_process = subprocess.Popen(args)
         except OSError as e:
@@ -471,18 +502,45 @@ class AATranslationTool(ctk.CTk):
             return
         self._edit_qt_html_path = html_path
         self._edit_qt_reload_target = reload_target
+        self._edit_qt_cmd_file = cmd_file
+        self._edit_qt_reply_file = reply_file
+        self._edit_qt_original_file = original_file
         self.after(500, self._poll_edit_qt)
 
     def _poll_edit_qt(self):
-        """輪詢 PyQt6 編輯器 subprocess；結束後重新載入 HTML 至原編輯器。"""
+        """輪詢 PyQt6 編輯器：1) IPC 請求 2) subprocess 結束偵測。"""
         proc = getattr(self, '_edit_qt_process', None)
         if proc is None:
             return
+
+        # 1) 處理 IPC 請求
+        cmd_file = getattr(self, '_edit_qt_cmd_file', '')
+        reply_file = getattr(self, '_edit_qt_reply_file', '')
+        if cmd_file and os.path.exists(cmd_file):
+            try:
+                with open(cmd_file, 'r', encoding='utf-8') as f:
+                    req = json.load(f)
+                os.remove(cmd_file)
+                reply = self._handle_edit_qt_request(req)
+                if reply_file and reply is not None:
+                    with open(reply_file, 'w', encoding='utf-8') as f:
+                        json.dump(reply, f, ensure_ascii=False)
+            except (OSError, json.JSONDecodeError) as e:
+                print("edit_qt ipc error:", e)
+
+        # 2) 進程結束偵測
         if proc.poll() is not None:
-            # 進程結束，重新載入
             self._edit_qt_process = None
             html_path = getattr(self, '_edit_qt_html_path', '')
             target = getattr(self, '_edit_qt_reload_target', None)
+            original_file = getattr(self, '_edit_qt_original_file', '')
+            # 清理 IPC 檔案
+            for f in (cmd_file, reply_file, original_file):
+                if f and os.path.exists(f):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
             if html_path and os.path.exists(html_path):
                 try:
                     new_text = read_html_pre_content(html_path) or ""
@@ -498,6 +556,40 @@ class AATranslationTool(ctk.CTk):
                         pass
             return
         self.after(500, self._poll_edit_qt)
+
+    def _handle_edit_qt_request(self, req: dict) -> dict | None:
+        """處理來自 PyQt6 編輯器的 IPC 請求；回傳 reply dict 或 None（無需回應）。"""
+        action = req.get("action", "")
+        req_id = req.get("id", -1)
+
+        if action == "get_glossary":
+            return {
+                "id": req_id,
+                "ok": True,
+                "glossary_text": self.get_combined_glossary(),
+            }
+
+        if action == "save_to_glossary":
+            original = req.get("original", "").strip()
+            translation = req.get("translation", "").strip()
+            if not original or not translation:
+                return {"id": req_id, "ok": False, "error": "empty"}
+            try:
+                g_text = self.glossary_text.get("1.0", "end").rstrip('\n')
+                if g_text:
+                    g_text += '\n'
+                g_text += f"{original}={translation}"
+                self.glossary_text.delete("1.0", "end")
+                self.glossary_text.insert("1.0", g_text)
+                self.save_cache()
+                self.show_toast(
+                    f"📖 已存入術語：{original} → {translation}",
+                    color="#17a2b8", duration=2500)
+            except Exception as e:
+                return {"id": req_id, "ok": False, "error": str(e)}
+            return {"id": req_id, "ok": True}
+
+        return {"id": req_id, "ok": False, "error": f"unknown action: {action}"}
 
     def read_html_pre_content(self, file_path):
         return read_html_pre_content(file_path)
@@ -769,6 +861,7 @@ class AATranslationTool(ctk.CTk):
                     self._handle_url_fetch_request(
                         cmd.get('url', ''),
                         bool(cmd.get('author_only', False)),
+                        skip_cache=bool(cmd.get('skip_cache', False)),
                     )
                 elif action == 'clear_history':
                     self.url_history = []
@@ -798,7 +891,52 @@ class AATranslationTool(ctk.CTk):
         except OSError:
             pass
 
-    def _handle_url_fetch_request(self, raw_url: str, author_only: bool):
+    def _url_cache_dir(self) -> str:
+        d = os.path.join(tempfile.gettempdir(), "aa_url_cache")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _url_cache_path(self, url: str) -> str:
+        import hashlib
+        h = hashlib.md5(url.encode('utf-8')).hexdigest()
+        return os.path.join(self._url_cache_dir(), f"{h}.html")
+
+    def _read_url_cache(self, url: str) -> str | None:
+        path = self._url_cache_path(url)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def _write_url_cache(self, url: str, page_html: str) -> None:
+        try:
+            with open(self._url_cache_path(url), 'w', encoding='utf-8') as f:
+                f.write(page_html)
+        except OSError:
+            return
+        # 清理：只保留 url_history 內列出的 URL 之快取檔
+        try:
+            valid = {
+                self._url_cache_path(h['url'])
+                for h in getattr(self, 'url_history', [])
+                if h.get('url')
+            }
+            valid.add(self._url_cache_path(url))
+            for fname in os.listdir(self._url_cache_dir()):
+                fpath = os.path.join(self._url_cache_dir(), fname)
+                if fpath not in valid:
+                    try:
+                        os.remove(fpath)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
+    def _handle_url_fetch_request(self, raw_url: str, author_only: bool,
+                                   skip_cache: bool = False):
         """背景抓取 + 解析，完成後套用到主視窗並回報 Qt 子行程。"""
         self._author_only = author_only
         self.schedule_save()
@@ -807,7 +945,12 @@ class AATranslationTool(ctk.CTk):
 
         def _bg():
             try:
-                page_html = _fetch_url(raw_url)
+                page_html = None
+                if not skip_cache:
+                    page_html = self._read_url_cache(raw_url)
+                if page_html is None:
+                    page_html = _fetch_url(raw_url)
+                    self._write_url_cache(raw_url, page_html)
                 text_content, nav_links, page_title = _parse_page_html(
                     page_html, raw_url, author_name=author, author_only=author_only)
             except Exception as ex:
@@ -821,11 +964,28 @@ class AATranslationTool(ctk.CTk):
                 return
 
             if text_content is None:
-                self.after(0, lambda: self._write_url_fetch_reverse({
+                if author_only and author:
+                    try:
+                        fallback_text, _, _ = _parse_page_html(
+                            page_html, raw_url, author_name="",
+                            author_only=False)
+                    except Exception:
+                        fallback_text = None
+                    if fallback_text:
+                        msg = (f"⚠️ 未找到作者「{author}」的貼文，"
+                               f"請檢查名稱或關閉「僅作者」選項")
+                        color = '#f39c12'
+                    else:
+                        msg = "❌ 找不到 article 區塊！"
+                        color = '#dc3545'
+                else:
+                    msg = "❌ 找不到 article 區塊！"
+                    color = '#dc3545'
+                self.after(0, lambda m=msg, c=color: self._write_url_fetch_reverse({
                     'action': 'fetch_done',
                     'success': False,
-                    'status_message': "❌ 找不到 article 區塊！",
-                    'status_color': '#dc3545',
+                    'status_message': m,
+                    'status_color': c,
                 }))
                 return
 
@@ -914,7 +1074,24 @@ class AATranslationTool(ctk.CTk):
                 text_content, nav_links, page_title = _parse_page_html(page_html, next_url, author_name=author, author_only=getattr(self, '_author_only', False))
 
                 if text_content is None:
-                    self.after(0, lambda: self.show_toast("❌ 找不到 article 區塊！", color="#dc3545"))
+                    author_only_flag = getattr(self, '_author_only', False)
+                    if author_only_flag and author:
+                        try:
+                            fb_text, _, _ = _parse_page_html(
+                                page_html, next_url, author_name="",
+                                author_only=False)
+                        except Exception:
+                            fb_text = None
+                        if fb_text:
+                            m = f"⚠️ 未找到作者「{author}」的貼文"
+                            c = "#f39c12"
+                        else:
+                            m = "❌ 找不到 article 區塊！"
+                            c = "#dc3545"
+                    else:
+                        m = "❌ 找不到 article 區塊！"
+                        c = "#dc3545"
+                    self.after(0, lambda mm=m, cc=c: self.show_toast(mm, color=cc))
                     return
 
                 def _apply():

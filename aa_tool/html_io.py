@@ -12,7 +12,23 @@ def read_html_pre_content(file_path: str) -> str | None:
     return None
 
 
-def write_html_file(file_path: str, text_content: str) -> None:
+def read_html_bg_color(file_path: str) -> str | None:
+    """讀取 HTML body 的 background-color，回傳 #rrggbb 或 None。"""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except OSError:
+        return None
+    m = re.search(
+        r'body\s*\{[^}]*background-color\s*:\s*(#[0-9a-fA-F]{3,8}|\w+)',
+        content)
+    if m:
+        return m.group(1)
+    return None
+
+
+def write_html_file(file_path: str, text_content: str,
+                    bg_color: str = "#fff") -> None:
     """將文字內容包裝為 HTML 並寫入檔案（保留 span 標籤）。"""
     parts = re.split(r'(<span style="color:[^"]*">|</span>)', text_content)
     escaped_parts = []
@@ -29,7 +45,7 @@ def write_html_file(file_path: str, text_content: str) -> None:
     <meta charset="UTF-8">
     <title>AA_Translated</title>
     <style>
-        body {{ background-color: #fff; color: #000; padding: 20px; }}
+        body {{ background-color: {bg_color}; color: #000; padding: 20px; }}
         pre {{
             font-family: 'MS PGothic', 'Meiryo', monospace;
             font-size: 16px;

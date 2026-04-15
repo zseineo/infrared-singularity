@@ -15,8 +15,8 @@ QMainWindow {
 QPlainTextEdit, QTextEdit {
     background-color: #343638;
     color: #dce4ee;
-    border: 1px solid #555555;
-    border-radius: 4px;
+    border: none;
+    border-radius: 0;
     selection-background-color: #1f6aa5;
     selection-color: #ffffff;
 }
@@ -141,15 +141,9 @@ QScrollArea {
     border: none;
 }
 
-/* ── 分割器 ── */
+/* ── 分割器（不顯示分界線） ── */
 QSplitter::handle {
-    background-color: #555555;
-    width: 2px;
-    height: 2px;
-}
-
-QSplitter::handle:hover {
-    background-color: #1f6aa5;
+    background-color: transparent;
 }
 
 /* ── 工具列區域 ── */

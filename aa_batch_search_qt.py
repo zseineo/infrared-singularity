@@ -48,11 +48,15 @@ class BatchSearchWindow(QMainWindow):
     _sig_done = pyqtSignal(list, int)
 
     def __init__(self, *, folder: str = "", cmd_file: str = "",
-                 reverse_cmd_file: str = ""):
+                 reverse_cmd_file: str = "",
+                 on_open_file=None,       # (file_path, line, folder) -> None
+                 on_folder_change=None):  # (folder) -> None
         super().__init__()
         self.setWindowTitle("AA 批次搜尋")
         self.resize(1000, 700)
 
+        self._on_open_file = on_open_file
+        self._on_folder_change = on_folder_change
         self._cmd_file = cmd_file
         self._reverse_cmd_file = reverse_cmd_file
 
@@ -431,10 +435,12 @@ class BatchSearchWindow(QMainWindow):
     # ────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
-        """關閉視窗時，透過 IPC 將當前資料夾同步回主程式。"""
-        if self._cmd_file:
-            folder = self.folder_entry.text().strip()
-            if folder:
+        """關閉視窗時，同步資料夾。"""
+        folder = self.folder_entry.text().strip()
+        if folder:
+            if self._on_folder_change is not None:
+                self._on_folder_change(folder)
+            elif self._cmd_file:
                 cmd = {"action": "sync_folder", "folder": folder}
                 try:
                     with open(self._cmd_file, 'w', encoding='utf-8') as f:
@@ -510,17 +516,20 @@ class BatchSearchWindow(QMainWindow):
             pass
 
     def _open_file(self, mi: dict):
-        """寫入 IPC 命令檔，通知主程式開啟檔案並跳到該行，然後縮小自己。"""
+        """通知主程式開啟檔案並跳到該行。支援 callback（embedded）與 IPC（subprocess）兩種模式。"""
+        folder = self.folder_entry.text().strip()
+        if self._on_open_file is not None:
+            self._on_open_file(mi['file_path'], mi['line_idx'] + 1, folder)
+            return
         if not self._cmd_file:
             self._toast("未指定命令檔路徑，無法開啟", color="#dc3545")
             return
-
         cmd = {
             "action": "open",
             "file_path": mi['file_path'],
             "line": mi['line_idx'] + 1,
             "raise": True,
-            "folder": self.folder_entry.text().strip(),
+            "folder": folder,
         }
         try:
             with open(self._cmd_file, 'w', encoding='utf-8') as f:

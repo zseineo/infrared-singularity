@@ -32,6 +32,8 @@
 
 批次搜尋功能由獨立的 PyQt6 視窗 (`aa_batch_search_qt.py`) 提供，以 subprocess 方式啟動，透過 JSON 命令檔（IPC）與主程式雙向溝通。
 
+主視窗工具列（`TranslatePanel._build_toolbar`）在「批次搜尋」按鈕右側另提供「編輯模式」按鈕，對應 `MainWindow.resume_edit_panel()`：若目前有開啟中的 `EditWindow`，會直接切回編輯面板，避免從編輯模式誤按返回後需要重新走流程。
+
 ## 4. 核心模組與對應 Function 解析 (Core Functions)
 未來若要修改特定功能，請參考此清單尋找對應的 Python function。主程式類別為 `AATranslationTool(ctk.CTk)`。
 
@@ -94,7 +96,9 @@
     *   **智慧判斷 (`smart_action()`)**: (Hotkey: `Ctrl+Q`) 自動判斷：選取多行 → `adjust_bubble()`；選取單行區塊 → `apply_color()`；僅有游標 → `align_to_prev_line()`。
 
     **群組 3 — 視窗控制:**
-    *   **底色/文字色**: `choose_bg_color()` / `choose_fg_color()` 調整預覽視窗的背景色與文字色，設定持久化至暫存。
+    *   **底色**: `_choose_bg()` 於 PyQt6 編輯器（`aa_edit_qt.py`）可調整編輯區底色，**僅作為編輯中的視覺效果**，儲存 HTML 時不寫入 `bg_color`（交由後續網站樣式控制）。
+    *   **行高設定**: `_apply_line_height_to()` 以 `LineHeightTypes.ProportionalHeight` 套用 120%，與瀏覽器上 AA 的顯示一致。**已知副作用**: 中文 IME composition 期間行距會短暫抖動，這是 Qt 的行為；為保持與瀏覽器 AA 視覺一致，維持此設定不改 `FixedHeight`／原生行高。
+    *   **搜尋找不到時不跳位**: `_find_next()` 會先保存原本 `textCursor` 與捲動位置，找不到（含 wrap-around 仍無結果）時恢復，避免捲到最上面。
     *   **💾 另存 (`save_as()`)**: 另存新檔對話框，將預覽內容封裝進帶有 CSS 的 HTML 並儲存。
     *   **關閉/返回**: 關閉前自動將當前預覽內容寫入 `preview_text_cache` 並呼叫 `save_cache()`。
 
@@ -114,7 +118,8 @@
     *   碰撞避免：寫入方若發現檔案仍存在（接收方未消費），延後 100ms 重試（Qt 最多 20 次，主程式相同）。
 *   **主程式端處理**:
     *   `_poll_url_fetch_commands()`：每 500ms 讀取 `cmd_file`，subprocess 結束即停止輪詢。
-    *   `_handle_url_fetch_request(url, author_only)`：更新 `_author_only`→`schedule_save`→背景執行緒執行 `fetch_url` + `parse_page_html`，成功後套用到 `source_text`、更新 `url_related_links`/`current_url`/`url_history`、觸發 `check_chapter_number`、`_update_work_title`、`show_toast`，最後以 `fetch_done` 回報 Qt 並要求 `auto_close`。
+    *   `_handle_url_fetch_request(url, author_only)`：更新 `_author_only`→`schedule_save`→背景執行緒執行 `fetch_url` + `parse_page_html`，成功後透過 `_invoke_on_main` signal 將 `_apply` 派回主執行緒（`QTimer.singleShot` 只能在有 event loop 的執行緒呼叫，背景執行緒須用 signal 轉送），套用到 `source_text`、更新 `url_related_links`/`current_url`/`url_history`、觸發 `check_chapter_number`、`_update_work_title`、`show_toast`，最後以 `fetch_done` 回報 Qt 並要求 `auto_close`。
+    *   `_invoke_on_main`：`pyqtSignal(object)`，在 `__init__` 連到 `lambda fn: fn()`，供背景執行緒把 callable 排到主執行緒執行（取代不能跨執行緒的 `QTimer.singleShot`）。
     *   `_write_url_fetch_reverse()`：含重試邏輯的反向命令寫入。
 *   **Qt 端功能**:
     *   URL 輸入 + 忽略留言 Checkbox + 讀取按鈕（綠）+ Enter 觸發。
@@ -128,6 +133,7 @@
     *   **himanatokiniyaruo.com (`_parse_himanatokiniyaruo`)**: `dt[id=數字]` / `dd` + `div.related-entries`
     *   **blog.fc2.com (`_parse_fc2blog`)**: `div.ently_text` + `dl.relate_dl`（含 `web.archive.org` 封存版）
     *   **yaruobook.jp (`_parse_yaruobook`)**: `dt.author-res-dt` / `dd.author-res` + `ul.relatedPostsWrap.relatedPostsPrev/Next`；`li.currentPost` 標記當前話。**關聯清單排序**：原始 Prev 區塊為 `[currentPost, 前一話, 前前話, ...]`（當前在前、舊話倒序），解析時須將 Prev **反轉**後再接 Next，才能得到按時間順序排列的清單，供「下一話」按鈕以 `current_idx + 1` 正確取得下一集
+*   **保留貼文內空行**: `_extract_dt_dd_posts()` 在切 dd 內容時，只 trim 尾端空行、不 trim 開頭空行，以避免「作者行」與實際 AA 內文之間的排版空行被吃掉。
 *   **作者名稱格式**: `_is_author_post()` 支援兩種標頭格式並自動正規化空白：
     1.「N 名前：AUTHOR[...]」(5ch / FC2 / himana)
     2.「N ： AUTHOR ： YYYY/MM/DD(曜) HH:MM:SS ID:XXX」(yaruobook)
@@ -136,7 +142,8 @@
 *   **關聯記事導航**: 顯示同系列各話的連結清單，可直接點擊切換；提供上一話/下一話按鈕。
 *   **忽略留言開關 (`author_only`)**: Dialog 中的「忽略留言」開關，開啟時完全排除非作者的貼文（需搭配作者名稱欄位）。狀態持久化至暫存，「下一話」功能同樣遵循此設定。
 *   **讀取歷史記錄**: 最多保存 50 筆，可點擊重新讀取，支援清除記錄。
-*   **直接讀取下一話 (`fetch_next_chapter()`)**: Toolbar 上的「下一話 ▶」按鈕，從已存的關聯記事中直接背景讀取下一話。
+*   **直接讀取上/下一話 (`fetch_prev_chapter()` / `fetch_next_chapter()`)**: 首頁原文區標頭提供「◀ 上一話」「下一話 ▶」按鈕，皆透過共用 `_fetch_adjacent_chapter(direction)` 從已存的關聯記事中背景讀取相鄰話。
+*   **複製網址（讀取紀錄內）**: `aa_url_fetch_qt.py` 的讀取紀錄每一列除「讀取」按鈕外，另提供「複製」按鈕，以 `_copy_url_to_clipboard()` 將該筆網址複製到剪貼簿。
 *   **章節號碼自動偵測 (`check_chapter_number()`)**: 貼上或讀取文字後，掃描前五行尋找 `第N話` 或 `番外編N` 格式，自動填入話數欄位。
 *   **複製網址 (`copy_current_url()`)**: 複製目前讀取的網址至剪貼簿。
 
@@ -167,7 +174,7 @@
     *   `write_html_file(file_path, text_content)`: 封裝 HTML（CSS 字體設定為 `MS PGothic`/`Meiryo` monospace, 16px），用分割保全 `<span>` tag 後 `html.escape` 其他內容。包含 `viewport` meta 與手機 RWD 樣式（768px 以下字體縮小至 10px），支援觸控橫向捲動。
 
 ### 4.8 UI 通知系統
-*   **`show_toast(message, color, duration)`**: 在主視窗右上角顯示浮動提示，`duration` ms 後自動關閉。
+*   **`show_toast(message, color, duration)`**: 在主視窗右上角顯示浮動提示，`duration` ms 後自動關閉。PyQt6 主視窗的 `MainWindow.show_status()` 已改以此函式呈現（原本位於左下角的「就緒」狀態列已移除），會將常見的 `#0f0` 亮綠自動映射為 toast 風格的 `#28a745`。
 *   **`show_confirm_toast(message, on_yes, color, duration)`**: 帶有「是/否」按鈕的確認浮動視窗，逾時（預設 8 秒）自動關閉。
 *   **AI 翻譯格式驗證 (`validate_ai_text()`)**: 貼上翻譯文字後自動觸發，掃描每行是否含有多個 ID (`\d{2,4}-\d+\|`)，於 `ai_warn_label` 顯示警告或成功提示。
 

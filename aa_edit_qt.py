@@ -41,7 +41,7 @@ from aa_tool.translation_engine import (
     apply_glossary_to_text, parse_glossary,
 )
 
-LINE_HEIGHT_PERCENT = 120  # 對應 CSS line-height: 1.2
+LINE_HEIGHT_PERCENT = 120  # 對應 CSS line-height: 1.2，與瀏覽器顯示一致
 DEFAULT_BG = "#ffffff"
 DEFAULT_COLOR = "#ff0000"
 
@@ -80,12 +80,21 @@ class EditWindow(QMainWindow):
         cmd_file: str = "",
         reply_file: str = "",
         original_file: str = "",
+        # Embedded mode: pass callables instead of IPC
+        glossary_provider=None,   # () -> str
+        glossary_saver=None,      # (orig: str, trans: str) -> None
+        on_back=None,             # () -> None; embedded 模式回主畫面
     ) -> None:
         super().__init__()
         self._html_file = html_file
         self._dirty = False
         self._current_color = DEFAULT_COLOR
         self._bg_color = DEFAULT_BG
+
+        # ── Callback（embedded 模式）──
+        self._glossary_provider = glossary_provider
+        self._glossary_saver = glossary_saver
+        self._on_back = on_back
 
         # ── IPC 狀態 ──
         self._cmd_file = cmd_file
@@ -163,12 +172,16 @@ class EditWindow(QMainWindow):
         self.editor.textChanged.connect(self._on_changed)
         root.addWidget(self.stack, 1)
 
-        # ── 狀態列 ──
-        self.status_label = QLabel("就緒")
+        # ── 浮動狀態提示（覆蓋於編輯區底部） ──
+        self.status_label = QLabel("", self.stack)
         self.status_label.setStyleSheet(
-            "background:#212529; color:#0f0; padding:3px 10px;"
-            " font-family:Consolas;")
-        root.addWidget(self.status_label)
+            "background:rgba(33,37,41,230); color:#0f0;"
+            " padding:6px 14px; border-radius:6px;"
+            " font-family:Consolas; font-size:11pt;")
+        self.status_label.hide()
+        self._status_hide_timer = QTimer(self)
+        self._status_hide_timer.setSingleShot(True)
+        self._status_hide_timer.timeout.connect(self.status_label.hide)
 
         # ── 全域快捷鍵 ──
         QShortcut(QKeySequence.StandardKey.Save, self, activated=self._save)
@@ -291,9 +304,14 @@ class EditWindow(QMainWindow):
         btn_save.clicked.connect(self._save)
         tb.addWidget(btn_save)
 
-        btn_close = _make_button("關閉", "#dc3545", "#c82333", width=50)
-        btn_close.clicked.connect(self.close)
-        tb.addWidget(btn_close)
+        if self._on_back is not None:
+            btn_back = _make_button("← 返回", "#6c757d", "#5a6268", width=70)
+            btn_back.clicked.connect(self._on_back)
+            tb.addWidget(btn_back)
+        else:
+            btn_close = _make_button("關閉", "#dc3545", "#c82333", width=50)
+            btn_close.clicked.connect(self.close)
+            tb.addWidget(btn_close)
 
         return toolbar
 
@@ -338,13 +356,26 @@ class EditWindow(QMainWindow):
         self.editor.setStyleSheet(
             f"QTextEdit {{ background:{self._bg_color};"
             f" color:#000000;"
-            f" border:1px solid #cccccc; }}"
+            f" border:1px solid #cccccc;"
+            f" font-family:'MS PGothic';"
+            f" font-size:12pt; }}"
         )
+        if hasattr(self, "orig_view"):
+            self.orig_view.setStyleSheet(
+                "QTextEdit { background:#f5f5f5;"
+                " color:#000000;"
+                " border:1px solid #cccccc;"
+                " font-family:'MS PGothic';"
+                " font-size:12pt; }"
+            )
 
     def _apply_line_height(self) -> None:
         self._apply_line_height_to(self.editor)
 
     def _apply_line_height_to(self, widget: QTextEdit) -> None:
+        # 為了與瀏覽器上 AA 的 120% 行高顯示一致，這裡使用
+        # ProportionalHeight。副作用：中文 IME composition 期間行距會
+        # 短暫抖動，屬於 Qt 已知行為，與瀏覽器一致性相比取前者。
         cursor = QTextCursor(widget.document())
         cursor.select(QTextCursor.SelectionType.Document)
         block_fmt = QTextBlockFormat()
@@ -374,6 +405,8 @@ class EditWindow(QMainWindow):
         query = self.search_entry.text()
         if not query:
             return
+        saved_cursor = self.editor.textCursor()
+        saved_scroll = self.editor.verticalScrollBar().value()
         found = self.editor.find(query)
         if not found:
             # wrap around
@@ -382,6 +415,9 @@ class EditWindow(QMainWindow):
             self.editor.setTextCursor(cursor)
             found = self.editor.find(query)
         if not found:
+            # 找不到時恢復原本游標位置與捲動，避免跳到最上面
+            self.editor.setTextCursor(saved_cursor)
+            self.editor.verticalScrollBar().setValue(saved_scroll)
             self._set_status("🔍 找不到符合的文字", "#ffc107")
         else:
             self._set_status(f"找到：{query}", "#0f0")
@@ -410,10 +446,13 @@ class EditWindow(QMainWindow):
         new_text = text.replace(orig, trans)
         self._replace_document(new_text)
 
-        # 若勾選「存入術語」，透過 IPC 通知主程式
-        if self.save_to_glossary_cb.isChecked() and self._cmd_file:
-            self._send_request(
-                "save_to_glossary", original=orig, translation=trans)
+        # 若勾選「存入術語」，通知主程式
+        if self.save_to_glossary_cb.isChecked():
+            if self._glossary_saver is not None:
+                self._glossary_saver(orig, trans)
+            elif self._cmd_file:
+                self._send_request(
+                    "save_to_glossary", original=orig, translation=trans)
 
         self.quick_orig.clear()
         self.quick_trans.clear()
@@ -421,6 +460,10 @@ class EditWindow(QMainWindow):
 
     def _reapply_glossary(self) -> None:
         """向主程式請求目前術語表，收到後套用到編輯內容。"""
+        if self._glossary_provider is not None:
+            glossary_str = self._glossary_provider()
+            self._on_glossary_received({"ok": True, "glossary_text": glossary_str})
+            return
         if not self._cmd_file:
             self._set_status("⚠️ 未啟用 IPC，無法取得術語表", "#ffc107")
             return
@@ -747,8 +790,46 @@ class EditWindow(QMainWindow):
     def _set_status(self, msg: str, color: str = "#0f0") -> None:
         self.status_label.setText(msg)
         self.status_label.setStyleSheet(
-            f"background:#212529; color:{color}; padding:3px 10px;"
-            " font-family:Consolas;")
+            f"background:rgba(33,37,41,230); color:{color};"
+            f" padding:6px 14px; border-radius:6px;"
+            f" font-family:Consolas; font-size:11pt;")
+        self.status_label.adjustSize()
+        self._position_status_label()
+        self.status_label.show()
+        self.status_label.raise_()
+        self._status_hide_timer.start(4000)
+
+    def _position_status_label(self) -> None:
+        if not hasattr(self, "status_label"):
+            return
+        parent = self.stack
+        lbl = self.status_label
+        margin = 12
+        x = max(margin, (parent.width() - lbl.width()) // 2)
+        y = parent.height() - lbl.height() - margin
+        lbl.move(x, max(margin, y))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.status_label.isVisible():
+            self._position_status_label()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, "_dark_title_applied", False):
+            if sys.platform == "win32":
+                try:
+                    import ctypes
+                    hwnd = int(self.winId())
+                    value = ctypes.c_int(1)
+                    for attr in (20, 19):
+                        res = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                            hwnd, attr, ctypes.byref(value), ctypes.sizeof(value))
+                        if res == 0:
+                            break
+                except Exception:
+                    pass
+            self._dark_title_applied = True
 
     def _on_changed(self) -> None:
         if not self._dirty:
@@ -761,7 +842,8 @@ class EditWindow(QMainWindow):
             return
         text = self.editor.toPlainText()
         try:
-            write_html_file(self._html_file, text, bg_color=self._bg_color)
+            # 底色僅為編輯器預覽效果，不寫入檔案（交由後續網站控制）
+            write_html_file(self._html_file, text)
         except OSError as e:
             QMessageBox.critical(self, "儲存失敗", str(e))
             return

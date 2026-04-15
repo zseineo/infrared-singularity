@@ -287,6 +287,14 @@ class UrlFetchWindow(QMainWindow):
             btn.clicked.connect(lambda checked=False, u=url: self.url_entry.setText(u))
             rl.addWidget(btn, 1)
 
+            copy_btn = make_button("複製", color="#6c757d", hover="#5a6268",
+                                   font=self.ui_small_font, width=45)
+            copy_btn.setFixedHeight(22)
+            copy_btn.setToolTip("複製此網址到剪貼簿")
+            copy_btn.clicked.connect(
+                lambda checked=False, u=url: self._copy_url_to_clipboard(u))
+            rl.addWidget(copy_btn)
+
             read_btn = make_button("讀取", color="#17a2b8", hover="#138496",
                                     font=self.ui_small_font, width=45)
             read_btn.setFixedHeight(22)
@@ -294,6 +302,12 @@ class UrlFetchWindow(QMainWindow):
             rl.addWidget(read_btn)
 
             insert_at(row)
+
+    def _copy_url_to_clipboard(self, url: str) -> None:
+        if not url:
+            return
+        QApplication.clipboard().setText(url)
+        self._set_status("✅ 已複製網址到剪貼簿", "#28a745")
 
     # ──────────────────────────── 動作 ────────────────────────────
 

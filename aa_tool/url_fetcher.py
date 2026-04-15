@@ -246,10 +246,10 @@ def _extract_dt_dd_posts(
             dd_text = _strip_all_tags(dd_text)
         dd_text = html.unescape(dd_text)
         dd_lines = dd_text.split('\n')
+        # 只 trim 尾端空行（避免貼文之間多出空白），保留開頭空行 —
+        # 作者貼文中「作者行」與實際內容之間的空行屬於排版，必須保留。
         while dd_lines and not dd_lines[-1].strip():
             dd_lines.pop()
-        while dd_lines and not dd_lines[0].strip():
-            dd_lines.pop(0)
         if dd_lines:
             lines_out.append(dt_text + '\n' + '\n'.join(dd_lines))
 
@@ -468,7 +468,11 @@ def _parse_yaruobook(page_html: str, base_url: str, *, author_name: str = "", au
     # ── 內文區塊 ──
     first_m = re.search(r'<dt\s+[^>]*class="[^"]*author-res-dt', page_html)
     if not first_m:
-        return None, [], page_title
+        # 備援機制：針對無特定 class 標籤或早期文章，尋找包含「<dt>...數字...：...年份」的標準安價發言
+        # 容許數字與冒號之間存在 HTML 標籤 (例如：<span>2175</span> ：)
+        first_m = re.search(r'<dt[^>]*>(?:\s|<[^>]+>)*\d+(?:\s|<[^>]+>)*[：:].*?\d{4}[/年]', page_html)
+        if not first_m:
+            return None, [], page_title
 
     end_m = re.search(
         r'<div\s+[^>]*class="[^"]*widget-single-content-bottom'

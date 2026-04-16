@@ -1,6 +1,7 @@
 # 個人設定與暫存（含個資，不上傳）
 aa_settings_cache.json
 AA_Settings.json
+.json
 
 # Python 快取
 __pycache__/

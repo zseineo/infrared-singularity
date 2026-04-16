@@ -54,6 +54,7 @@ class UrlFetchWindow(QMainWindow):
         self._url_related_links: list[dict] = []
         self._current_url: str = ""
         self._author_only: bool = False
+        self._author_name: str = ""
         initial_url: str = ""
         if init_file and os.path.exists(init_file):
             try:
@@ -63,6 +64,7 @@ class UrlFetchWindow(QMainWindow):
                 self._url_related_links = d.get("url_related_links") or []
                 self._current_url = d.get("current_url") or ""
                 self._author_only = bool(d.get("author_only"))
+                self._author_name = d.get("author_name") or ""
                 initial_url = d.get("initial_url") or ""
             except (OSError, json.JSONDecodeError):
                 pass
@@ -74,6 +76,7 @@ class UrlFetchWindow(QMainWindow):
         if initial_url:
             self.url_entry.setText(initial_url)
         self.author_only_switch.setChecked(self._author_only)
+        self.author_name_entry.setText(self._author_name)
 
         self._refresh_nav()
         self._refresh_history()
@@ -91,6 +94,7 @@ class UrlFetchWindow(QMainWindow):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(6)
 
+        # 網址列
         top = QHBoxLayout()
         lbl_url = QLabel("網址:")
         lbl_url.setFont(self.ui_small_font)
@@ -116,6 +120,18 @@ class UrlFetchWindow(QMainWindow):
         self.fetch_btn.clicked.connect(self._do_fetch)
         top.addWidget(self.fetch_btn)
         layout.addLayout(top)
+
+        # 作者名稱列
+        author_row = QHBoxLayout()
+        lbl_author = QLabel("作者名稱:")
+        lbl_author.setFont(self.ui_small_font)
+        author_row.addWidget(lbl_author)
+
+        self.author_name_entry = QLineEdit()
+        self.author_name_entry.setFont(self.ui_small_font)
+        self.author_name_entry.setPlaceholderText("（配合「忽略留言」使用）")
+        author_row.addWidget(self.author_name_entry, 1)
+        layout.addLayout(author_row)
 
         self.status_label = QLabel("")
         self.status_label.setFont(self.ui_small_font)
@@ -334,6 +350,7 @@ class UrlFetchWindow(QMainWindow):
             "action": "fetch_request",
             "url": raw,
             "author_only": self.author_only_switch.isChecked(),
+            "author_name": self.author_name_entry.text().strip(),
             "skip_cache": self.skip_cache_switch.isChecked(),
         })
 
@@ -396,6 +413,7 @@ class UrlFetchWindow(QMainWindow):
                     json.dump({
                         "action": "close_sync",
                         "author_only": self.author_only_switch.isChecked(),
+                        "author_name": self.author_name_entry.text().strip(),
                     }, f, ensure_ascii=False)
         except OSError:
             pass

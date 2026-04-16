@@ -38,6 +38,11 @@ class AppCache:
     batch_folder: str = ""
     author_name: str = ""
     author_only: bool = False
+    work_history: list = field(default_factory=list)
+    editor_font_family: str = "submona"
+    editor_font_size: int = 12
+    last_open_dir: str = ""
+    editor_bg_color: str = "#ffffff"
 
 
 class SettingsManager:
@@ -138,12 +143,55 @@ class SettingsManager:
             cache.batch_folder = data.get('batch_folder', '')
             cache.author_name = data.get('author_name', '')
             cache.author_only = bool(data.get('author_only', False))
+            cache.work_history = data.get('work_history', []) or []
+            cache.editor_font_family = data.get(
+                'editor_font_family', cache.editor_font_family)
+            try:
+                cache.editor_font_size = int(data.get(
+                    'editor_font_size', cache.editor_font_size))
+            except (TypeError, ValueError):
+                pass
+            cache.last_open_dir = data.get('last_open_dir', '')
+            cache.editor_bg_color = data.get(
+                'editor_bg_color', cache.editor_bg_color)
         except Exception as e:
             print("Cache load failed:", e)
         return cache
 
     def save_cache(self, cache: AppCache) -> None:
-        """將 AppCache 寫入 aa_settings_cache.json。"""
+        """將 AppCache 寫入 aa_settings_cache.json。
+        url_history 與 work_history 會先讀取既有檔案後合併，
+        避免多個程式同時執行時互相覆蓋。
+        """
+        # 讀回現有資料，合併 url_history（以 URL 去重，保留最新 50 筆）
+        existing_url_hist: list = []
+        existing_work_hist: list = []
+        cache_file = self.get_cache_file()
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    existing = json.load(f)
+                existing_url_hist = existing.get('url_history', []) or []
+                existing_work_hist = existing.get('work_history', []) or []
+            except Exception:
+                pass
+
+        # 合併 url_history：本機新增的排前面，再補既有但本機沒有的
+        own_urls = {h['url'] for h in cache.url_history if isinstance(h, dict) and h.get('url')}
+        merged_url = list(cache.url_history)
+        for h in existing_url_hist:
+            if isinstance(h, dict) and h.get('url') and h['url'] not in own_urls:
+                merged_url.append(h)
+        merged_url = merged_url[:50]
+
+        # 合併 work_history：本機新增的排前面
+        own_work_keys = {(h.get('title',''), h.get('author','')) for h in cache.work_history if isinstance(h, dict)}
+        merged_work = list(cache.work_history)
+        for h in existing_work_hist:
+            if isinstance(h, dict) and (h.get('title',''), h.get('author','')) not in own_work_keys:
+                merged_work.append(h)
+        merged_work = merged_work[:10]
+
         data = {
             'source_text': cache.source_text,
             'filter_text': cache.filter_text,
@@ -154,16 +202,21 @@ class SettingsManager:
             'bg_color': cache.bg_color,
             'fg_color': cache.fg_color,
             'preview_text': cache.preview_text,
-            'url_history': cache.url_history,
+            'url_history': merged_url,
             'url_related_links': cache.url_related_links,
             'current_url': cache.current_url,
             'auto_copy': cache.auto_copy,
             'batch_folder': cache.batch_folder,
             'author_name': cache.author_name,
             'author_only': cache.author_only,
+            'work_history': merged_work,
+            'editor_font_family': cache.editor_font_family,
+            'editor_font_size': cache.editor_font_size,
+            'last_open_dir': cache.last_open_dir,
+            'editor_bg_color': cache.editor_bg_color,
         }
         try:
-            with open(self.get_cache_file(), 'w', encoding='utf-8') as f:
+            with open(cache_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False)
         except Exception as e:
             print("Cache save failed:", e)

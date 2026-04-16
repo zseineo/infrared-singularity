@@ -372,6 +372,39 @@ def _parse_himanatokiniyaruo(page_html: str, base_url: str, *, author_name: str 
             is_current = href.rstrip('/') == base_url.rstrip('/')
             nav_links.append({'title': title, 'url': href, 'is_current': is_current})
 
+    # ── 巢狀 div fallback：若原始 regex 未取到連結，改用平衡 div 深度抓取 ──
+    if not nav_links:
+        start_m = re.search(
+            r'<div\s+class="related-entries">', page_html, re.DOTALL,
+        )
+        if start_m:
+            inner_start = start_m.end()
+            depth = 1
+            pos = inner_start
+            while depth > 0 and pos < len(page_html):
+                next_open = re.search(r'<div[\s>]', page_html[pos:])
+                next_close = re.search(r'</div>', page_html[pos:])
+                if next_close is None:
+                    break
+                if next_open and next_open.start() < next_close.start():
+                    depth += 1
+                    pos += next_open.start() + 1
+                else:
+                    depth -= 1
+                    if depth == 0:
+                        related_html_full = page_html[inner_start:pos + next_close.start()]
+                        for a_m in re.finditer(
+                            r'<a\s+href="([^"]+)"[^>]*>(.*?)</a>',
+                            related_html_full, re.DOTALL,
+                        ):
+                            href = urljoin(base_url, a_m.group(1))
+                            title = html.unescape(re.sub(r'<[^>]+>', '', a_m.group(2))).strip()
+                            if not title:
+                                continue
+                            is_current = href.rstrip('/') == base_url.rstrip('/')
+                            nav_links.append({'title': title, 'url': href, 'is_current': is_current})
+                    pos += next_close.start() + len('</div>')
+
     return text_content, nav_links, page_title
 
 

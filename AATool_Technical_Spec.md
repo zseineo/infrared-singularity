@@ -9,10 +9,13 @@
     *   `batch_escape_tags.py` — 附屬 HTML Tag 批次逸出工具
 *   **技術棧**: Python 3, `customtkinter` (UI 框架), `tkinter`, `re`, `math`, `os`, `html`, `urllib.request`, `threading`, `gzip`, `json`
 *   **狀態存儲機制**:
-    *   `aa_settings_cache.json` — 暫存 UI 狀態 (原文、過濾規則、術語表、話數、預覽暫存、URL 記錄、背景/文字色、各開關狀態等)，確保關閉重開後不丟失資料。**正則表達式不從暫存讀取**，由 `AA_Settings.json` 管理。
+    *   `aa_settings_cache.json` — 暫存 UI 狀態 (原文、過濾規則、術語表、話數、預覽暫存、URL 記錄、背景/文字色、各開關狀態、作品+作者歷史 `work_history` 等)，確保關閉重開後不丟失資料。**正則表達式不從暫存讀取**，由 `AA_Settings.json` 管理。
     *   `AA_Settings.json` — 正式設定檔，儲存 `filter`、`glossary`、`glossary_temp`、`base_regex`、`invalid_regex`、`symbol_regex`。
+    *   `aa_original_cache.json` — 依 HTML 檔名索引的原文暫存（鍵為 basename，值為 `{text, ts}`），上限 50 筆，超過時以時間戳保留最新。編輯器儲存時寫入，`import_html` 開啟同名檔案時自動載入為比對原文。
 *   **字體設計**:
     *   `aa_font` — `Meiryo` 14px，用於輸入區 TextBox
+    *   PyQt6 編輯器 (`aa_edit_qt.py`) 預設 `submona` 12pt（AA 專用字體），`Ctrl+F` 延伸出的搜尋列提供字體下拉（可編輯，預設清單含 **Monapo**/submona/MS PGothic/Meiryo/Consolas/Microsoft JhengHei/MingLiU）與 6–48pt `QSpinBox`，變更後同步更新 `editor`、`orig_view`、`_measurer`、CSS 與行高；字體狀態持久化於 `aa_settings_cache.json` 的 `editor_font_family` / `editor_font_size`
+    *   **內建字體載入** (`load_bundled_fonts()`)：`aa_main_qt.main()` 與 `aa_edit_qt.main()` 在 QApplication 建立後各呼叫一次，掃描 `fonts/` 資料夾中的 `.ttf` / `.otf` 並以 `QFontDatabase.addApplicationFont()` 載入；目前含 `fonts/monapo.ttf`（家族名 `Monapo`）
     *   `result_font` — `MS PGothic` 16px，用於預覽輸出區；所有對齊計算皆依賴此字體的 `measure()` 函式
     *   `ui_font` — `Microsoft JhengHei` 14px bold，用於按鈕與標籤
     *   `ui_small_font` — `Microsoft JhengHei` 12px，用於次要按鈕與提示
@@ -99,6 +102,8 @@
     *   **底色**: `_choose_bg()` 於 PyQt6 編輯器（`aa_edit_qt.py`）可調整編輯區底色，**僅作為編輯中的視覺效果**，儲存 HTML 時不寫入 `bg_color`（交由後續網站樣式控制）。
     *   **行高設定**: `_apply_line_height_to()` 以 `LineHeightTypes.ProportionalHeight` 套用 120%，與瀏覽器上 AA 的顯示一致。**已知副作用**: 中文 IME composition 期間行距會短暫抖動，這是 Qt 的行為；為保持與瀏覽器 AA 視覺一致，維持此設定不改 `FixedHeight`／原生行高。
     *   **搜尋找不到時不跳位**: `_find_next()` 會先保存原本 `textCursor` 與捲動位置，找不到（含 wrap-around 仍無結果）時恢復，避免捲到最上面。
+    *   **💾 儲存（PyQt6 編輯器）**: 工具列的「💾 儲存」按鈕執行 `_save_as()`，**永遠彈出另存新檔對話框**；`Ctrl+S` 對應 `_save_overwrite()`，若有真實檔案路徑則直接覆寫、若為 `apply_translation` 產生的暫存檔（`_is_temp_file=True`）則仍走另存。儲存成功後透過 `on_save` callback 通知 `MainWindow._on_edit_saved()`，由主程式更新導覽列/視窗標題並將 `_original_text` 寫入 `aa_original_cache.json`。
+    *   **📂 開啟（PyQt6 編輯器）**: 位於「儲存」與「返回」之間，呼叫 `MainWindow.import_html()`，與主畫面「打開已儲存的 HTML」按鈕相同；開啟時會自動查找 `aa_original_cache.json` 中的同名紀錄作為比對原文。
     *   **💾 另存 (`save_as()`)**: 另存新檔對話框，將預覽內容封裝進帶有 CSS 的 HTML 並儲存。
     *   **關閉/返回**: 關閉前自動將當前預覽內容寫入 `preview_text_cache` 並呼叫 `save_cache()`。
 
@@ -112,8 +117,9 @@
 *   主程式以 subprocess 啟動獨立的 PyQt6 視窗，透過 JSON 命令檔 (IPC) 雙向溝通；UI 與抓取職責分離，**實際抓取/解析由主程式執行**，以確保作者名稱 (`author_name_entry`) 總是取最新值。
 *   **IPC 通訊協定**:
     *   啟動時傳入 `--cmd-file`（Qt→主程式）、`--reverse-cmd-file`（主程式→Qt）、`--init-file`（JSON 初始狀態）。
-    *   初始狀態 (`init_file`)：`url_history`、`url_related_links`、`current_url`、`author_only`、`initial_url`。
-    *   Qt→主程式：`fetch_request {url, author_only}`、`clear_history`、`close_sync {author_only}`。
+    *   初始狀態 (`init_file`)：`url_history`、`url_related_links`、`current_url`、`author_only`、`author_name`、`initial_url`。
+    *   Qt→主程式：`fetch_request {url, author_only, author_name}`、`clear_history`、`close_sync {author_only, author_name}`。
+    *   **作者名稱欄位** 已從主畫面移至網址讀取視窗（`aa_url_fetch_qt.py`），主程式以 `MainWindow._author_name` 狀態保存，由 `fetch_request` / `close_sync` IPC 更新，不再綁定 widget。
     *   主程式→Qt：`fetch_done {success, status_message, status_color, [url_history, url_related_links, current_url, auto_close]}`、`history_cleared {url_history}`。
     *   碰撞避免：寫入方若發現檔案仍存在（接收方未消費），延後 100ms 重試（Qt 最多 20 次，主程式相同）。
 *   **主程式端處理**:
@@ -130,7 +136,7 @@
     *   `closeEvent` 同步最終 `author_only` 狀態。
 *   **網頁解析 (`aa_tool/url_fetcher.py` → `parse_page_html()`)**: 依 URL 網域自動選擇解析器，由 `_DOMAIN_PARSERS` 對應表管理。目前支援：
     *   **預設 (`_parse_default`)**: 5ch 類型 (`div.article` → `dt/dd` + `dl.relate_dl`)
-    *   **himanatokiniyaruo.com (`_parse_himanatokiniyaruo`)**: `dt[id=數字]` / `dd` + `div.related-entries`
+    *   **himanatokiniyaruo.com (`_parse_himanatokiniyaruo`)**: `dt[id=數字]` / `dd` + `div.related-entries`。關聯連結解析含巢狀 div fallback：若原始 `(.*?)</div>` regex 未取到連結（因內部有巢狀 `<div>`），改用平衡 div 深度計數找出真正的關閉標籤後再提取 `<a>` 連結
     *   **blog.fc2.com (`_parse_fc2blog`)**: `div.ently_text` + `dl.relate_dl`（含 `web.archive.org` 封存版）
     *   **yaruobook.jp (`_parse_yaruobook`)**: `dt.author-res-dt` / `dd.author-res` + `ul.relatedPostsWrap.relatedPostsPrev/Next`；`li.currentPost` 標記當前話。**關聯清單排序**：原始 Prev 區塊為 `[currentPost, 前一話, 前前話, ...]`（當前在前、舊話倒序），解析時須將 Prev **反轉**後再接 Next，才能得到按時間順序排列的清單，供「下一話」按鈕以 `current_idx + 1` 正確取得下一集
 *   **保留貼文內空行**: `_extract_dt_dd_posts()` 在切 dd 內容時，只 trim 尾端空行、不 trim 開頭空行，以避免「作者行」與實際 AA 內文之間的排版空行被吃掉。
@@ -187,6 +193,7 @@
 *   `self.ai_text`: AI 翻譯結果 TextBox
 *   `self.doc_title`: 標題輸入欄（用於 HTML 檔名）
 *   `self.doc_num`: 話數輸入欄（支援 +/- 按鈕；貼上/讀取時自動偵測）
+*   `self.btn_work_history` / `self.work_history`: 🕘 小圖示按鈕 + 歷史清單（最多 10 筆 `{title, author}`），點擊按鈕以 QMenu 顯示。只有在按下「替換翻譯並編輯」時才透過 `_record_work_history()` 新增記錄（去重後置於最前），選單項 callback 走 `_apply_work_history()` 填回兩個欄位。`apply_translation` 產生的暫存 HTML 以 `{title}_第{num}話.html` 命名，讓 EditWindow 的 `display_title` 能正確顯示於主視窗標題列與另存新檔預設檔名
 *   `self.auto_copy_switch`: 提取後自動複製開關
 *   `self.batch_folder_var`: 批次搜尋資料夾路徑（透過 IPC 與 Qt 批次搜尋視窗同步）
 *   `self.bg_color` / `self.fg_color`: 預覽視窗背景/文字色（持久化至暫存）

@@ -20,13 +20,13 @@ import sys
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import (
-    QColor, QFont, QFontMetricsF, QKeySequence, QShortcut,
+    QColor, QFont, QFontDatabase, QFontMetricsF, QKeySequence, QShortcut,
     QTextBlockFormat, QTextCursor, QTextDocument,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QColorDialog, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPushButton, QStackedWidget, QTextEdit,
-    QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QColorDialog, QComboBox, QFileDialog, QHBoxLayout,
+    QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QSpinBox,
+    QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from aa_tool.bubble_alignment import (
@@ -44,6 +44,26 @@ from aa_tool.translation_engine import (
 LINE_HEIGHT_PERCENT = 120  # 對應 CSS line-height: 1.2，與瀏覽器顯示一致
 DEFAULT_BG = "#ffffff"
 DEFAULT_COLOR = "#ff0000"
+DEFAULT_EDITOR_FONT = "submona"
+DEFAULT_EDITOR_FONT_SIZE = 12
+EDITOR_FONT_CHOICES = ["Monapo", "submona", "MS PGothic", "Meiryo", "Consolas",
+                       "Microsoft JhengHei", "MingLiU"]
+
+# 專案內建字體（fonts/ 資料夾），Qt 啟動後呼叫一次
+_BUNDLED_FONTS_LOADED = False
+
+def load_bundled_fonts() -> None:
+    """從 fonts/ 資料夾載入 TTF 字體至 QFontDatabase（只執行一次）。"""
+    global _BUNDLED_FONTS_LOADED
+    if _BUNDLED_FONTS_LOADED:
+        return
+    _BUNDLED_FONTS_LOADED = True
+    fonts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+    if not os.path.isdir(fonts_dir):
+        return
+    for fname in os.listdir(fonts_dir):
+        if fname.lower().endswith((".ttf", ".otf")):
+            QFontDatabase.addApplicationFont(os.path.join(fonts_dir, fname))
 
 
 class QtFontMeasurer:
@@ -80,13 +100,27 @@ class EditWindow(QMainWindow):
         cmd_file: str = "",
         reply_file: str = "",
         original_file: str = "",
+        original_text: str | None = None,
+        display_title: str = "",
+        is_temp_file: bool = False,
         # Embedded mode: pass callables instead of IPC
         glossary_provider=None,   # () -> str
         glossary_saver=None,      # (orig: str, trans: str) -> None
         on_back=None,             # () -> None; embedded 模式回主畫面
+        on_open=None,             # () -> None; 開啟已儲存的 HTML
+        on_save=None,             # (file_path: str) -> None; 儲存成功後通知
+        on_font_change=None,      # (family, size) -> None; 字體變更持久化
+        init_font_family: str = DEFAULT_EDITOR_FONT,
+        init_font_size: int = DEFAULT_EDITOR_FONT_SIZE,
+        get_last_dir=None,        # () -> str; 取得上次開啟目錄
+        on_dir_change=None,       # (dir: str) -> None; 目錄變更通知
+        on_bg_change=None,        # (color: str) -> None; 底色變更即時持久化
+        init_bg: str = "",        # 上次記住的編輯器底色
     ) -> None:
         super().__init__()
         self._html_file = html_file
+        self._display_title = display_title
+        self._is_temp_file = is_temp_file
         self._dirty = False
         self._current_color = DEFAULT_COLOR
         self._bg_color = DEFAULT_BG
@@ -95,6 +129,14 @@ class EditWindow(QMainWindow):
         self._glossary_provider = glossary_provider
         self._glossary_saver = glossary_saver
         self._on_back = on_back
+        self._on_open = on_open
+        self._on_save = on_save
+        self._on_font_change = on_font_change
+        self._font_family = init_font_family or DEFAULT_EDITOR_FONT
+        self._font_size = int(init_font_size) if init_font_size else DEFAULT_EDITOR_FONT_SIZE
+        self._get_last_dir = get_last_dir
+        self._on_dir_change = on_dir_change
+        self._on_bg_change = on_bg_change
 
         # ── IPC 狀態 ──
         self._cmd_file = cmd_file
@@ -104,8 +146,8 @@ class EditWindow(QMainWindow):
         self._ipc_timer: QTimer | None = None
 
         # ── 原文比對狀態 ──
-        self._original_text: str | None = None
-        if original_file and os.path.exists(original_file):
+        self._original_text: str | None = original_text
+        if self._original_text is None and original_file and os.path.exists(original_file):
             try:
                 with open(original_file, 'r', encoding='utf-8') as f:
                     self._original_text = f.read()
@@ -120,11 +162,17 @@ class EditWindow(QMainWindow):
         except OSError as e:
             QMessageBox.critical(self, "讀取失敗", f"無法讀取檔案：\n{e}")
             text = ""
-        loaded_bg = read_html_bg_color(html_file) if html_file else None
-        if loaded_bg:
-            self._bg_color = loaded_bg
+        # init_bg（使用者上次調整的顯示底色）優先，
+        # 找不到時再嘗試從 HTML 讀取（舊版相容）
+        if init_bg:
+            self._bg_color = init_bg
+        else:
+            loaded_bg = read_html_bg_color(html_file) if html_file else None
+            if loaded_bg:
+                self._bg_color = loaded_bg
 
-        file_name = os.path.basename(html_file) if html_file else "(未命名)"
+        file_name = display_title or (
+            os.path.basename(html_file) if html_file else "(未命名)")
         self.setWindowTitle(f"AA 編輯器 (PyQt6) — {file_name}")
         self.resize(1280, 860)
 
@@ -142,7 +190,7 @@ class EditWindow(QMainWindow):
         root.addWidget(self.search_bar)
 
         # ── 編輯區（主要 + 原文，以 QStackedWidget 切換） ──
-        aa_font = QFont("MS PGothic", 12)
+        aa_font = QFont(self._font_family, self._font_size)
         aa_font.setStyleHint(QFont.StyleHint.TypeWriter)
         self._measurer = QtFontMeasurer(aa_font)
 
@@ -184,7 +232,7 @@ class EditWindow(QMainWindow):
         self._status_hide_timer.timeout.connect(self.status_label.hide)
 
         # ── 全域快捷鍵 ──
-        QShortcut(QKeySequence.StandardKey.Save, self, activated=self._save)
+        QShortcut(QKeySequence.StandardKey.Save, self, activated=self._save_overwrite)
         QShortcut(QKeySequence.StandardKey.Find, self,
                   activated=self._toggle_search)
         QShortcut(QKeySequence("Esc"), self, activated=self._hide_search)
@@ -301,8 +349,15 @@ class EditWindow(QMainWindow):
         tb.addWidget(btn_bg)
 
         btn_save = _make_button("💾 儲存", "#28a745", "#218838", width=70)
-        btn_save.clicked.connect(self._save)
+        btn_save.setToolTip("另存新檔（Ctrl+S 直接覆寫原檔）")
+        btn_save.clicked.connect(self._save_as)
         tb.addWidget(btn_save)
+
+        if self._on_open is not None:
+            btn_open = _make_button("📂 開啟", "#6f42c1", "#5a32a3", width=70)
+            btn_open.setToolTip("打開已儲存的 HTML 檔案")
+            btn_open.clicked.connect(self._on_open)
+            tb.addWidget(btn_open)
 
         if self._on_back is not None:
             btn_back = _make_button("← 返回", "#6c757d", "#5a6268", width=70)
@@ -340,6 +395,40 @@ class EditWindow(QMainWindow):
         btn_dice.clicked.connect(self._search_dice)
         layout.addWidget(btn_dice)
 
+        # 字體選擇器（暫時隱藏，保留功能備用）
+        self._font_section_spacer = layout.addSpacing(0)
+
+        self._lbl_font = QLabel("字體")
+        self._lbl_font.setStyleSheet("color:white; font-weight:bold;")
+        self._lbl_font.hide()
+        layout.addWidget(self._lbl_font)
+
+        self.font_combo = QComboBox()
+        self.font_combo.setEditable(True)
+        self.font_combo.addItems(EDITOR_FONT_CHOICES)
+        if self._font_family not in EDITOR_FONT_CHOICES:
+            self.font_combo.addItem(self._font_family)
+        self.font_combo.setCurrentText(self._font_family)
+        self.font_combo.setFixedWidth(140)
+        self.font_combo.setStyleSheet(
+            "QComboBox { background:#343638; color:#dce4ee;"
+            " border:1px solid #555; padding:2px 4px; }")
+        self.font_combo.currentTextChanged.connect(self._on_font_family_changed)
+        self.font_combo.hide()
+        layout.addWidget(self.font_combo)
+
+        self.font_size_spin = QSpinBox()
+        self.font_size_spin.setRange(6, 48)
+        self.font_size_spin.setValue(self._font_size)
+        self.font_size_spin.setSuffix(" pt")
+        self.font_size_spin.setFixedWidth(72)
+        self.font_size_spin.setStyleSheet(
+            "QSpinBox { background:#343638; color:#dce4ee;"
+            " border:1px solid #555; padding:2px 4px; }")
+        self.font_size_spin.valueChanged.connect(self._on_font_size_changed)
+        self.font_size_spin.hide()
+        layout.addWidget(self.font_size_spin)
+
         layout.addStretch()
 
         btn_hide = _make_button("✕", "#6c757d", "#5a6268", width=30)
@@ -353,20 +442,22 @@ class EditWindow(QMainWindow):
     # ════════════════════════════════════════════════════════════
 
     def _apply_editor_colors(self) -> None:
+        fam = self._font_family
+        sz = self._font_size
         self.editor.setStyleSheet(
             f"QTextEdit {{ background:{self._bg_color};"
             f" color:#000000;"
             f" border:1px solid #cccccc;"
-            f" font-family:'MS PGothic';"
-            f" font-size:12pt; }}"
+            f" font-family:'{fam}';"
+            f" font-size:{sz}pt; }}"
         )
         if hasattr(self, "orig_view"):
             self.orig_view.setStyleSheet(
                 "QTextEdit { background:#f5f5f5;"
                 " color:#000000;"
                 " border:1px solid #cccccc;"
-                " font-family:'MS PGothic';"
-                " font-size:12pt; }"
+                f" font-family:'{fam}';"
+                f" font-size:{sz}pt; }}"
             )
 
     def _apply_line_height(self) -> None:
@@ -427,6 +518,38 @@ class EditWindow(QMainWindow):
         if not self.search_bar.isVisible():
             self.search_bar.show()
         self._find_next()
+
+    # ════════════════════════════════════════════════════════════
+    #  字體切換
+    # ════════════════════════════════════════════════════════════
+
+    def _on_font_family_changed(self, family: str) -> None:
+        family = (family or "").strip()
+        if not family or family == self._font_family:
+            return
+        self._font_family = family
+        self._apply_editor_font()
+
+    def _on_font_size_changed(self, size: int) -> None:
+        if size == self._font_size:
+            return
+        self._font_size = int(size)
+        self._apply_editor_font()
+
+    def _apply_editor_font(self) -> None:
+        new_font = QFont(self._font_family, self._font_size)
+        new_font.setStyleHint(QFont.StyleHint.TypeWriter)
+        self.editor.setFont(new_font)
+        self.orig_view.setFont(new_font)
+        self._measurer = QtFontMeasurer(new_font)
+        self._apply_editor_colors()
+        self._apply_line_height()
+        self._apply_line_height_to(self.orig_view)
+        if self._on_font_change is not None:
+            try:
+                self._on_font_change(self._font_family, self._font_size)
+            except Exception:
+                pass
 
     # ════════════════════════════════════════════════════════════
     #  全文替換
@@ -546,6 +669,11 @@ class EditWindow(QMainWindow):
         if color.isValid():
             self._bg_color = color.name()
             self._apply_editor_colors()
+            if self._on_bg_change is not None:
+                try:
+                    self._on_bg_change(self._bg_color)
+                except Exception:
+                    pass
 
     # ════════════════════════════════════════════════════════════
     #  消空白 / 補空白
@@ -836,20 +964,71 @@ class EditWindow(QMainWindow):
             self._dirty = True
             self.setWindowTitle("* " + self.windowTitle().lstrip("* "))
 
-    def _save(self) -> None:
-        if not self._html_file:
-            QMessageBox.warning(self, "無檔案", "沒有指定 HTML 檔案路徑")
-            return
+    def _write_current(self, file_path: str) -> bool:
         text = self.editor.toPlainText()
         try:
             # 底色僅為編輯器預覽效果，不寫入檔案（交由後續網站控制）
-            write_html_file(self._html_file, text)
+            write_html_file(file_path, text)
         except OSError as e:
             QMessageBox.critical(self, "儲存失敗", str(e))
+            return False
+        return True
+
+    def _save_overwrite(self) -> None:
+        """Ctrl+S：若已有真實檔案則直接覆寫，否則走另存新檔。"""
+        if not self._html_file or self._is_temp_file:
+            self._save_as()
             return
+        if not self._write_current(self._html_file):
+            return
+        self._after_save_success(self._html_file)
+
+    def _save_as(self) -> None:
+        """儲存按鈕：跳出檔案選擇對話框。"""
+        default_name = self._display_title or (
+            os.path.splitext(os.path.basename(self._html_file))[0]
+            if self._html_file else "未命名")
+        default_name = re.sub(r'[\\/:*?"<>|]', '_', default_name) + ".html"
+        # 決定預設目錄：上次使用目錄 > 原檔目錄 > 空
+        if self._get_last_dir is not None:
+            last_dir = self._get_last_dir() or ""
+        else:
+            last_dir = ""
+        if not last_dir and self._html_file and not self._is_temp_file:
+            last_dir = os.path.dirname(self._html_file)
+        default_path = os.path.join(last_dir, default_name) if last_dir else default_name
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "另存新檔", default_path,
+            "HTML files (*.html);;All files (*.*)")
+        if not file_path:
+            return
+        if not self._write_current(file_path):
+            return
+        self._html_file = file_path
+        self._is_temp_file = False
+        new_dir = os.path.dirname(file_path)
+        if self._on_dir_change is not None:
+            try:
+                self._on_dir_change(new_dir)
+            except Exception:
+                pass
+        self._after_save_success(file_path)
+
+    def _after_save_success(self, file_path: str) -> None:
         self._dirty = False
-        self.setWindowTitle(self.windowTitle().lstrip("* "))
-        self._set_status(f"✅ 已儲存：{os.path.basename(self._html_file)}")
+        base = os.path.basename(file_path)
+        title = self._display_title or base
+        self.setWindowTitle(f"AA 編輯器 (PyQt6) — {title}")
+        self._set_status(f"✅ 已儲存：{base}")
+        if self._on_save is not None:
+            try:
+                self._on_save(file_path)
+            except Exception:
+                pass
+
+    # Backwards-compat alias used by closeEvent
+    def _save(self) -> None:
+        self._save_overwrite()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._dirty:
@@ -879,6 +1058,7 @@ def main() -> None:
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
+    load_bundled_fonts()
     win = EditWindow(
         args.html_file, args.scroll_to_line,
         cmd_file=args.cmd_file, reply_file=args.reply_file,

@@ -18,16 +18,18 @@ import html as _html
 import json
 import math
 import os
+import re as _re_mod
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QKeySequence, QShortcut
+from PyQt6.QtGui import QColor, QFont, QKeySequence, QPalette, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
+    QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
     QSplitter, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -51,7 +53,7 @@ from aa_tool.translation_engine import (
     apply_translation as _apply_translation,
 )
 from aa_tool.url_fetcher import fetch_url as _fetch_url, parse_page_html as _parse_page_html
-from aa_edit_qt import EditWindow
+from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 
 
@@ -251,29 +253,22 @@ class TranslatePanel(QWidget):
         self.doc_title.textChanged.connect(self._main.schedule_save)
         top.addWidget(self.doc_title)
 
-        self.author_name_entry = QLineEdit()
-        self.author_name_entry.setPlaceholderText("作者名稱")
-        self.author_name_entry.setFont(_ui_font(11))
-        self.author_name_entry.setFixedWidth(120)
-        self.author_name_entry.textChanged.connect(self._main.schedule_save)
-        top.addWidget(self.author_name_entry)
-
-        btn_dec = _make_btn("-", "#555", "#444", width=25)
-        btn_dec.setFixedHeight(24)
-        btn_dec.clicked.connect(self._main.dec_num)
-        top.addWidget(btn_dec)
+        self.btn_work_history = QPushButton("🕘")
+        self.btn_work_history.setFixedSize(24, 24)
+        self.btn_work_history.setToolTip("作品/作者歷史記錄（最多 10 筆）")
+        self.btn_work_history.setStyleSheet(
+            "QPushButton { background:#495057; color:white;"
+            " border:none; border-radius:3px; padding:0; font-size:12px; }"
+            "QPushButton:hover { background:#3d4449; }")
+        self.btn_work_history.clicked.connect(self._main.show_work_history_menu)
+        top.addWidget(self.btn_work_history)
 
         self.doc_num = QLineEdit("1")
         self.doc_num.setFont(_ui_font(11))
-        self.doc_num.setFixedWidth(40)
+        self.doc_num.setFixedWidth(50)
         self.doc_num.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.doc_num.textChanged.connect(self._main.schedule_save)
         top.addWidget(self.doc_num)
-
-        btn_inc = _make_btn("+", "#555", "#444", width=25)
-        btn_inc.setFixedHeight(24)
-        btn_inc.clicked.connect(self._main.inc_num)
-        top.addWidget(btn_inc)
 
         vl.addLayout(top)
 
@@ -436,7 +431,14 @@ class TranslatePanel(QWidget):
         self.ai_text = QTextEdit()
         self.ai_text.setFont(_aa_font(13))
         self.ai_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self.ai_text.setStyleSheet("background:#1e1e1e; color:#ddd;")
+        self.ai_text.setAcceptRichText(False)
+        self.ai_text.setStyleSheet(
+            "QTextEdit { background:#1e1e1e; color:#ddd; }")
+        _pal = self.ai_text.palette()
+        _pal.setColor(QPalette.ColorRole.Text, QColor("#ddd"))
+        _pal.setColor(QPalette.ColorRole.Base, QColor("#1e1e1e"))
+        self.ai_text.setPalette(_pal)
+        self.ai_text.setTextColor(QColor("#ddd"))
         self.ai_text.textChanged.connect(
             lambda: QTimer.singleShot(100, self._main.validate_ai_text))
         vl.addWidget(self.ai_text, 1)
@@ -550,9 +552,6 @@ class TranslatePanel(QWidget):
         g2 = self.get_glossary_temp_text().strip()
         return '\n'.join(p for p in [g1, g2] if p)
 
-    def get_author_name(self) -> str:
-        return self.author_name_entry.text().strip()
-
 
 # ════════════════════════════════════════════════════════════
 #  MainWindow
@@ -583,7 +582,13 @@ class MainWindow(QMainWindow):
         self.url_related_links: list[dict] = []
         self.current_url: str = ""
         self._author_only: bool = False
+        self._author_name: str = ""
         self._batch_folder: str = ""
+        self.work_history: list[dict] = []
+        self._editor_font_family: str = "submona"
+        self._editor_font_size: int = 12
+        self._last_dir: str = ""
+        self._editor_bg_color: str = "#ffffff"
         self._save_timer: QTimer | None = None
         self._saved_glossary_lines = 0
         self._saved_glossary_temp_lines = 0
@@ -697,16 +702,30 @@ class MainWindow(QMainWindow):
         self._translate_panel.source_text.setFocus()
 
     def show_edit_panel(self, file_path: str, scroll_to_line: int = 0,
-                        original_text: str | None = None) -> None:
+                        original_text: str | None = None,
+                        display_title: str = "",
+                        is_temp_file: bool = False) -> None:
         """載入 HTML 至 EditWindow 並切換到編輯面板。"""
         # 第一次建立 EditWindow
         if self._edit_window is None:
             self._edit_window = EditWindow(
                 file_path,
                 scroll_to_line=scroll_to_line,
+                original_text=original_text,
+                display_title=display_title,
+                is_temp_file=is_temp_file,
                 glossary_provider=self._translate_panel.get_combined_glossary,
                 glossary_saver=self._save_glossary_entry,
                 on_back=self.show_translate_panel,
+                on_open=self.import_html,
+                on_save=self._on_edit_saved,
+                on_font_change=self._on_editor_font_changed,
+                init_font_family=self._editor_font_family,
+                init_font_size=self._editor_font_size,
+                get_last_dir=lambda: self._last_dir,
+                on_dir_change=self._on_last_dir_changed,
+                on_bg_change=self._on_editor_bg_changed,
+                init_bg=self._editor_bg_color,
             )
             # 替換 placeholder
             self.stack.removeWidget(self._edit_placeholder)
@@ -717,15 +736,24 @@ class MainWindow(QMainWindow):
                 text = read_html_pre_content(file_path) or ""
             except OSError:
                 text = ""
-            bg = read_html_bg_color(file_path) or "#ffffff"
             self._edit_window._html_file = file_path
-            self._edit_window._bg_color = bg
+            self._edit_window._display_title = display_title
+            self._edit_window._is_temp_file = is_temp_file
+            # 保留使用者記住的底色；只有首次沒有記錄時才從 HTML 讀取
+            if not self._editor_bg_color or self._editor_bg_color == "#ffffff":
+                bg = read_html_bg_color(file_path) or "#ffffff"
+                self._edit_window._bg_color = bg
+            else:
+                self._edit_window._bg_color = self._editor_bg_color
             self._edit_window._dirty = False
             self._edit_window._replace_document(text)
             self._edit_window._apply_editor_colors()
+            header = display_title or os.path.basename(file_path)
             self._edit_window.setWindowTitle(
-                f"AA 編輯器 (PyQt6) — {os.path.basename(file_path)}")
+                f"AA 編輯器 (PyQt6) — {header}")
             self._edit_window._on_back = self.show_translate_panel
+            self._edit_window._on_open = self.import_html
+            self._edit_window._on_save = self._on_edit_saved
             if scroll_to_line:
                 self._edit_window._scroll_to_line(scroll_to_line)
             # 更新比對原文
@@ -739,9 +767,9 @@ class MainWindow(QMainWindow):
             if self._edit_window._compare_active:
                 self._edit_window._toggle_compare()
 
-        file_name = os.path.basename(file_path)
-        self._nav_label.setText(f"編輯：{file_name}")
-        self._update_work_title(f"編輯 — {file_name}")
+        nav_name = display_title or os.path.basename(file_path)
+        self._nav_label.setText(f"編輯：{nav_name}")
+        self._update_work_title(f"編輯 — {nav_name}")
         self.stack.setCurrentIndex(1)
         self._nav_bar.hide()
         self._action_bar.hide()
@@ -868,21 +896,35 @@ class MainWindow(QMainWindow):
                 "⚠️ 請確保原始文本、提取結果和翻譯結果都有內容！", "#f39c12")
             return
         self.save_cache()
+        # 記錄作品+作者歷史（只有按下此按鈕才記）
+        self._record_work_history()
         glossary = parse_glossary(self._translate_panel.get_combined_glossary())
         result_text = _apply_translation(source, extracted, translated, glossary)
-        # 寫入暫存 HTML 再開啟編輯
-        tmp = os.path.join(tempfile.gettempdir(), f"aa_result_{os.getpid()}.html")
+        # 以標題+話數命名暫存檔，讓視窗標題與儲存預設名都能正確顯示
+        title = self._translate_panel.get_doc_title().strip() or "未命名"
+        num = self._translate_panel.get_doc_num().strip()
+        safe_title = _re_mod.sub(r'[\\/:*?"<>|]', '_', title)
+        safe_num = _re_mod.sub(r'[\\/:*?"<>|]', '_', num)
+        name_base = f"{safe_title}_{safe_num}" if safe_num else safe_title
+        display_title = f"{title}_{num}" if num else title
+        tmp = os.path.join(tempfile.gettempdir(), f"{name_base}.html")
         try:
             write_html_file(tmp, result_text)
         except OSError as e:
             self.show_status(f"❌ 寫入暫存失敗: {e}", "#dc3545")
             return
-        self.show_edit_panel(tmp, original_text=source.rstrip('\n'))
+        self.show_edit_panel(
+            tmp,
+            original_text=source.rstrip('\n'),
+            display_title=display_title,
+            is_temp_file=True,
+        )
 
     def import_html(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
             self, "選取已儲存的 HTML 檔案",
-            filter="HTML files (*.html);;All files (*.*)")
+            self._last_dir,
+            "HTML files (*.html);;All files (*.*)")
         if not file_path:
             return
         try:
@@ -895,7 +937,16 @@ class MainWindow(QMainWindow):
         except OSError as e:
             self.show_status(f"❌ 讀取 HTML 失敗！{e}", "#dc3545")
             return
-        self.show_edit_panel(file_path)
+        # 若暫存原文中有此檔名，載入作為比對原文
+        self._last_dir = os.path.dirname(file_path)
+        self.schedule_save()
+        cached_original = self.load_original_for_file(file_path)
+        self.show_edit_panel(
+            file_path,
+            original_text=cached_original,
+            display_title=os.path.splitext(os.path.basename(file_path))[0],
+            is_temp_file=False,
+        )
 
     def analyze_extraction(self) -> None:
         from PyQt6.QtWidgets import QDialog, QDialogButtonBox
@@ -996,6 +1047,7 @@ class MainWindow(QMainWindow):
             "url_related_links": self.url_related_links,
             "current_url": self.current_url,
             "author_only": self._author_only,
+            "author_name": self._author_name,
             "initial_url": self.current_url,
         }
         try:
@@ -1036,6 +1088,10 @@ class MainWindow(QMainWindow):
             return
         action = cmd.get('action')
         if action == 'fetch_request':
+            # author_name 由 Qt 視窗直接傳入，同步到 MainWindow 狀態
+            new_author = cmd.get('author_name')
+            if new_author is not None:
+                self._author_name = str(new_author)
             self._handle_url_fetch_request(
                 cmd.get('url', ''),
                 bool(cmd.get('author_only', False)),
@@ -1048,6 +1104,8 @@ class MainWindow(QMainWindow):
                                            'url_history': []})
         elif action == 'close_sync':
             self._author_only = bool(cmd.get('author_only', False))
+            if 'author_name' in cmd:
+                self._author_name = str(cmd['author_name'])
             self.schedule_save()
 
     def _write_url_fetch_reverse(self, cmd: dict, retries: int = 20) -> None:
@@ -1108,7 +1166,7 @@ class MainWindow(QMainWindow):
                                    skip_cache: bool = False) -> None:
         self._author_only = author_only
         self.schedule_save()
-        author = self._translate_panel.get_author_name()
+        author = self._author_name
 
         def _bg() -> None:
             try:
@@ -1217,7 +1275,7 @@ class MainWindow(QMainWindow):
             return
         next_url = next_lk['url']
         self.show_status(f"⏳ 正在讀取{label}…", "#17a2b8", duration=0)
-        author = self._translate_panel.get_author_name()
+        author = self._author_name
 
         def _bg() -> None:
             try:
@@ -1304,8 +1362,13 @@ class MainWindow(QMainWindow):
             current_url=self.current_url,
             auto_copy=p.auto_copy_cb.isChecked(),
             batch_folder=self._batch_folder,
-            author_name=p.get_author_name(),
+            author_name=self._author_name,
             author_only=self._author_only,
+            work_history=list(self.work_history),
+            editor_font_family=self._editor_font_family,
+            editor_font_size=self._editor_font_size,
+            last_open_dir=self._last_dir,
+            editor_bg_color=self._editor_bg_color,
         )
 
     def _apply_cache(self, cache: AppCache) -> None:
@@ -1333,8 +1396,18 @@ class MainWindow(QMainWindow):
         if cache.batch_folder:
             self._batch_folder = cache.batch_folder
         if cache.author_name:
-            p.author_name_entry.setText(cache.author_name)
+            self._author_name = cache.author_name
         self._author_only = cache.author_only
+        if cache.work_history:
+            self.work_history = list(cache.work_history)
+        if cache.editor_font_family:
+            self._editor_font_family = cache.editor_font_family
+        if cache.editor_font_size:
+            self._editor_font_size = int(cache.editor_font_size)
+        if cache.last_open_dir and os.path.isdir(cache.last_open_dir):
+            self._last_dir = cache.last_open_dir
+        if cache.editor_bg_color:
+            self._editor_bg_color = cache.editor_bg_color
 
     def save_cache(self) -> None:
         self.settings_mgr.save_cache(self._gather_cache())
@@ -1407,6 +1480,136 @@ class MainWindow(QMainWindow):
         self.show_status("✅ 暫存讀取成功！", "#0f0")
 
     # ════════════════════════════════════════════════════════════
+    #  原文暫存 (依檔名索引，上限 50)
+    # ════════════════════════════════════════════════════════════
+
+    _ORIG_CACHE_LIMIT = 50
+
+    def _orig_cache_path(self) -> str:
+        return os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'aa_original_cache.json')
+
+    def _load_orig_cache_data(self) -> dict:
+        p = self._orig_cache_path()
+        if not os.path.exists(p):
+            return {}
+        try:
+            with open(p, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _save_orig_cache_data(self, data: dict) -> None:
+        """原子寫入：先寫暫存檔再改名，減少多執行緒損壞機率。"""
+        target = self._orig_cache_path()
+        tmp = target + ".tmp"
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, target)
+        except OSError:
+            pass
+
+    def save_original_for_file(self, file_path: str,
+                               original_text: str) -> None:
+        if not file_path or not original_text:
+            return
+        # 讀回現有資料再合併（保留其他執行緒/進程已寫入的條目）
+        data = self._load_orig_cache_data()
+        key = os.path.basename(file_path)
+        data[key] = {'text': original_text, 'ts': time.time()}
+        # 上限裁切（依時間戳保留最新的 N 筆）
+        if len(data) > self._ORIG_CACHE_LIMIT:
+            ordered = sorted(data.items(),
+                             key=lambda kv: kv[1].get('ts', 0),
+                             reverse=True)
+            data = dict(ordered[:self._ORIG_CACHE_LIMIT])
+        self._save_orig_cache_data(data)
+
+    def load_original_for_file(self, file_path: str) -> str | None:
+        if not file_path:
+            return None
+        data = self._load_orig_cache_data()
+        entry = data.get(os.path.basename(file_path))
+        if not isinstance(entry, dict):
+            return None
+        text = entry.get('text')
+        return text if isinstance(text, str) and text else None
+
+    def _on_editor_bg_changed(self, color: str) -> None:
+        self._editor_bg_color = color
+        self.schedule_save()
+
+    def _on_last_dir_changed(self, directory: str) -> None:
+        if directory and os.path.isdir(directory):
+            self._last_dir = directory
+            self.schedule_save()
+
+    def _on_editor_font_changed(self, family: str, size: int) -> None:
+        self._editor_font_family = family
+        self._editor_font_size = int(size)
+        self.schedule_save()
+
+    def _on_edit_saved(self, file_path: str) -> None:
+        """EditWindow 儲存成功後的 callback。"""
+        # 更新導覽列與標題
+        base = os.path.basename(file_path)
+        title = self._edit_window._display_title if self._edit_window else ""
+        nav_name = title or base
+        self._nav_label.setText(f"編輯：{nav_name}")
+        self._update_work_title(f"編輯 — {nav_name}")
+        # 暫存原文
+        if self._edit_window is not None and self._edit_window._original_text:
+            self.save_original_for_file(
+                file_path, self._edit_window._original_text)
+
+    # ════════════════════════════════════════════════════════════
+    #  作品 + 作者 歷史記錄 (最多 10 筆)
+    # ════════════════════════════════════════════════════════════
+
+    _WORK_HISTORY_LIMIT = 10
+
+    def _record_work_history(self) -> None:
+        """按下替換翻譯時呼叫，將當前 (title, author) 記入歷史。"""
+        p = self._translate_panel
+        title = p.get_doc_title().strip()
+        author = self._author_name.strip()
+        if not title and not author:
+            return
+        pair = {'title': title, 'author': author}
+        history = [h for h in getattr(self, 'work_history', [])
+                   if not (h.get('title') == title
+                           and h.get('author') == author)]
+        history.insert(0, pair)
+        self.work_history = history[:self._WORK_HISTORY_LIMIT]
+        self.schedule_save()
+
+    def show_work_history_menu(self) -> None:
+        history = getattr(self, 'work_history', [])
+        menu = QMenu(self)
+        if not history:
+            act = menu.addAction("(尚無歷史記錄)")
+            act.setEnabled(False)
+        else:
+            for h in history:
+                t = h.get('title', '') or "(無標題)"
+                a = h.get('author', '') or "(無作者)"
+                act = menu.addAction(f"{t}　|　{a}")
+                act.triggered.connect(
+                    lambda checked=False, hh=h: self._apply_work_history(hh))
+        btn = self._translate_panel.btn_work_history
+        pos = btn.mapToGlobal(btn.rect().bottomLeft())
+        menu.exec(pos)
+
+    def _apply_work_history(self, entry: dict) -> None:
+        p = self._translate_panel
+        p.doc_title.setText(entry.get('title', ''))
+        self._author_name = entry.get('author', '')
+        self.schedule_save()
+
+    # ════════════════════════════════════════════════════════════
     #  關閉事件
     # ════════════════════════════════════════════════════════════
 
@@ -1450,13 +1653,14 @@ class MainWindow(QMainWindow):
 
 def main() -> None:
     app = QApplication(sys.argv)
+    load_bundled_fonts()
     qss_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "aa_tool", "dark_theme.qss")
     if os.path.exists(qss_path):
         with open(qss_path, "r", encoding="utf-8") as f:
             app.setStyleSheet(f.read())
     win = MainWindow()
-    win.show()
+    win.showMaximized()
     sys.exit(app.exec())
 
 

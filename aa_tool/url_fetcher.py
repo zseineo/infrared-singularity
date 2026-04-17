@@ -149,7 +149,12 @@ def _cleanup_unmatched_spans(text: str) -> str:
 
 
 # 貼文標頭行 — 用於在非 dt/dd 結構中分割貼文
-_POST_HEADER_RE = re.compile(r'^\s*\d+\s*(?:名前|Name)\s*[：:]')
+# 支援兩種格式：
+#   1.「N 名前：NAME[...]」(5ch / FC2 / himana)
+#   2.「N ： NAME ： YYYY/MM/DD(...)」(yaruobook / yaruok 等 FC2 變體)
+_POST_HEADER_RE = re.compile(
+    r'^\s*\d+\s*(?:(?:名前|Name)\s*[：:]|[：:]\s*.+?\s*[：:]\s*\d{4}[/年])'
+)
 _COLOR_SPAN_RE = re.compile(r'<span\s+style="color:[^"]*">|</span>')
 
 # 從標頭提取投稿者名稱：「N 名前：NAME[...]」→ NAME
@@ -157,6 +162,38 @@ _POSTER_NAME_RE = re.compile(r'(?:名前|Name)\s*[：:]\s*(.+?)(?:\[|投稿日|$
 
 # 替代格式：「N ： NAME ： YYYY/MM/DD...」→ NAME（yaruobook.jp 等無「名前」關鍵字的站點）
 _POSTER_NAME_RE_ALT = re.compile(r'^\s*\d+\s*[：:]\s*(.+?)\s*[：:]\s*\d{4}[/年]')
+
+
+def _extract_poster_name(header_text: str) -> str:
+    """從標頭抽出投稿者名稱（兩種格式依序嘗試，失敗回傳空字串）。"""
+    m = _POSTER_NAME_RE.search(header_text)
+    if not m:
+        m = _POSTER_NAME_RE_ALT.search(header_text)
+    if not m:
+        return ""
+    return re.sub(r'\s+', ' ', m.group(1).strip())
+
+
+def _detect_main_author_from_dt(container_html: str) -> str:
+    """掃描 dt 區塊的投稿標頭，回傳第一個出現的作者名稱。"""
+    for post in re.finditer(r'<dt(?:\s[^>]*)?>(.+?)</dt>', container_html, re.DOTALL):
+        dt_text = re.sub(r'<[^>]+>', '', post.group(1))
+        dt_text = html.unescape(dt_text).strip()
+        name = _extract_poster_name(dt_text)
+        if name:
+            return name
+    return ""
+
+
+def _detect_main_author_from_lines(text_content: str) -> str:
+    """掃描以「N 名前：…」行分段的內文，回傳第一個出現的作者名稱。"""
+    for line in text_content.split('\n'):
+        clean_line = _COLOR_SPAN_RE.sub('', line)
+        if _POST_HEADER_RE.search(clean_line):
+            name = _extract_poster_name(clean_line)
+            if name:
+                return name
+    return ""
 
 
 def _is_author_post(header_text: str, author_name: str) -> bool:
@@ -169,12 +206,9 @@ def _is_author_post(header_text: str, author_name: str) -> bool:
     """
     if not author_name:
         return False
-    m = _POSTER_NAME_RE.search(header_text)
-    if not m:
-        m = _POSTER_NAME_RE_ALT.search(header_text)
-    if not m:
+    poster_name = _extract_poster_name(header_text)
+    if not poster_name:
         return author_name in header_text  # fallback
-    poster_name = re.sub(r'\s+', ' ', m.group(1).strip())
     target = re.sub(r'\s+', ' ', author_name.strip())
     return poster_name == target
 
@@ -184,7 +218,11 @@ def _filter_color_by_author(text: str, author_name: str, *, author_only: bool = 
 
     以「N 名前：」行作為貼文分界，判斷該貼文是否為指定作者。
     若 author_only=True，則完全跳過非作者的貼文。
+    若 author_only=True 但 author_name 為空，會自動以出現次數最多的作者為準。
     """
+    if author_only and not author_name:
+        author_name = _detect_main_author_from_lines(text)
+
     lines = text.split('\n')
     result: list[str] = []
     is_author_block = False
@@ -218,7 +256,11 @@ def _extract_dt_dd_posts(
     若指定 author_name，僅保留該作者貼文的顏色標記；
     其他貼文的 HTML 標籤全部移除。
     若 author_only=True 且指定 author_name，則完全跳過非作者貼文。
+    若 author_only=True 但未指定 author_name，會自動以出現次數最多的作者為準。
     """
+    if author_only and not author_name:
+        author_name = _detect_main_author_from_dt(container_html)
+
     posts = re.finditer(
         r'<dt(?:\s[^>]*)?>(.+?)</dt>\s*<dd(?:\s[^>]*)?>(.*?)(?=<dt|</dl>|$)',
         container_html, re.DOTALL,
@@ -285,9 +327,9 @@ def _parse_default(page_html: str, base_url: str, *, author_name: str = "", auth
     page_title = html.unescape(title_m.group(1)).strip() if title_m else ""
     page_title = re.sub(r'^.*?まとめ\S*\s+', '', page_title)
 
-    # 關聯連結
+    # 關聯連結（允許 class 帶額外字樣，如 "relate_dl fc2relate_entry_thumbnail_off"）
     nav_links: list[dict] = []
-    relate_m = re.search(r'<dl\s+class="relate_dl">(.*?)</dl>', page_html, re.DOTALL)
+    relate_m = re.search(r'<dl\s+class="relate_dl[^"]*">(.*?)</dl>', page_html, re.DOTALL)
     if relate_m:
         relate_html = relate_m.group(1)
         for li in re.finditer(
@@ -415,7 +457,7 @@ def _parse_himanatokiniyaruo(page_html: str, base_url: str, *, author_name: str 
 def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", author_only: bool = False) -> tuple[str | None, list[dict], str]:
     """解析 FC2 Blog 格式（含 web.archive.org 封存版）。
 
-    內文：<div class="ently_text">，截止於 fc2button-clap div 或 relate_dl。
+    內文：<div class="ently_text"> 或 <div class="entry_body">，截止於 fc2button-clap div 或 relate_dl。
     標題：<title>...</title>
     關聯：<dl class="relate_dl ..."> 中的 <li class="relate_li">
     """
@@ -423,14 +465,17 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
     title_m = re.search(r'<title>([^<]+)</title>', page_html)
     page_title = html.unescape(title_m.group(1)).strip() if title_m else ""
 
-    # ── 內文 ──
-    ently_m = re.search(r'<div\s+class="ently_text">', page_html)
+    # ── 內文 ──（支援兩種 FC2 模板：ently_text 與 entry_body）
+    ently_m = re.search(r'<div\s+class="(?:ently_text|entry_body)">', page_html)
     if not ently_m:
         return None, [], page_title
 
     content_start = ently_m.end()
     end_m = re.search(
-        r'<div\s+class="fc2button-clap[^"]*"|<dl\s+class="relate_dl|<!--/ently_text-->',
+        r'<div\s+class="fc2button-clap[^"]*"'
+        r'|<dl\s+class="relate_dl'
+        r'|<!--/ently_text-->'
+        r'|<!--/entry_body-->',
         page_html[content_start:],
     )
     content_end = content_start + end_m.start() if end_m else len(page_html)
@@ -443,7 +488,8 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
     content_text = html.unescape(content_text)
 
     # 依作者名稱過濾顏色：非作者貼文移除 color span（或完全跳過）
-    if author_name:
+    # 若勾了忽略留言但未指定作者，交由 _filter_color_by_author 自動偵測
+    if author_name or author_only:
         content_text = _filter_color_by_author(content_text, author_name, author_only=author_only)
     else:
         content_text = re.sub(r'<span\s+style="color:[^"]*">|</span>', '', content_text)
@@ -596,10 +642,12 @@ def parse_page_html(
 ) -> tuple[str | None, list[dict], str]:
     """解析頁面 HTML，回傳 (文本內容, 關聯連結列表, 頁面標題)。
 
-    依據 base_url 的網域自動選擇對應的解析器；
-    若無匹配則使用預設解析器。
-    支援 web.archive.org 封存 URL 的網域識別。
+    分派策略：
+    1. **已知網域**（見 ``_DOMAIN_PARSERS``）→ 直接使用指定解析器。
+    2. **未知網域** → 依序嘗試 ``_parse_default`` 與所有網域專屬解析器，
+       回傳第一個成功取到內文的結果；全部失敗時回傳最後一次嘗試的結果。
 
+    支援 web.archive.org 封存 URL 的網域識別。
     若指定 author_name，僅保留該作者貼文的顏色標記。
     若 author_only=True 且指定 author_name，則完全排除非作者貼文。
 
@@ -613,4 +661,19 @@ def parse_page_html(
         if key in domain:
             return parser(page_html, base_url, author_name=author_name, author_only=author_only)
 
-    return _parse_default(page_html, base_url, author_name=author_name, author_only=author_only)
+    # 未知網域：依序嘗試所有解析器（預設優先，因為最通用）
+    last_result: tuple[str | None, list[dict], str] = (None, [], "")
+    parsers: list = [_parse_default, *_DOMAIN_PARSERS.values()]
+    for parser in parsers:
+        try:
+            result = parser(
+                page_html, base_url,
+                author_name=author_name, author_only=author_only,
+            )
+        except Exception:
+            continue
+        text_content = result[0]
+        last_result = result
+        if text_content and text_content.strip():
+            return result
+    return last_result

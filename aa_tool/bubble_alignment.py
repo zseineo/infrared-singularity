@@ -65,7 +65,7 @@ def _parse_shout_lines(box_lines: list[str]) -> list[dict]:
                 lc_pos = stripped.rfind(lc, 0, rc_pos)
                 if lc_pos == -1:
                     continue
-                inner = re.sub(r'[ \u3000.,]+$', '', stripped[lc_pos + 1:rc_pos])
+                inner = re.sub(r',+$', '', stripped[lc_pos + 1:rc_pos])
                 parsed.append({
                     'type': 'content',
                     'prefix': sl[:lc_pos],
@@ -112,7 +112,7 @@ def _parse_slash_lines(box_lines: list[str]) -> list[dict]:
                 lc_pos = stripped.rfind(dc, 0, rc_pos)
                 if lc_pos == -1:
                     continue
-                inner = re.sub(r'[ \u3000.]+$', '', stripped[lc_pos + 1:rc_pos])
+                inner = re.sub(r',+$', '', stripped[lc_pos + 1:rc_pos])
                 parsed.append({
                     'type': 'content',
                     'prefix': sl[:lc_pos],
@@ -163,7 +163,7 @@ def _parse_normal_lines(box_lines: list[str]) -> list[dict]:
         if cm:
             rc = cm.group(3)
             if any(c in rc for c in RIGHT_BORDER_CHARS):
-                lt = re.sub(r'[ \u3000.,]+$', '', cm.group(1))
+                lt = re.sub(r',+$', '', cm.group(1))
                 parsed.append({
                     'type': 'content',
                     'left': lt,
@@ -173,7 +173,7 @@ def _parse_normal_lines(box_lines: list[str]) -> list[dict]:
                     'orig': bl_n,
                 })
                 continue
-        lt = re.sub(r'[ \u3000.,]+$', '', bl_n)
+        lt = re.sub(r',+$', '', bl_n)
         parsed.append({
             'type': 'content',
             'left': lt,
@@ -230,7 +230,7 @@ def process_shout(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
     for ps in parsed:
         if ps['type'] == 'content':
             needed = m.measure(
-                ps['left_char'] + ps['inner'].rstrip(' \u3000') + '　' + ps['right_char']
+                ps['left_char'] + ps['inner'] + '　' + ps['right_char']
             )
             if needed > mcw:
                 mcw = needed
@@ -255,7 +255,7 @@ def process_shout(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
             result.append(ps['prefix'] + res)
         elif ps['type'] == 'content':
             lc, rc = ps['left_char'], ps['right_char']
-            inner = ps['inner'].rstrip(' \u3000')
+            inner = ps['inner']
             pw = m.measure(lc) + m.measure(rc)
             tiw = max(tw - pw, 0)
             padded = _pad_to_width(inner, tiw, m)
@@ -281,7 +281,7 @@ def process_slash(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
     for ps in parsed:
         if ps['type'] == 'content':
             needed = m.measure(
-                ps['left_char'] + ps['inner'].rstrip(' \u3000') + '　' + ps['right_char']
+                ps['left_char'] + ps['inner'] + '　' + ps['right_char']
             )
             if needed > mcw:
                 mcw = needed
@@ -303,7 +303,7 @@ def process_slash(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
             result.append(ps['prefix'] + res)
         elif ps['type'] == 'content':
             lc, rc = ps['left_char'], ps['right_char']
-            inner = ps['inner'].rstrip(' \u3000')
+            inner = ps['inner']
             pw = m.measure(lc) + m.measure(rc)
             tiw = max(tw - pw, 0)
             padded = _pad_to_width(inner, tiw, m)
@@ -401,7 +401,7 @@ def _parse_box_lines(box_lines: list[str]) -> list[dict]:
                 'orig': sl_n,
             })
         elif mc:
-            inner = re.sub(r'[ 　.,]+$', '', mc.group(3))
+            inner = re.sub(r',+$', '', mc.group(3))
             parsed.append({
                 'type': 'content',
                 'prefix': mc.group(1),
@@ -432,8 +432,7 @@ def process_box(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
     mcw = 0
     for ps in parsed:
         if ps['type'] == 'content':
-            inner = ps['inner'].rstrip(' 　')
-            needed = m.measure('│' + inner + '　│')
+            needed = m.measure('│' + ps['inner'] + '　│')
             if needed > mcw:
                 mcw = needed
     tw = max(obw, mcw)
@@ -466,7 +465,7 @@ def process_box(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
                 dashes += '─'
             result.append(ps['prefix'] + '└' + dashes + '┘')
         elif ps['type'] == 'content':
-            inner = ps['inner'].rstrip(' 　')
+            inner = ps['inner']
             side_w = m.measure('│') + m.measure('│')
             tiw = max(tw - side_w, 0)
             padded = _pad_to_width(inner, tiw, m)

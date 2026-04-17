@@ -37,6 +37,7 @@ from aa_tool.bubble_alignment import (
 from aa_tool.html_io import (
     read_html_bg_color, read_html_pre_content, write_html_file,
 )
+from aa_tool.qt_helpers import show_toast
 from aa_tool.translation_engine import (
     apply_glossary_to_text, parse_glossary,
 )
@@ -44,7 +45,7 @@ from aa_tool.translation_engine import (
 LINE_HEIGHT_PERCENT = 120  # 對應 CSS line-height: 1.2，與瀏覽器顯示一致
 DEFAULT_BG = "#ffffff"
 DEFAULT_COLOR = "#ff0000"
-DEFAULT_EDITOR_FONT = "submona"
+DEFAULT_EDITOR_FONT = "MS PGothic"  # ⚠️ 請勿改動：AA 對齊計算依賴此字體的 metrics
 DEFAULT_EDITOR_FONT_SIZE = 12
 EDITOR_FONT_CHOICES = ["Monapo", "submona", "MS PGothic", "Meiryo", "Consolas",
                        "Microsoft JhengHei", "MingLiU"]
@@ -220,16 +221,7 @@ class EditWindow(QMainWindow):
         self.editor.textChanged.connect(self._on_changed)
         root.addWidget(self.stack, 1)
 
-        # ── 浮動狀態提示（覆蓋於編輯區底部） ──
-        self.status_label = QLabel("", self.stack)
-        self.status_label.setStyleSheet(
-            "background:rgba(33,37,41,230); color:#0f0;"
-            " padding:6px 14px; border-radius:6px;"
-            " font-family:Consolas; font-size:11pt;")
-        self.status_label.hide()
-        self._status_hide_timer = QTimer(self)
-        self._status_hide_timer.setSingleShot(True)
-        self._status_hide_timer.timeout.connect(self.status_label.hide)
+        # 浮動狀態提示改為右上角 Toast（show_toast），由 _set_status 統一呼叫
 
         # ── 全域快捷鍵 ──
         QShortcut(QKeySequence.StandardKey.Save, self, activated=self._save_overwrite)
@@ -395,12 +387,10 @@ class EditWindow(QMainWindow):
         btn_dice.clicked.connect(self._search_dice)
         layout.addWidget(btn_dice)
 
-        # 字體選擇器（暫時隱藏，保留功能備用）
-        self._font_section_spacer = layout.addSpacing(0)
+        layout.addSpacing(12)
 
         self._lbl_font = QLabel("字體")
         self._lbl_font.setStyleSheet("color:white; font-weight:bold;")
-        self._lbl_font.hide()
         layout.addWidget(self._lbl_font)
 
         self.font_combo = QComboBox()
@@ -414,7 +404,6 @@ class EditWindow(QMainWindow):
             "QComboBox { background:#343638; color:#dce4ee;"
             " border:1px solid #555; padding:2px 4px; }")
         self.font_combo.currentTextChanged.connect(self._on_font_family_changed)
-        self.font_combo.hide()
         layout.addWidget(self.font_combo)
 
         self.font_size_spin = QSpinBox()
@@ -426,7 +415,6 @@ class EditWindow(QMainWindow):
             "QSpinBox { background:#343638; color:#dce4ee;"
             " border:1px solid #555; padding:2px 4px; }")
         self.font_size_spin.valueChanged.connect(self._on_font_size_changed)
-        self.font_size_spin.hide()
         layout.addWidget(self.font_size_spin)
 
         layout.addStretch()
@@ -464,15 +452,24 @@ class EditWindow(QMainWindow):
         self._apply_line_height_to(self.editor)
 
     def _apply_line_height_to(self, widget: QTextEdit) -> None:
-        # 為了與瀏覽器上 AA 的 120% 行高顯示一致，這裡使用
-        # ProportionalHeight。副作用：中文 IME composition 期間行距會
-        # 短暫抖動，屬於 Qt 已知行為，與瀏覽器一致性相比取前者。
+        # 以主字型 × 120% 與 CJK fallback 字型自然高度取 max，套用 FixedHeight。
+        # 單獨使用主字型（MS PGothic）× 120% 時，繁中字會 fallback 到
+        # MingLiU/JhengHei 等較高的字型，仍會擠壓/切頂；取 max 後固定行高能
+        # 完整容納 fallback 字，同時維持純日文行的 120% 視覺比例。
+        main_font = widget.font()
+        fm_main = QFontMetricsF(main_font)
+        cjk_font = QFont("Microsoft JhengHei", main_font.pointSize())
+        fm_cjk = QFontMetricsF(cjk_font)
+        fixed_px = max(
+            fm_main.lineSpacing() * LINE_HEIGHT_PERCENT / 100.0,
+            fm_cjk.lineSpacing() * 1.02,  # 1.02 為 CJK fallback 上下緣留白
+        )
         cursor = QTextCursor(widget.document())
         cursor.select(QTextCursor.SelectionType.Document)
         block_fmt = QTextBlockFormat()
         block_fmt.setLineHeight(
-            LINE_HEIGHT_PERCENT,
-            QTextBlockFormat.LineHeightTypes.ProportionalHeight.value,
+            fixed_px,
+            QTextBlockFormat.LineHeightTypes.FixedHeight.value,
         )
         cursor.mergeBlockFormat(block_fmt)
 
@@ -905,6 +902,14 @@ class EditWindow(QMainWindow):
     #  其他
     # ════════════════════════════════════════════════════════════
 
+    def _scroll_to_top(self) -> None:
+        """將游標與捲軸移到文件最上方（切入編輯器時使用）。"""
+        cursor = self.editor.textCursor()
+        cursor.setPosition(0)
+        self.editor.setTextCursor(cursor)
+        self.editor.verticalScrollBar().setValue(0)
+        self.editor.horizontalScrollBar().setValue(0)
+
     def _scroll_to_line(self, line: int) -> None:
         doc = self.editor.document()
         block = doc.findBlockByLineNumber(line - 1)
@@ -915,32 +920,15 @@ class EditWindow(QMainWindow):
         self.editor.setTextCursor(cursor)
         self.editor.ensureCursorVisible()
 
+    # 將常見「亮綠」對應到 toast 風格的深綠底（與 MainWindow.show_status 對齊）
+    _STATUS_COLOR_MAP = {
+        "#0f0": "#28a745",
+        "#00ff00": "#28a745",
+    }
+
     def _set_status(self, msg: str, color: str = "#0f0") -> None:
-        self.status_label.setText(msg)
-        self.status_label.setStyleSheet(
-            f"background:rgba(33,37,41,230); color:{color};"
-            f" padding:6px 14px; border-radius:6px;"
-            f" font-family:Consolas; font-size:11pt;")
-        self.status_label.adjustSize()
-        self._position_status_label()
-        self.status_label.show()
-        self.status_label.raise_()
-        self._status_hide_timer.start(4000)
-
-    def _position_status_label(self) -> None:
-        if not hasattr(self, "status_label"):
-            return
-        parent = self.stack
-        lbl = self.status_label
-        margin = 12
-        x = max(margin, (parent.width() - lbl.width()) // 2)
-        y = parent.height() - lbl.height() - margin
-        lbl.move(x, max(margin, y))
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if self.status_label.isVisible():
-            self._position_status_label()
+        bg = self._STATUS_COLOR_MAP.get(color.lower(), color)
+        show_toast(self, msg, color=bg, duration=3000)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -960,6 +948,9 @@ class EditWindow(QMainWindow):
             self._dark_title_applied = True
 
     def _on_changed(self) -> None:
+        # 強制重繪 viewport：刪除繁中 fallback 字元後 Qt 有時會殘留上一次
+        # 渲染痕跡（因字身超出該行的 FixedHeight 邊界），手動觸發清除。
+        self.editor.viewport().update()
         if not self._dirty:
             self._dirty = True
             self.setWindowTitle("* " + self.windowTitle().lstrip("* "))

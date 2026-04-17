@@ -583,6 +583,8 @@ class MainWindow(QMainWindow):
         self.current_url: str = ""
         self._author_only: bool = False
         self._author_name: str = ""
+        # URL 讀取後暫存的標題（line 1），供「提取日文」時跳過標題行之用
+        self._last_fetched_title: str = ""
         self._batch_folder: str = ""
         self.work_history: list[dict] = []
         self._editor_font_family: str = "submona"
@@ -756,6 +758,8 @@ class MainWindow(QMainWindow):
             self._edit_window._on_save = self._on_edit_saved
             if scroll_to_line:
                 self._edit_window._scroll_to_line(scroll_to_line)
+            else:
+                self._edit_window._scroll_to_top()
             # 更新比對原文
             if original_text is not None:
                 self._edit_window._original_text = original_text
@@ -840,6 +844,8 @@ class MainWindow(QMainWindow):
             self.current_invalid_regex,
             self.current_symbol_regex,
             self._translate_panel.get_filter_text().strip(),
+            skip_title=self._last_fetched_title,
+            author_name=self._author_name,
         )
         output = format_extraction_output(extracted_set)
         self._translate_panel.extracted_text.setPlainText(output)
@@ -852,17 +858,23 @@ class MainWindow(QMainWindow):
     def copy_split(self, half: str) -> None:
         ext_text = self._translate_panel.get_extracted_text().strip()
         if not ext_text:
+            self.show_status("⚠️ 目前沒有可複製的提取結果", "#f39c12")
             return
         lines = [l for l in ext_text.split('\n') if l.strip()]
         if not lines:
+            self.show_status("⚠️ 目前沒有可複製的提取結果", "#f39c12")
             return
         if half == 'all':
             text = '\n'.join(lines)
+            label = "全部"
         else:
             split_idx = int(math.ceil(len(lines) / 2))
             text = '\n'.join(lines[:split_idx] if half == 'top'
                              else lines[split_idx:])
+            label = "上半" if half == 'top' else "下半"
         QApplication.clipboard().setText(text)
+        copied = len(text.split('\n')) if text else 0
+        self.show_status(f"✅ 已複製{label}（{copied} 行）到剪貼簿", "#0f0")
 
     def validate_ai_text(self) -> None:
         ai_content = self._translate_panel.get_ai_text().strip()
@@ -1221,6 +1233,7 @@ class MainWindow(QMainWindow):
                 self._translate_panel.source_text.setPlainText(full_text)
                 QTimer.singleShot(50, self.check_chapter_number)
                 self._update_work_title(display_title)
+                self._last_fetched_title = display_title
                 self.url_related_links = nav_links
                 self.current_url = raw_url
                 hist = {'url': raw_url, 'title': page_title or raw_url}
@@ -1312,6 +1325,7 @@ class MainWindow(QMainWindow):
                     self._translate_panel.source_text.setPlainText(full_text)
                     QTimer.singleShot(50, self.check_chapter_number)
                     self._update_work_title(display_title)
+                    self._last_fetched_title = display_title
                     self.url_related_links = nav_links
                     self.current_url = next_url
                     hist = {'url': next_url, 'title': page_title or next_url}

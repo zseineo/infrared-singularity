@@ -111,8 +111,16 @@ def extract_text(
     invalid_regex_str: str,
     symbol_regex_str: str,
     filter_str: str,
+    skip_title: str = "",
+    author_name: str = "",
 ) -> dict[str, int]:
     """從原始文本中提取日文文字片段。
+
+    Args:
+        skip_title: URL 讀取來源的標題文字；若 source 的第一個非空行內容等於
+            此字串，整行跳過（不提取）。空字串表示不套用此規則。
+        author_name: 作者名稱；提取結果中若有文字等於此名稱則剔除。
+            空字串表示不套用此規則。
 
     Returns:
         dict[str, int]: {提取文字: 來源行號}，保持插入順序。
@@ -125,7 +133,29 @@ def extract_text(
     lines = source.split('\n')
     extracted_set: dict[str, int] = {}
 
+    # 定位「第一個非空行」的行號（供 skip_title 比對用）
+    title_line_num = 0
+    if skip_title.strip():
+        target = skip_title.strip()
+        for idx, line in enumerate(lines, 1):
+            if line.strip():
+                if line.strip() == target:
+                    title_line_num = idx
+                break
+
+    # 作者名稱通常含開頭符號（如「◆Hr94QM5gdI」），而提取後處理會去掉符號
+    # 只剩英數字 trip code。因此從作者名稱抽出最長的英數字串（長度 ≥ 6）作為
+    # 過濾鍵；找不到則退回原字串完全比對。
+    author_target = author_name.strip()
+    author_tripcode = ""
+    if author_target:
+        runs = re.findall(r'[A-Za-z0-9]{6,}', author_target)
+        if runs:
+            author_tripcode = max(runs, key=len)
+
     for line_num, line in enumerate(lines, 1):
+        if line_num == title_line_num:
+            continue
         chunks = re.split(r'[ 　]{2,}', line)
 
         for chunk in chunks:
@@ -158,6 +188,13 @@ def extract_text(
 
                 if len(text) <= 2:
                     continue
+
+                if author_target:
+                    stripped = text.strip()
+                    if stripped == author_target or (
+                        author_tripcode and stripped == author_tripcode
+                    ):
+                        continue
 
                 text = _complete_brackets(text, line)
 

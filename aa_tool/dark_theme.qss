@@ -1,4 +1,4 @@
-/* AA 漫畫翻譯輔助工具 — PyQt6 暗色主題 */
+/* AA 創作翻譯輔助小工具 — PyQt6 暗色主題 */
 
 /* ── 全域 ── */
 QWidget {
@@ -149,6 +149,34 @@ QSplitter::handle {
 /* ── 工具列區域 ── */
 QWidget[objectName="toolbar"] {
     background-color: #343a40;
+}
+
+/* ── 彈出選單 ── */
+QMenu {
+    background-color: #343638;
+    color: #dce4ee;
+    border: 1px solid #555555;
+    padding: 4px 0;
+}
+
+QMenu::item {
+    background-color: transparent;
+    padding: 6px 20px;
+}
+
+QMenu::item:selected {
+    background-color: #1f6aa5;
+    color: #ffffff;
+}
+
+QMenu::item:disabled {
+    color: #888888;
+}
+
+QMenu::separator {
+    height: 1px;
+    background-color: #555555;
+    margin: 4px 8px;
 }
 
 /* ── 工具提示 ── */

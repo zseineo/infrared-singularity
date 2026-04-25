@@ -47,7 +47,17 @@ def show_toast(
     color: str = "#28a745",
     duration: int = 3000,
 ) -> QLabel:
-    """在 parent 右上角顯示浮動 Toast 提示，duration 毫秒後自動消失。"""
+    """在 parent 右上角顯示浮動 Toast 提示，duration 毫秒後自動消失。
+    新 Toast 出現時會清除同一 parent 上尚未消失的舊 Toast，避免重疊。"""
+    # 移除舊 Toast（避免重疊）
+    active: list = getattr(parent, "_active_toasts", [])
+    for old in active:
+        try:
+            old.deleteLater()
+        except RuntimeError:
+            pass
+    active = []
+
     toast = QLabel(message, parent)
     toast.setStyleSheet(f"""
         QLabel {{
@@ -67,5 +77,20 @@ def show_toast(
     toast.move(x, y)
     toast.raise_()
     toast.show()
-    QTimer.singleShot(duration, toast.deleteLater)
+
+    active.append(toast)
+    parent._active_toasts = active
+
+    def _cleanup() -> None:
+        try:
+            if toast in parent._active_toasts:
+                parent._active_toasts.remove(toast)
+        except (AttributeError, ValueError):
+            pass
+        try:
+            toast.deleteLater()
+        except RuntimeError:
+            pass
+
+    QTimer.singleShot(duration, _cleanup)
     return toast

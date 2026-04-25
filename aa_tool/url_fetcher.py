@@ -153,15 +153,22 @@ def _cleanup_unmatched_spans(text: str) -> str:
 #   1.「N 名前：NAME[...]」(5ch / FC2 / himana)
 #   2.「N ： NAME ： YYYY/MM/DD(...)」(yaruobook / yaruok 等 FC2 變體)
 _POST_HEADER_RE = re.compile(
-    r'^\s*\d+\s*(?:(?:名前|Name)\s*[：:]|[：:]\s*.+?\s*[：:]\s*\d{4}[/年])'
+    r'^\s*\d+\s*(?:'
+    r'(?:名前|Name)\s*[：:]'
+    r'|[：:]\s*.+?\s*(?:[：:]|\[[^\]]*\])\s*\d{4}[/年]'
+    r')'
 )
 _COLOR_SPAN_RE = re.compile(r'<span\s+style="color:[^"]*">|</span>')
 
 # 從標頭提取投稿者名稱：「N 名前：NAME[...]」→ NAME
 _POSTER_NAME_RE = re.compile(r'(?:名前|Name)\s*[：:]\s*(.+?)(?:\[|投稿日|$)')
 
-# 替代格式：「N ： NAME ： YYYY/MM/DD...」→ NAME（yaruobook.jp 等無「名前」關鍵字的站點）
-_POSTER_NAME_RE_ALT = re.compile(r'^\s*\d+\s*[：:]\s*(.+?)\s*[：:]\s*\d{4}[/年]')
+# 替代格式 → NAME。支援兩種分隔符（yaruobook.jp 用 `：`、yarucha 用 `[sage]` / `[]`）：
+#   「N ： NAME ： YYYY/MM/DD...」
+#   「N : NAME [] YYYY/MM/DD...」
+_POSTER_NAME_RE_ALT = re.compile(
+    r'^\s*\d+\s*[：:]\s*(.+?)\s*(?:[：:]|\[[^\]]*\])\s*\d{4}[/年]'
+)
 
 
 def _extract_poster_name(header_text: str) -> str:
@@ -396,23 +403,31 @@ def _parse_himanatokiniyaruo(page_html: str, base_url: str, *, author_name: str 
     text_content = '\n\n'.join(lines_out) if lines_out else None
 
     # ── 關聯連結 ──
+    # 以 <br /> 分段：有 <a> 的段落 → 連結條目；純文字段落 → 當前話（無連結）
+    def _parse_related_segments(fragment: str) -> list[dict]:
+        items: list[dict] = []
+        for seg in re.split(r'<br\s*/?>', fragment):
+            a_m = re.search(r'<a\s[^>]*?href="([^"]+)"[^>]*>(.*?)</a>', seg, re.DOTALL)
+            if a_m:
+                href = urljoin(base_url, a_m.group(1))
+                title = html.unescape(re.sub(r'<[^>]+>', '', a_m.group(2))).strip()
+                if not title:
+                    continue
+                is_current = href.rstrip('/') == base_url.rstrip('/')
+                items.append({'title': title, 'url': href, 'is_current': is_current})
+            else:
+                title = html.unescape(re.sub(r'<[^>]+>', '', seg)).strip()
+                if title:
+                    items.append({'title': title, 'url': None, 'is_current': True})
+        return items
+
     nav_links: list[dict] = []
     related_m = re.search(
         r'<div\s+class="related-entries">(.*?)</div>',
         page_html, re.DOTALL,
     )
     if related_m:
-        related_html = related_m.group(1)
-        for a_m in re.finditer(
-            r'<a\s+href="([^"]+)"[^>]*>(.*?)</a>',
-            related_html, re.DOTALL,
-        ):
-            href = urljoin(base_url, a_m.group(1))
-            title = html.unescape(re.sub(r'<[^>]+>', '', a_m.group(2))).strip()
-            if not title:
-                continue
-            is_current = href.rstrip('/') == base_url.rstrip('/')
-            nav_links.append({'title': title, 'url': href, 'is_current': is_current})
+        nav_links.extend(_parse_related_segments(related_m.group(1)))
 
     # ── 巢狀 div fallback：若原始 regex 未取到連結，改用平衡 div 深度抓取 ──
     if not nav_links:
@@ -435,17 +450,12 @@ def _parse_himanatokiniyaruo(page_html: str, base_url: str, *, author_name: str 
                     depth -= 1
                     if depth == 0:
                         related_html_full = page_html[inner_start:pos + next_close.start()]
-                        for a_m in re.finditer(
-                            r'<a\s+href="([^"]+)"[^>]*>(.*?)</a>',
-                            related_html_full, re.DOTALL,
-                        ):
-                            href = urljoin(base_url, a_m.group(1))
-                            title = html.unescape(re.sub(r'<[^>]+>', '', a_m.group(2))).strip()
-                            if not title:
-                                continue
-                            is_current = href.rstrip('/') == base_url.rstrip('/')
-                            nav_links.append({'title': title, 'url': href, 'is_current': is_current})
+                        nav_links.extend(_parse_related_segments(related_html_full))
                     pos += next_close.start() + len('</div>')
+
+    # 原始清單為「新 → 舊」（第 N 話 → 第 1 話）；反轉為時間順序，
+    # 讓「下一話」按鈕可以 current_idx + 1 正確取得下一集。
+    nav_links.reverse()
 
     return text_content, nav_links, page_title
 
@@ -607,6 +617,85 @@ def _parse_yaruobook(page_html: str, base_url: str, *, author_name: str = "", au
 
 
 # ════════════════════════════════════════════════════════════════
+#  解析器：yaruobook.net（早期 HTML 數字字元引用版本）
+# ════════════════════════════════════════════════════════════════
+
+def _parse_yaruobook_net(page_html: str, base_url: str, *,
+                         author_name: str = "",
+                         author_only: bool = False) -> tuple[str | None, list[dict], str]:
+    """解析 yaruobook.net 格式（含早期以 HTML 數字字元引用編碼的文章）。
+
+    內文：<div id="entry-content" class="entry-content ..."> 內的 <dl>/<dt>/<dd>。
+    早期文章中「：」等符號以 `&#65306;` 等 numeric character reference 呈現，
+    由 `_extract_dt_dd_posts` 內部的 `html.unescape` 正規化後即可用現有
+    `_POST_HEADER_RE` / `_POSTER_NAME_RE_ALT` 處理。
+    關聯：沿用 `yaruobook.jp` 的 `<ul class="relatedPostsWrap relatedPostsPrev/Next">` 結構。
+    """
+    # ── 標題 ──
+    title_m = re.search(r'<title>([^<]+)</title>', page_html)
+    page_title = html.unescape(title_m.group(1)).strip() if title_m else ""
+    page_title = re.sub(r'\s*[\|｜\-－–—]\s*やる夫ブック.*$', '', page_title)
+
+    # ── 內文區塊 ──
+    start_m = re.search(r'<div\s+id="entry-content"[^>]*>', page_html)
+    if not start_m:
+        return None, [], page_title
+
+    end_m = re.search(
+        r'<div\s+id="custom_html-'
+        r'|<div\s+[^>]*class="[^"]*widget-single-content-bottom'
+        r'|<ul\s+[^>]*class="[^"]*relatedPostsWrap',
+        page_html[start_m.end():],
+    )
+    content_end = start_m.end() + end_m.start() if end_m else len(page_html)
+    content_html = page_html[start_m.end():content_end]
+
+    lines_out = _extract_dt_dd_posts(
+        content_html, author_name=author_name, author_only=author_only)
+    text_content = '\n\n'.join(lines_out) if lines_out else None
+
+    # ── 關聯連結 ──
+    def _parse_related_ul(ul_html: str) -> list[dict]:
+        items: list[dict] = []
+        for li in re.finditer(
+            r'<li(?:\s+[^>]*class="([^"]*)")?[^>]*>(.*?)</li>',
+            ul_html, re.DOTALL,
+        ):
+            li_class = li.group(1) or ""
+            li_inner = li.group(2)
+            is_current = 'currentPost' in li_class
+            a_m = re.search(r'<a\s+href="([^"]+)"[^>]*>(.*?)</a>', li_inner, re.DOTALL)
+            if a_m:
+                href = urljoin(base_url, a_m.group(1))
+                title = html.unescape(re.sub(r'<[^>]+>', '', a_m.group(2))).strip()
+                if title:
+                    items.append({'title': title, 'url': href, 'is_current': is_current})
+            else:
+                title = html.unescape(re.sub(r'<[^>]+>', '', li_inner)).strip()
+                if title:
+                    items.append({'title': title, 'url': None, 'is_current': is_current})
+        return items
+
+    nav_links: list[dict] = []
+    prev_m = re.search(
+        r'<ul\s+[^>]*class="[^"]*relatedPostsWrap\s+relatedPostsPrev[^"]*"[^>]*>(.*?)</ul>',
+        page_html, re.DOTALL,
+    )
+    next_m = re.search(
+        r'<ul\s+[^>]*class="[^"]*relatedPostsWrap\s+relatedPostsNext[^"]*"[^>]*>(.*?)</ul>',
+        page_html, re.DOTALL,
+    )
+    # Prev 結構與 yaruobook.jp 相同：[currentPost, 前一話, 前前話, ...]；
+    # 反轉後變 [..., 前前話, 前一話, currentPost]，再接 Next 即為時間順序。
+    if prev_m:
+        nav_links.extend(reversed(_parse_related_ul(prev_m.group(1))))
+    if next_m:
+        nav_links.extend(_parse_related_ul(next_m.group(1)))
+
+    return text_content, nav_links, page_title
+
+
+# ════════════════════════════════════════════════════════════════
 #  公開入口
 # ════════════════════════════════════════════════════════════════
 
@@ -615,6 +704,7 @@ _DOMAIN_PARSERS: dict[str, callable] = {
     'himanatokiniyaruo.com': _parse_himanatokiniyaruo,
     'blog.fc2.com': _parse_fc2blog,
     'yaruobook.jp': _parse_yaruobook,
+    'yaruobook.net': _parse_yaruobook_net,
 }
 
 
@@ -657,14 +747,34 @@ def parse_page_html(
     """
     domain = _resolve_domain(base_url)
 
+    # 網域匹配到的解析器優先嘗試；若取不到內文（子站模板不同等），
+    # 再 fallback 到其他解析器。實例：`yarucha.blog.fc2.com` 命中
+    # `blog.fc2.com` 但該站實際使用 `<div class="article">` 結構，
+    # 需退回 `_parse_default` 才能取到。
+    primary_parser = None
     for key, parser in _DOMAIN_PARSERS.items():
         if key in domain:
-            return parser(page_html, base_url, author_name=author_name, author_only=author_only)
+            primary_parser = parser
+            break
 
-    # 未知網域：依序嘗試所有解析器（預設優先，因為最通用）
     last_result: tuple[str | None, list[dict], str] = (None, [], "")
+    if primary_parser is not None:
+        try:
+            result = primary_parser(
+                page_html, base_url,
+                author_name=author_name, author_only=author_only,
+            )
+            if result[0] and result[0].strip():
+                return result
+            last_result = result
+        except Exception:
+            pass
+
+    # fallback：依序嘗試所有解析器（預設優先，因為最通用）
     parsers: list = [_parse_default, *_DOMAIN_PARSERS.values()]
     for parser in parsers:
+        if parser is primary_parser:
+            continue  # 已試過
         try:
             result = parser(
                 page_html, base_url,
@@ -673,7 +783,8 @@ def parse_page_html(
         except Exception:
             continue
         text_content = result[0]
-        last_result = result
         if text_content and text_content.strip():
             return result
+        if not last_result[0]:
+            last_result = result
     return last_result

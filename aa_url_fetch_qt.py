@@ -1,6 +1,6 @@
-"""AA 漫畫翻譯輔助工具 — 獨立 PyQt6 網址讀取視窗。
+"""AA 創作翻譯輔助小工具 — 獨立 PyQt6 網址讀取視窗。
 
-以 subprocess 從 customtkinter 主程式啟動，透過 JSON 命令檔 (IPC) 雙向溝通。
+以 subprocess 從 PyQt6 主程式 (`aa_main_qt.py`) 啟動，透過 JSON 命令檔 (IPC) 雙向溝通。
 作者名稱取自主程式最新狀態，因此抓取動作由主程式執行：
 - Qt → 主程式 (cmd_file)：
     {action: "fetch_request", url, author_only}
@@ -292,30 +292,36 @@ class UrlFetchWindow(QMainWindow):
                 title_text = title_text[:60] + "…"
 
             url = entry.get("url", "")
-            btn = QPushButton(title_text)
-            btn.setFont(self.ui_small_font)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setStyleSheet("""
-                QPushButton { background: transparent; color: #b39ddb;
-                    border: none; text-align: left; padding: 2px 4px; }
-                QPushButton:hover { color: #d1c4e9; }
-            """)
-            btn.clicked.connect(lambda checked=False, u=url: self.url_entry.setText(u))
-            rl.addWidget(btn, 1)
 
+            # 複製按鈕：字型與寬度依 DPI 縮放調整，避免 125%／150% 縮放下「複製」文字溢出。
+            # 以 96 DPI（100% 縮放）為基準；高縮放時 pointSize 再降 1pt、width 依比例放大。
+            screen = self.screen() if hasattr(self, "screen") else None
+            dpi_scale = (screen.logicalDotsPerInch() / 96.0) if screen else 1.0
+            copy_font = QFont(self.ui_small_font)
+            base_pt = self.ui_small_font.pointSize()
+            copy_pt = base_pt - (2 if dpi_scale >= 1.2 else 1)
+            copy_font.setPointSize(max(1, copy_pt))
+            copy_width = int(45 * max(1.0, dpi_scale))
             copy_btn = make_button("複製", color="#6c757d", hover="#5a6268",
-                                   font=self.ui_small_font, width=45)
+                                   font=copy_font, width=copy_width)
             copy_btn.setFixedHeight(22)
+            copy_btn.setStyleSheet(copy_btn.styleSheet() + " QPushButton{padding:0 2px;}")
             copy_btn.setToolTip("複製此網址到剪貼簿")
             copy_btn.clicked.connect(
                 lambda checked=False, u=url: self._copy_url_to_clipboard(u))
             rl.addWidget(copy_btn)
 
-            read_btn = make_button("讀取", color="#17a2b8", hover="#138496",
-                                    font=self.ui_small_font, width=45)
-            read_btn.setFixedHeight(22)
-            read_btn.clicked.connect(lambda checked=False, u=url: self._fetch_url(u))
-            rl.addWidget(read_btn)
+            btn = QPushButton(title_text)
+            btn.setFont(self.ui_small_font)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip("點擊讀取此網址")
+            btn.setStyleSheet("""
+                QPushButton { background: transparent; color: #b39ddb;
+                    border: none; text-align: left; padding: 2px 4px; }
+                QPushButton:hover { color: #d1c4e9; }
+            """)
+            btn.clicked.connect(lambda checked=False, u=url: self._fetch_url(u))
+            rl.addWidget(btn, 1)
 
             insert_at(row)
 
@@ -403,6 +409,17 @@ class UrlFetchWindow(QMainWindow):
                     QTimer.singleShot(400, self.close)
         elif action == "history_cleared":
             self._url_history = cmd.get("url_history") or []
+            self._refresh_history()
+        elif action == "history_updated":
+            # 主程式偵測到 cache 變動（例如另一個 aa_main_qt.py 寫入新紀錄）後推送
+            self._url_history = cmd.get("url_history") or []
+            related = cmd.get("url_related_links")
+            if related is not None:
+                self._url_related_links = related
+                self._refresh_nav()
+            cur = cmd.get("current_url")
+            if cur is not None:
+                self._current_url = cur
             self._refresh_history()
 
     def closeEvent(self, event):

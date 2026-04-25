@@ -22,10 +22,15 @@ if TYPE_CHECKING:
 
 SHOUT_DELIM_PAIRS = [('）', '（'), ('＞', '＜'), ('>', '<'), ('》', '《')]
 SLASH_DELIM_CHARS = ['│', '─']
-VALID_TEXT_RE = re.compile(
-    r'[\u4e00-\u9fff\u3000-\u303f\uff00-\uffefa-zA-Z0-9…―—]'
-)
 RIGHT_BORDER_CHARS = '│｜|〉》>）)ノﾉ＼ヽ｝}］]'
+
+# Padding 字元：半形空白 + 全形空白 + 半形點，皆視為對齊用填白
+_PAD_CHARS = ' \u3000.'
+
+
+def _content_width(text: str, m: 'FontMeasurer') -> float:
+    """量測「內容寬度」：從右端剝除 padding 字元後再量測。"""
+    return m.measure(text.rstrip(_PAD_CHARS))
 
 
 # ════════════════════════════════════════════════════════════════
@@ -189,21 +194,16 @@ def _parse_normal_lines(box_lines: list[str]) -> list[dict]:
 #  內部輔助：補空白至目標寬度
 # ════════════════════════════════════════════════════════════════
 
-def _pad_to_width(text: str, target_width: int, m: FontMeasurer) -> str:
-    """用全形空白再半形空白將 *text* 補至最接近 *target_width* 的寬度。"""
+def _pad_to_width(text: str, target_width: float, m: FontMeasurer) -> str:
+    """用全形空白再半形空白將 *text* 補至最接近 *target_width* 的寬度。
+
+    最後做一次 snap：若再多一個半形空白比現狀更接近 target，就補上。
+    """
     while m.measure(text + '　') <= target_width:
         text += '　'
     while m.measure(text + ' ') <= target_width:
         text += ' '
-    return text
-
-
-def _pad_to_width_snap(text: str, target_width: int, m: FontMeasurer) -> str:
-    """補空白後，若再多一個半形空白更接近目標，則多補一個。"""
-    text = _pad_to_width(text, target_width, m)
-    d1 = target_width - m.measure(text)
-    d2 = m.measure(text + ' ') - target_width
-    if d2 < d1:
+    if (m.measure(text + ' ') - target_width) < (target_width - m.measure(text)):
         text += ' '
     return text
 
@@ -229,12 +229,13 @@ def process_shout(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
     mcw = 0
     for ps in parsed:
         if ps['type'] == 'content':
+            inner_stripped = ps['inner'].rstrip(_PAD_CHARS)
             needed = m.measure(
-                ps['left_char'] + ps['inner'] + '　' + ps['right_char']
+                ps['left_char'] + inner_stripped + '　' + ps['right_char']
             )
             if needed > mcw:
                 mcw = needed
-    tw = max(obw, mcw)
+    tw = (mcw + m.measure('　')) if mcw > 0 else obw
 
     # 重建
     result: list[str] = []
@@ -255,9 +256,9 @@ def process_shout(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
             result.append(ps['prefix'] + res)
         elif ps['type'] == 'content':
             lc, rc = ps['left_char'], ps['right_char']
-            inner = ps['inner']
+            inner = ps['inner'].rstrip(_PAD_CHARS)
             pw = m.measure(lc) + m.measure(rc)
-            tiw = max(tw - pw, 0)
+            tiw = max(tw - pw, 0.0)
             padded = _pad_to_width(inner, tiw, m)
             result.append(ps['prefix'] + lc + padded + rc)
         else:
@@ -280,12 +281,13 @@ def process_slash(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
     mcw = 0
     for ps in parsed:
         if ps['type'] == 'content':
+            inner_stripped = ps['inner'].rstrip(_PAD_CHARS)
             needed = m.measure(
-                ps['left_char'] + ps['inner'] + '　' + ps['right_char']
+                ps['left_char'] + inner_stripped + '　' + ps['right_char']
             )
             if needed > mcw:
                 mcw = needed
-    tw = max(obw, mcw)
+    tw = (mcw + m.measure('　')) if mcw > 0 else obw
 
     result: list[str] = []
     for ps in parsed:
@@ -303,9 +305,9 @@ def process_slash(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
             result.append(ps['prefix'] + res)
         elif ps['type'] == 'content':
             lc, rc = ps['left_char'], ps['right_char']
-            inner = ps['inner']
+            inner = ps['inner'].rstrip(_PAD_CHARS)
             pw = m.measure(lc) + m.measure(rc)
-            tiw = max(tw - pw, 0)
+            tiw = max(tw - pw, 0.0)
             padded = _pad_to_width(inner, tiw, m)
             result.append(ps['prefix'] + lc + padded + rc)
         else:
@@ -314,58 +316,53 @@ def process_slash(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
 
 
 def process_normal(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
-    """處理普通對話框，回傳對齊後的各行。失敗回傳 None。"""
-    parsed = _parse_normal_lines(box_lines)
+    """處理普通對話框，回傳對齊後的各行。失敗回傳 None。
 
-    max_left_w = 0
-    has_right_border = False
+    目標寬計算與吶喊/斜線/方框統一：內容最大寬 + 兩個全形空白寬（多留一格視覺餘裕）；
+    若無內容則 fallback 為原邊框寬。
+    內容寬度判定一律走 `_content_width`（剝除 ` ` / `　` / `.`）。
+    """
+    parsed = _parse_normal_lines(box_lines)
+    fw_w = m.measure('　')
+
+    # 原邊框寬度（取第一個 border 行的整體寬度）
+    obw = 0.0
+    for p in parsed:
+        if p['type'] == 'border':
+            obw = m.measure(str(p['orig']))
+            break
+
+    # 內容最大寬（用統一 helper，含 padding 剝除）
+    max_left_w = 0.0
     for p in parsed:
         if p['type'] == 'content':
-            vm = list(VALID_TEXT_RE.finditer(str(p.get('left', ''))))
-            if vm:
-                w = m.measure(str(p['left'])[:vm[-1].end()])
-            else:
-                w = m.measure(str(p.get('left', '')).rstrip(' \u3000'))
+            w = _content_width(str(p.get('left', '')), m)
             if w > max_left_w:
                 max_left_w = w
-            if p.get('right'):
-                has_right_border = True
-    if max_left_w == 0:
+    if max_left_w <= 0 and obw <= 0:
         return None
 
-    fw_w = m.measure('　')
-    tw_n = max_left_w - fw_w
-    if tw_n < 0:
-        tw_n = 0
-    if has_right_border:
-        tw_n += fw_w
-
-    btw = max_left_w + m.measure('￣')
-    if btw < 0:
-        btw = 0
-    atw = btw - fw_w
+    tw = (max_left_w + fw_w * 2) if max_left_w > 0 else obw
 
     new_box: list[str] = []
-    last_bdr = ''
     for p in parsed:
         if p['type'] == 'border':
             pc = str(p['char'])
-            res = str(p['left']) + pc
-            while m.measure(res + pc) <= btw:
+            right = str(p['right'])
+            target_left_w = tw - m.measure(right)
+            res = str(p['left'])
+            while m.measure(res + pc) <= target_left_w:
                 res += pc
-            d1 = btw - m.measure(res)
-            d2 = m.measure(res + pc) - btw
-            if d2 < d1:
+            if (m.measure(res + pc) - target_left_w) < (target_left_w - m.measure(res)):
                 res += pc
-            last_bdr = res + str(p['right'])
-            new_box.append(last_bdr)
+            new_box.append(res + right)
         elif p['type'] == 'content':
             if p.get('right'):
-                ctw = m.measure(last_bdr[:-1]) if last_bdr else atw
-                rp = str(p['left'])
-                if m.measure(rp) < ctw:
-                    rp = _pad_to_width_snap(rp, ctw, m)
-                new_box.append(rp + str(p['right']))
+                right = str(p['right'])
+                target_left_w = tw - m.measure(right)
+                left_stripped = str(p['left']).rstrip(_PAD_CHARS)
+                padded = _pad_to_width(left_stripped, target_left_w, m)
+                new_box.append(padded + right)
             else:
                 new_box.append(str(p.get('left', p.get('orig', ''))))
         else:
@@ -432,10 +429,10 @@ def process_box(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
     mcw = 0
     for ps in parsed:
         if ps['type'] == 'content':
-            needed = m.measure('│' + ps['inner'] + '　│')
+            needed = m.measure('│' + ps['inner'].rstrip(_PAD_CHARS) + '　│')
             if needed > mcw:
                 mcw = needed
-    tw = max(obw, mcw)
+    tw = (mcw + m.measure('　')) if mcw > 0 else obw
 
     # 計算邊框需要幾個 ─
     dash_w = m.measure('─')
@@ -465,9 +462,9 @@ def process_box(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
                 dashes += '─'
             result.append(ps['prefix'] + '└' + dashes + '┘')
         elif ps['type'] == 'content':
-            inner = ps['inner']
+            inner = ps['inner'].rstrip(_PAD_CHARS)
             side_w = m.measure('│') + m.measure('│')
-            tiw = max(tw - side_w, 0)
+            tiw = max(tw - side_w, 0.0)
             padded = _pad_to_width(inner, tiw, m)
             result.append(ps['prefix'] + '│' + padded + '│')
         else:
@@ -744,7 +741,11 @@ def align_to_prev_line(
         return None
 
     selected_text = current_line_text[target_col:]
-    target_width = m.measure(prev_line_text[:-1])
+    prev_content = prev_line_text.rstrip(_PAD_CHARS) or prev_line_text
+    if len(prev_content) > 1:
+        target_width = m.measure(prev_content[:-1])
+    else:
+        target_width = m.measure(prev_content)
 
     text_before = current_line_text[:target_col]
     stripped_before = text_before.rstrip(' \u3000')
@@ -752,7 +753,7 @@ def align_to_prev_line(
     if m.measure(stripped_before) >= target_width:
         res_prefix = stripped_before
     else:
-        res_prefix = _pad_to_width_snap(stripped_before, target_width, m)
+        res_prefix = _pad_to_width(stripped_before, target_width, m)
 
     new_col = len(res_prefix) + 1
     return res_prefix + ' ' + selected_text, new_col

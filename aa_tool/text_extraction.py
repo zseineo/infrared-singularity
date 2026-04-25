@@ -47,6 +47,11 @@ def _postprocess_text(text: str) -> str:
     return text
 
 
+# 2ch/5ch 發文者行：形如「4402 ： ◆GESU1/dEaE ： 2021/05/06(木) 23:19:36 ID:nGcM5Umt」
+# 特徵：含 ID:xxxxxx（trip code），這組標記對發文者行幾乎是唯一判別
+_POSTER_LINE_RE = re.compile(r'ID:[A-Za-z0-9+/.]{6,}')
+
+
 _BRACKET_PAIRS = {
     '【': '】', '】': '【',
     '「': '」', '」': '「',
@@ -81,9 +86,6 @@ def _complete_brackets(text: str, source_line: str) -> str:
             else:
                 stack.append((ch, i))
 
-    if not stack:
-        return text  # 全部配對完成
-
     # 在 source_line 中定位 text
     pos = source_line.find(text)
     if pos < 0:
@@ -101,6 +103,19 @@ def _complete_brackets(text: str, source_line: str) -> str:
             end = pos + len(result)
             if end < len(source_line) and source_line[end] == _BRACKET_PAIRS[bracket]:
                 result = result + _BRACKET_PAIRS[bracket]
+
+    # 額外處理：整個括號在 text 外（提取時被丟掉）的情況
+    # 檢查 source_line 中緊鄰 text 的前/後字元是否為括號，有就補回
+    if pos > 0:
+        prev = source_line[pos - 1]
+        if prev in _OPEN_BRACKETS and not result.startswith(prev):
+            result = prev + result
+            pos -= 1
+    end = pos + len(result)
+    if end < len(source_line):
+        nxt = source_line[end]
+        if nxt in _CLOSE_BRACKETS and not result.endswith(nxt):
+            result = result + nxt
 
     return result
 
@@ -156,6 +171,8 @@ def extract_text(
     for line_num, line in enumerate(lines, 1):
         if line_num == title_line_num:
             continue
+        if _POSTER_LINE_RE.search(line):
+            continue
         chunks = re.split(r'[ 　]{2,}', line)
 
         for chunk in chunks:
@@ -176,14 +193,6 @@ def extract_text(
                 if invalid_regex.match(text):
                     continue
 
-                is_valid = True
-                for reg in custom_regexes:
-                    if reg.search(text):
-                        is_valid = False
-                        break
-                if not is_valid:
-                    continue
-
                 text = _postprocess_text(text)
 
                 if len(text) <= 2:
@@ -197,6 +206,10 @@ def extract_text(
                         continue
 
                 text = _complete_brackets(text, line)
+
+                # 自訂過濾規則：在提取流程結束後對最終結果做過濾
+                if any(reg.search(text) for reg in custom_regexes):
+                    continue
 
                 if text and text not in extracted_set:
                     extracted_set[text] = line_num
@@ -236,6 +249,11 @@ def analyze_extraction(
             continue
         report.append(f"--- 開始分析字串 (第 {line_idx} 行) ---")
         report.append(f"原始字串: '{line}'")
+
+        if _POSTER_LINE_RE.search(line):
+            report.append("  -> ❌ 整行剔除：判定為發文者行（含 ID:xxxxxx trip code）。")
+            report.append("\n" + "=" * 40 + "\n")
+            continue
 
         chunks = re.split(r'[ 　]{2,}', line)
         report.append(f"[步驟 1] 藉由連續兩個以上空白進行分割，分割出 {len(chunks)} 個區塊:")
@@ -284,17 +302,6 @@ def analyze_extraction(
                 else:
                     report.append("    - 無意義符號組合檢驗通過")
 
-                filtered_by_custom = False
-                for reg in custom_regexes:
-                    if reg.search(t):
-                        report.append(f"    -> ❌ 剔除：命中自訂濾網正則表達式 ({reg.pattern})。")
-                        filtered_by_custom = True
-                        break
-                if filtered_by_custom:
-                    continue
-                else:
-                    report.append("    - 自訂過濾清單檢驗通過")
-
                 original_t = t
                 t = _postprocess_text(t)
                 report.append(f"    [步驟 4] 後處理解析 (去除非內文字元): '{original_t}' => '{t}'")
@@ -304,6 +311,17 @@ def analyze_extraction(
                     continue
                 else:
                     report.append(f"    - 最終長度檢驗通過 (長度: {len(t)})")
+
+                filtered_by_custom = False
+                for reg in custom_regexes:
+                    if reg.search(t):
+                        report.append(f"    -> ❌ 剔除：命中自訂濾網正則表達式 ({reg.pattern})（對最終提取結果過濾）。")
+                        filtered_by_custom = True
+                        break
+                if filtered_by_custom:
+                    continue
+                else:
+                    report.append("    - 自訂過濾清單檢驗通過（對最終提取結果）")
 
                 report.append(f"    -> ✅ 成功提取最終文字: '{t}'")
         report.append("\n" + "=" * 40 + "\n")

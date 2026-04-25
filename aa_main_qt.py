@@ -1,4 +1,4 @@
-"""AA 漫畫翻譯輔助工具 — PyQt6 主視窗。
+"""AA 創作翻譯輔助工具 — PyQt6 主視窗。
 
 架構：
     QMainWindow (MainWindow)
@@ -39,7 +39,10 @@ from aa_tool.constants import (
 )
 from aa_tool.html_io import read_html_pre_content, write_html_file, read_html_bg_color
 from aa_tool.qt_helpers import show_toast
-from aa_tool.settings_manager import SettingsManager, AppSettings, AppCache
+from aa_tool.settings_manager import (
+    SettingsManager, AppSettings, AppCache,
+    merge_glossary_diff, merge_filter_diff,
+)
 from aa_tool.text_extraction import (
     extract_text as _extract_text,
     format_extraction_output,
@@ -112,9 +115,8 @@ class TranslatePanel(QWidget):
     def __init__(self, main_win: MainWindow) -> None:
         super().__init__()
         self._main = main_win
-        self._glossary_dup_positions: list[tuple[str, int]] = []
+        self._glossary_dup_positions: list[int] = []
         self._glossary_dup_cycle_idx = 0
-        self._glossary_tab = "一般"
         self._build_ui()
 
     # ── UI 建置 ──
@@ -173,10 +175,17 @@ class TranslatePanel(QWidget):
         row.setContentsMargins(10, 5, 10, 5)
         row.setSpacing(5)
 
-        title_lbl = QLabel("AA 漫畫翻譯輔助工具")
+        title_lbl = QLabel("AA 創作翻譯輔助工具")
         title_lbl.setFont(_ui_font(16, bold=True))
         title_lbl.setStyleSheet("color:white;")
         row.addWidget(title_lbl)
+
+        row.addSpacing(8)
+        btn_settings = _make_btn("⚙", "#6c757d", "#5a6268",
+                                 font=_ui_font(14), width=34)
+        btn_settings.setToolTip("設定")
+        btn_settings.clicked.connect(self._main.open_settings_dialog)
+        row.addWidget(btn_settings)
 
         row.addSpacing(12)
 
@@ -192,6 +201,11 @@ class TranslatePanel(QWidget):
         row.addWidget(btn_resume_edit)
 
         row.addStretch()
+
+        btn_wiki = _make_btn("📖 Wiki 對照", "#6f42c1", "#5a32a3", font=_ui_font(12))
+        btn_wiki.setToolTip("從 Wiki 角色列表頁抓取中日文對照")
+        btn_wiki.clicked.connect(self._main.open_wiki_name_dialog)
+        row.addWidget(btn_wiki)
 
         btn_import = _make_btn("📥 讀取設定", "#17a2b8", "#138496", font=_ui_font(12))
         btn_import.clicked.connect(self._main.import_settings)
@@ -216,7 +230,7 @@ class TranslatePanel(QWidget):
         # 標頭列
         top = QHBoxLayout()
 
-        lbl = QLabel("1. 原始文本")
+        lbl = QLabel("原始文本")
         lbl.setFont(_ui_font(13, bold=True))
         top.addWidget(lbl)
 
@@ -289,7 +303,7 @@ class TranslatePanel(QWidget):
         vl.setSpacing(4)
 
         # 過濾規則
-        lbl_f = QLabel("自訂過濾規則 (每行一條正則):")
+        lbl_f = QLabel("自訂過濾規則 (每行一條支援正則):")
         lbl_f.setFont(_ui_font(13, bold=True))
         vl.addWidget(lbl_f)
 
@@ -302,7 +316,7 @@ class TranslatePanel(QWidget):
 
         # 術語表標頭
         ghs = QHBoxLayout()
-        lbl_g = QLabel("術語表 (日文=中文):")
+        lbl_g = QLabel("術語表 (格式:原文=替代):")
         lbl_g.setFont(_ui_font(13, bold=True))
         ghs.addWidget(lbl_g)
 
@@ -320,43 +334,46 @@ class TranslatePanel(QWidget):
         ghs.addStretch()
         vl.addLayout(ghs)
 
-        # 術語表 tab 切換
-        tab_row = QHBoxLayout()
-        self._btn_tab_general = _make_btn("一般", "#2a3b4c", "#3a4b5c",
-                                          font=_ui_font(11), width=50)
-        self._btn_tab_general.setFixedHeight(22)
-        self._btn_tab_general.clicked.connect(lambda: self._switch_glossary_tab("一般"))
-        tab_row.addWidget(self._btn_tab_general)
+        # 術語表搜尋列（取代原本的 一般/臨時 tab）
+        search_row = QHBoxLayout()
+        self._gloss_search = QLineEdit()
+        self._gloss_search.setPlaceholderText("搜尋術語表… (Enter 跳到下一個)")
+        self._gloss_search.setFont(_ui_font(11))
+        self._gloss_search.setStyleSheet(
+            "background:#2a3b4c; color:#ddd; padding:2px 6px; border:1px solid #555;"
+            " border-radius:3px;")
+        self._gloss_search.textChanged.connect(self._search_glossary_from_top)
+        self._gloss_search.returnPressed.connect(self._search_glossary_next)
+        search_row.addWidget(self._gloss_search, 1)
 
-        self._btn_tab_temp = _make_btn("臨時", "#555555", "#4b2a2a",
-                                       font=_ui_font(11), width=50)
-        self._btn_tab_temp.setFixedHeight(22)
-        self._btn_tab_temp.clicked.connect(lambda: self._switch_glossary_tab("臨時"))
-        tab_row.addWidget(self._btn_tab_temp)
-        tab_row.addStretch()
-        vl.addLayout(tab_row)
+        self._gloss_search_status = QLabel("")
+        self._gloss_search_status.setFont(_ui_font(10))
+        self._gloss_search_status.setStyleSheet("color:#888;")
+        search_row.addWidget(self._gloss_search_status)
 
-        # 術語 QStackedWidget
-        self._gloss_stack = QStackedWidget()
+        btn_next = _make_btn("下一個", "#495057", "#3d4449",
+                             font=_ui_font(10), width=60)
+        btn_next.setFixedHeight(22)
+        btn_next.clicked.connect(self._search_glossary_next)
+        search_row.addWidget(btn_next)
+        vl.addLayout(search_row)
+
+        # 一般術語表
         self.glossary_text = QTextEdit()
         self.glossary_text.setFont(_aa_font(13))
         self.glossary_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.glossary_text.setAcceptRichText(False)
         self.glossary_text.setStyleSheet("background:#2a3b4c; color:#ddd;")
         self.glossary_text.textChanged.connect(self._main.schedule_save)
         self.glossary_text.textChanged.connect(
             lambda: QTimer.singleShot(100, self._check_glossary_duplicates))
+        vl.addWidget(self.glossary_text, 1)
 
+        # 臨時術語表：UI 已隱藏，但物件仍保留供 cache / AA_Settings.json I/O 使用。
+        # 不加入 layout 即不顯示。
         self.glossary_text_temp = QTextEdit()
-        self.glossary_text_temp.setFont(_aa_font(13))
-        self.glossary_text_temp.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self.glossary_text_temp.setStyleSheet("background:#3b2a2a; color:#ddd;")
+        self.glossary_text_temp.setAcceptRichText(False)
         self.glossary_text_temp.textChanged.connect(self._main.schedule_save)
-        self.glossary_text_temp.textChanged.connect(
-            lambda: QTimer.singleShot(100, self._check_glossary_duplicates))
-
-        self._gloss_stack.addWidget(self.glossary_text)
-        self._gloss_stack.addWidget(self.glossary_text_temp)
-        vl.addWidget(self._gloss_stack, 1)
 
         return w
 
@@ -372,10 +389,6 @@ class TranslatePanel(QWidget):
         btn_ext.clicked.connect(self._main.extract_text)
         hl.addWidget(btn_ext)
 
-        self.auto_copy_cb = QCheckBox("自動複製")
-        self.auto_copy_cb.setFont(_ui_font(12))
-        hl.addWidget(self.auto_copy_cb)
-
         hl.addStretch()
         return w
 
@@ -386,7 +399,7 @@ class TranslatePanel(QWidget):
         vl.setSpacing(4)
 
         top = QHBoxLayout()
-        lbl = QLabel("2. 提取結果:")
+        lbl = QLabel("提取結果:")
         lbl.setFont(_ui_font(13, bold=True))
         top.addWidget(lbl)
 
@@ -401,6 +414,13 @@ class TranslatePanel(QWidget):
             btn.setFixedHeight(24)
             btn.clicked.connect(lambda checked=False, h=half: self._main.copy_split(h))
             top.addWidget(btn)
+
+        add_filter_btn = _make_btn("加入自訂過濾", "#6f42c1", "#5a34a0",
+                                   font=_ui_font(10), width=110)
+        add_filter_btn.setFixedHeight(24)
+        add_filter_btn.setToolTip("將選取文字加入自訂過濾（自動去除流水號）")
+        add_filter_btn.clicked.connect(self._main.add_selection_to_filter)
+        top.addWidget(add_filter_btn)
         vl.addLayout(top)
 
         self.extracted_text = QTextEdit()
@@ -417,7 +437,7 @@ class TranslatePanel(QWidget):
         vl.setSpacing(4)
 
         top = QHBoxLayout()
-        lbl = QLabel("3. 填入翻譯:")
+        lbl = QLabel("填入翻譯:")
         lbl.setFont(_ui_font(13, bold=True))
         top.addWidget(lbl)
 
@@ -444,58 +464,62 @@ class TranslatePanel(QWidget):
         vl.addWidget(self.ai_text, 1)
         return w
 
-    # ── 術語表 tab 切換 ──
+    # ── 術語表搜尋 ──
 
-    def _switch_glossary_tab(self, tab: str) -> None:
-        self._glossary_tab = tab
-        if tab == "一般":
-            self._gloss_stack.setCurrentIndex(0)
-            self._btn_tab_general.setStyleSheet(
-                "QPushButton { background:#2a3b4c; color:white; padding:2px 8px;"
-                " border:none; border-radius:3px; }"
-                "QPushButton:hover { background:#3a4b5c; }")
-            self._btn_tab_temp.setStyleSheet(
-                "QPushButton { background:#555; color:white; padding:2px 8px;"
-                " border:none; border-radius:3px; }"
-                "QPushButton:hover { background:#666; }")
+    def _search_glossary_from_top(self, text: str) -> None:
+        """輸入框內容變動：從文件開頭重新搜尋第一個匹配。"""
+        if not text:
+            self._gloss_search_status.setText("")
+            cursor = self.glossary_text.textCursor()
+            cursor.clearSelection()
+            self.glossary_text.setTextCursor(cursor)
+            return
+        from PyQt6.QtGui import QTextCursor
+        cursor = self.glossary_text.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        self.glossary_text.setTextCursor(cursor)
+        if self.glossary_text.find(text):
+            self._gloss_search_status.setText("")
         else:
-            self._gloss_stack.setCurrentIndex(1)
-            self._btn_tab_general.setStyleSheet(
-                "QPushButton { background:#555; color:white; padding:2px 8px;"
-                " border:none; border-radius:3px; }"
-                "QPushButton:hover { background:#666; }")
-            self._btn_tab_temp.setStyleSheet(
-                "QPushButton { background:#3b2a2a; color:white; padding:2px 8px;"
-                " border:none; border-radius:3px; }"
-                "QPushButton:hover { background:#4b2a2a; }")
+            self._gloss_search_status.setText("找不到")
+
+    def _search_glossary_next(self) -> None:
+        """跳到下一個匹配；若到底則自動回到開頭再找一次。"""
+        text = self._gloss_search.text()
+        if not text:
+            return
+        if self.glossary_text.find(text):
+            self._gloss_search_status.setText("")
+            return
+        from PyQt6.QtGui import QTextCursor
+        cursor = self.glossary_text.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        self.glossary_text.setTextCursor(cursor)
+        if self.glossary_text.find(text):
+            self._gloss_search_status.setText("已從頭開始")
+        else:
+            self._gloss_search_status.setText("找不到")
 
     # ── 重複術語偵測 ──
 
     def _check_glossary_duplicates(self) -> None:
-        g1_lines = self.glossary_text.toPlainText().strip().split('\n')
-        g2_lines = self.glossary_text_temp.toPlainText().strip().split('\n')
-        key_positions: dict[str, list[tuple[str, int]]] = {}
-        for i, line in enumerate(g1_lines):
+        # 臨時術語表已隱藏；只檢查一般術語表。
+        g_lines = self.glossary_text.toPlainText().strip().split('\n')
+        key_positions: dict[str, list[int]] = {}
+        for i, line in enumerate(g_lines):
             if '=' in line:
                 key = line.split('=', 1)[0].strip()
                 if key:
-                    key_positions.setdefault(key, []).append(("一般", i))
-        for i, line in enumerate(g2_lines):
-            if '=' in line:
-                key = line.split('=', 1)[0].strip()
-                if key:
-                    key_positions.setdefault(key, []).append(("臨時", i))
+                    key_positions.setdefault(key, []).append(i)
 
-        dup_pos: list[tuple[str, int]] = []
-        dup_keys: list[str] = []
-        for key, positions in key_positions.items():
+        dup_pos: list[int] = []
+        for positions in key_positions.values():
             if len(positions) >= 2:
-                dup_keys.append(key)
                 dup_pos.extend(positions)
 
         self._glossary_dup_positions = dup_pos
         self._glossary_dup_cycle_idx = 0
-        if dup_keys:
+        if dup_pos:
             self._dup_label.setText("⚠ 術語有重複")
             self._dup_btn.show()
         else:
@@ -505,11 +529,10 @@ class TranslatePanel(QWidget):
     def _jump_to_glossary_dup(self) -> None:
         if not self._glossary_dup_positions:
             return
-        tab_name, line_idx = self._glossary_dup_positions[self._glossary_dup_cycle_idx]
+        line_idx = self._glossary_dup_positions[self._glossary_dup_cycle_idx]
         self._glossary_dup_cycle_idx = (
             self._glossary_dup_cycle_idx + 1) % len(self._glossary_dup_positions)
-        self._switch_glossary_tab(tab_name)
-        widget = self.glossary_text if tab_name == "一般" else self.glossary_text_temp
+        widget = self.glossary_text
         doc = widget.document()
         block = doc.findBlockByLineNumber(line_idx)
         if block.isValid():
@@ -566,13 +589,17 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self._invoke_on_main.connect(lambda fn: fn())
-        self.setWindowTitle("AA 漫畫翻譯輔助工具")
+        self.setWindowTitle("AA 創作翻譯輔助小工具")
         self.resize(1400, 900)
         self._dark_title_applied = False
 
         # ── 設定管理 ──
-        self.settings_mgr = SettingsManager(
-            os.path.dirname(os.path.abspath(__file__)))
+        # frozen（PyInstaller）時 __file__ 指向 _internal/；改用 exe 旁的目錄
+        if getattr(sys, 'frozen', False):
+            _base_dir = os.path.dirname(sys.executable)
+        else:
+            _base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.settings_mgr = SettingsManager(_base_dir)
         self.current_base_regex = DEFAULT_BASE_REGEX
         self.current_invalid_regex = DEFAULT_INVALID_REGEX
         self.current_symbol_regex = DEFAULT_SYMBOL_REGEX
@@ -591,6 +618,11 @@ class MainWindow(QMainWindow):
         self._editor_font_size: int = 12
         self._last_dir: str = ""
         self._editor_bg_color: str = "#ffffff"
+        self._auto_copy: bool = False
+        self._work_history_limit: int = 10
+        self._fetch_history_limit: int = 50
+        self._glossary_auto_search: bool = True
+        self._diff_save_mode: bool = False
         self._save_timer: QTimer | None = None
         self._saved_glossary_lines = 0
         self._saved_glossary_temp_lines = 0
@@ -638,6 +670,15 @@ class MainWindow(QMainWindow):
         # ── 載入設定 / 暫存 ──
         self._load_initial_state()
 
+        # ── 多程序共享歷史紀錄即時同步 ──
+        # 每 1.5 秒讀檔比對 url_history / work_history / url_related_links，
+        # 有變動就刷新 in-memory 並推送給 URL 抓取子程序（若在跑）。
+        # 不動編輯器中的文字。
+        self._sync_timer = QTimer(self)
+        self._sync_timer.setInterval(1500)
+        self._sync_timer.timeout.connect(self._refresh_shared_history)
+        self._sync_timer.start()
+
     def showEvent(self, event):
         super().showEvent(event)
         if not self._dark_title_applied:
@@ -651,7 +692,7 @@ class MainWindow(QMainWindow):
         hl.setContentsMargins(10, 4, 10, 4)
         hl.setSpacing(8)
 
-        btn_back = _make_btn("← 返回翻譯", "#6c757d", "#5a6268",
+        btn_back = _make_btn("← 返回首頁", "#6c757d", "#5a6268",
                              font=_ui_font(12), width=110)
         btn_back.setFixedHeight(28)
         btn_back.clicked.connect(self.show_translate_panel)
@@ -677,6 +718,12 @@ class MainWindow(QMainWindow):
         btn_apply.setFixedHeight(44)
         btn_apply.clicked.connect(self.apply_translation)
         hl.addWidget(btn_apply, 1)
+
+        btn_save = _make_btn("💾 替換翻譯並儲存", "#28a745", "#1e7e34",
+                             font=_ui_font(12), width=120)
+        btn_save.setFixedHeight(44)
+        btn_save.clicked.connect(self.apply_translation_and_save)
+        hl.addWidget(btn_save)
 
         btn_cache = _make_btn("📥 讀入暫存", "#17a2b8", "#138496",
                               font=_ui_font(12), width=120)
@@ -706,8 +753,14 @@ class MainWindow(QMainWindow):
     def show_edit_panel(self, file_path: str, scroll_to_line: int = 0,
                         original_text: str | None = None,
                         display_title: str = "",
-                        is_temp_file: bool = False) -> None:
-        """載入 HTML 至 EditWindow 並切換到編輯面板。"""
+                        is_temp_file: bool = False,
+                        back_callback=None) -> None:
+        """載入 HTML 至 EditWindow 並切換到編輯面板。
+
+        back_callback: 編輯器「返回」按鈕的目標面板。預設回翻譯面板；
+        從批次搜尋開啟時可傳入 `show_batch_panel` 以回到批次搜尋。
+        """
+        on_back = back_callback or self.show_translate_panel
         # 第一次建立 EditWindow
         if self._edit_window is None:
             self._edit_window = EditWindow(
@@ -718,7 +771,13 @@ class MainWindow(QMainWindow):
                 is_temp_file=is_temp_file,
                 glossary_provider=self._translate_panel.get_combined_glossary,
                 glossary_saver=self._save_glossary_entry,
-                on_back=self.show_translate_panel,
+                extract_regex_provider=lambda: (
+                    self.current_base_regex,
+                    self.current_invalid_regex,
+                    self.current_symbol_regex,
+                    self._translate_panel.get_filter_text(),
+                ),
+                on_back=on_back,
                 on_open=self.import_html,
                 on_save=self._on_edit_saved,
                 on_font_change=self._on_editor_font_changed,
@@ -753,7 +812,7 @@ class MainWindow(QMainWindow):
             header = display_title or os.path.basename(file_path)
             self._edit_window.setWindowTitle(
                 f"AA 編輯器 (PyQt6) — {header}")
-            self._edit_window._on_back = self.show_translate_panel
+            self._edit_window._on_back = on_back
             self._edit_window._on_open = self.import_html
             self._edit_window._on_save = self._on_edit_saved
             if scroll_to_line:
@@ -794,6 +853,8 @@ class MainWindow(QMainWindow):
                 folder=self._batch_folder,
                 on_open_file=self._on_batch_open_file,
                 on_folder_change=self._on_batch_folder_change,
+                on_add_to_glossary=self._save_glossary_entry,
+                glossary_auto_search=self._glossary_auto_search,
             )
             self.stack.removeWidget(self._batch_placeholder)
             self.stack.insertWidget(2, self._batch_window)
@@ -806,7 +867,12 @@ class MainWindow(QMainWindow):
 
     def _on_batch_open_file(self, file_path: str, line: int, folder: str) -> None:
         self._batch_folder = folder
-        self.show_edit_panel(file_path, scroll_to_line=line)
+        cached_original = self.load_original_for_file(file_path)
+        display_title = os.path.splitext(os.path.basename(file_path))[0]
+        self.show_edit_panel(file_path, scroll_to_line=line,
+                             original_text=cached_original,
+                             display_title=display_title,
+                             back_callback=self.show_batch_panel)
 
     def _on_batch_folder_change(self, folder: str) -> None:
         self._batch_folder = folder
@@ -851,7 +917,7 @@ class MainWindow(QMainWindow):
         self._translate_panel.extracted_text.setPlainText(output)
         self._translate_panel.ext_count_label.setText(
             f"(共提取 {len(extracted_set)} 行)")
-        if self._translate_panel.auto_copy_cb.isChecked():
+        if self._auto_copy:
             QApplication.clipboard().setText(output.strip())
             self.show_status(f"✅ 已提取 {len(extracted_set)} 行並複製到剪貼簿", "#0f0")
 
@@ -876,6 +942,33 @@ class MainWindow(QMainWindow):
         copied = len(text.split('\n')) if text else 0
         self.show_status(f"✅ 已複製{label}（{copied} 行）到剪貼簿", "#0f0")
 
+    def add_selection_to_filter(self) -> None:
+        p = self._translate_panel
+        cursor = p.extracted_text.textCursor()
+        selected = cursor.selectedText()
+        if not selected.strip():
+            self.show_status("⚠️ 請先選取要加入過濾器的文字", "#f39c12")
+            return
+        selected = selected.replace('\u2029', '\n')
+        id_prefix_re = _re_mod.compile(r'^\s*\d{2,4}-\d+\|')
+        new_lines: list[str] = []
+        for raw in selected.split('\n'):
+            stripped = id_prefix_re.sub('', raw).strip()
+            if stripped:
+                new_lines.append(stripped)
+        if not new_lines:
+            self.show_status("⚠️ 選取內容無可加入的文字", "#f39c12")
+            return
+        existing = p.get_filter_text().rstrip('\n')
+        existing_set = {l.strip() for l in existing.split('\n') if l.strip()}
+        added = [l for l in new_lines if l not in existing_set]
+        if not added:
+            self.show_status("ℹ️ 選取內容已存在於過濾器中", "#17a2b8")
+            return
+        combined = (existing + '\n' if existing else '') + '\n'.join(added)
+        p.filter_text.setPlainText(combined)
+        self.show_status(f"✅ 已加入 {len(added)} 行至自訂過濾規則", "#0f0")
+
     def validate_ai_text(self) -> None:
         ai_content = self._translate_panel.get_ai_text().strip()
         lbl = self._translate_panel._ai_warn_label
@@ -897,40 +990,95 @@ class MainWindow(QMainWindow):
         if result is not None:
             self._translate_panel.doc_num.setText(str(result))
 
-    def apply_translation(self) -> None:
+    def _prepare_translation(self) -> tuple[str, str, str, str] | None:
+        """共用的翻譯前處理：驗證輸入、執行替換、回傳 (result_text, source,
+        name_base, display_title)；失敗時回傳 None 並已顯示 toast。"""
         if self.stack.currentIndex() != 0:
-            return
+            return None
         source = self._translate_panel.get_source_text()
         extracted = self._translate_panel.get_extracted_text()
         translated = self._translate_panel.get_ai_text()
         if not source.strip() or not extracted.strip() or not translated.strip():
             self.show_status(
                 "⚠️ 請確保原始文本、提取結果和翻譯結果都有內容！", "#f39c12")
-            return
+            return None
         self.save_cache()
-        # 記錄作品+作者歷史（只有按下此按鈕才記）
         self._record_work_history()
+        # 覆蓋率檢查：提取出的 ID 中有幾條能對應到翻譯 ID；低於 50% 代表
+        # AI 翻譯可能漏譯或錯行，跳 Toast 提示（不中斷流程）。
+        extracted_ids = {
+            line.split('|', 1)[0].strip()
+            for line in extracted.split('\n') if '|' in line
+        }
+        translated_ids = {
+            line.split('|', 1)[0].strip()
+            for line in translated.split('\n') if '|' in line
+        }
+        if extracted_ids:
+            matched = len(extracted_ids & translated_ids)
+            ratio = matched / len(extracted_ids)
+            if ratio < 0.50:
+                self.show_status(
+                    f"⚠️ 原文跟翻譯可能不對應（對應率 {ratio:.0%}）", "#f39c12")
         glossary = parse_glossary(self._translate_panel.get_combined_glossary())
         result_text = _apply_translation(source, extracted, translated, glossary)
-        # 以標題+話數命名暫存檔，讓視窗標題與儲存預設名都能正確顯示
         title = self._translate_panel.get_doc_title().strip() or "未命名"
         num = self._translate_panel.get_doc_num().strip()
         safe_title = _re_mod.sub(r'[\\/:*?"<>|]', '_', title)
         safe_num = _re_mod.sub(r'[\\/:*?"<>|]', '_', num)
         name_base = f"{safe_title}_{safe_num}" if safe_num else safe_title
         display_title = f"{title}_{num}" if num else title
+        return result_text, source, name_base, display_title
+
+    def apply_translation(self) -> None:
+        prepared = self._prepare_translation()
+        if prepared is None:
+            return
+        result_text, source, name_base, display_title = prepared
         tmp = os.path.join(tempfile.gettempdir(), f"{name_base}.html")
         try:
             write_html_file(tmp, result_text)
         except OSError as e:
             self.show_status(f"❌ 寫入暫存失敗: {e}", "#dc3545")
             return
+        # 立即暫存原文，避免使用者之後不經編輯器儲存流程時 cache 缺漏
+        self.save_original_for_file(tmp, source.rstrip('\n'))
         self.show_edit_panel(
             tmp,
             original_text=source.rstrip('\n'),
             display_title=display_title,
             is_temp_file=True,
         )
+
+    def apply_translation_and_save(self) -> None:
+        """執行翻譯替換後，直接透過 QFileDialog 詢問路徑並存檔，
+        不進入編輯器。"""
+        prepared = self._prepare_translation()
+        if prepared is None:
+            return
+        result_text, source, name_base, _display_title = prepared
+        default_dir = self._last_dir or os.getcwd()
+        default_path = os.path.join(default_dir, f"{name_base}.html")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "翻譯並直接儲存 — 選擇存檔位置",
+            default_path,
+            "HTML files (*.html);;All files (*.*)")
+        if not file_path:
+            return
+        if not file_path.lower().endswith('.html'):
+            file_path += '.html'
+        try:
+            write_html_file(file_path, result_text)
+        except OSError as e:
+            self.show_status(f"❌ 寫入失敗: {e}", "#dc3545")
+            return
+        # 直接儲存路徑不進編輯器，必須立刻把原文寫入 cache，
+        # 否則之後從批次搜尋開啟時 Alt+2 比對原文會是空的。
+        self.save_original_for_file(file_path, source.rstrip('\n'))
+        self._last_dir = os.path.dirname(file_path)
+        self.schedule_save()
+        self.show_status(
+            f"✅ 已儲存至 {os.path.basename(file_path)}", "#28a745")
 
     def import_html(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
@@ -1018,7 +1166,7 @@ class MainWindow(QMainWindow):
             self.show_status("⚠️ 尚未讀取過網址！", "#f39c12")
 
     def _update_work_title(self, work_title: str = "") -> None:
-        base = "AA 漫畫翻譯輔助工具"
+        base = "AA 創作翻譯輔助小工具"
         self.setWindowTitle(f"{base} — {work_title}" if work_title else base)
 
     # ════════════════════════════════════════════════════════════
@@ -1039,7 +1187,19 @@ class MainWindow(QMainWindow):
         show_toast(self, message, color=bg, duration=dur)
 
     # ════════════════════════════════════════════════════════════
-    #  URL 抓取（subprocess + IPC，與 customtkinter 版邏輯相同）
+    #  Wiki 角色日中對照抓取（非 modal QDialog）
+    # ════════════════════════════════════════════════════════════
+
+    def open_wiki_name_dialog(self) -> None:
+        from aa_wiki_name_dialog_qt import WikiNameDialog
+        if getattr(self, "_wiki_dialog", None) is None:
+            self._wiki_dialog = WikiNameDialog(self)
+        self._wiki_dialog.show()
+        self._wiki_dialog.raise_()
+        self._wiki_dialog.activateWindow()
+
+    # ════════════════════════════════════════════════════════════
+    #  URL 抓取（subprocess 啟動 aa_url_fetch_qt.py + JSON IPC）
     # ════════════════════════════════════════════════════════════
 
     def open_url_fetch_qt(self) -> None:
@@ -1111,7 +1271,7 @@ class MainWindow(QMainWindow):
             )
         elif action == 'clear_history':
             self.url_history = []
-            self.schedule_save()
+            self.settings_mgr.clear_url_history()
             self._write_url_fetch_reverse({'action': 'history_cleared',
                                            'url_history': []})
         elif action == 'close_sync':
@@ -1237,11 +1397,14 @@ class MainWindow(QMainWindow):
                 self.url_related_links = nav_links
                 self.current_url = raw_url
                 hist = {'url': raw_url, 'title': page_title or raw_url}
+                # 持久化：鎖定 append（多程序安全）+ per-URL 相關連結
+                self.settings_mgr.append_url_history(hist, max_items=self._fetch_history_limit)
+                self.settings_mgr.update_url_related_links(raw_url, nav_links)
+                # 同步 in-memory（newest-last 慣例）
                 self.url_history = [h for h in self.url_history
-                                    if h['url'] != raw_url]
+                                    if h.get('url') != raw_url]
                 self.url_history.append(hist)
-                if len(self.url_history) > 50:
-                    self.url_history = self.url_history[-50:]
+                self.url_history = self.url_history[-self._fetch_history_limit:]
                 self.schedule_save()
                 line_count = text_content.count('\n') + 1
                 self.show_status(f"✅ 網址讀取成功！共 {line_count} 行", "#0f0")
@@ -1329,11 +1492,14 @@ class MainWindow(QMainWindow):
                     self.url_related_links = nav_links
                     self.current_url = next_url
                     hist = {'url': next_url, 'title': page_title or next_url}
+                    # 持久化：鎖定 append（多程序安全）+ per-URL 相關連結
+                    self.settings_mgr.append_url_history(hist, max_items=self._fetch_history_limit)
+                    self.settings_mgr.update_url_related_links(next_url, nav_links)
+                    # 同步 in-memory（newest-last）
                     self.url_history = [h for h in self.url_history
-                                        if h['url'] != next_url]
+                                        if h.get('url') != next_url]
                     self.url_history.append(hist)
-                    if len(self.url_history) > 50:
-                        self.url_history = self.url_history[-50:]
+                    self.url_history = self.url_history[-self._fetch_history_limit:]
                     self.schedule_save()
                     self.show_status(
                         f"✅ 讀取成功！共 {text_content.count(chr(10)) + 1} 行",
@@ -1374,7 +1540,7 @@ class MainWindow(QMainWindow):
             url_history=self.url_history,
             url_related_links=self.url_related_links,
             current_url=self.current_url,
-            auto_copy=p.auto_copy_cb.isChecked(),
+            auto_copy=self._auto_copy,
             batch_folder=self._batch_folder,
             author_name=self._author_name,
             author_only=self._author_only,
@@ -1383,6 +1549,10 @@ class MainWindow(QMainWindow):
             editor_font_size=self._editor_font_size,
             last_open_dir=self._last_dir,
             editor_bg_color=self._editor_bg_color,
+            work_history_limit=self._work_history_limit,
+            fetch_history_limit=self._fetch_history_limit,
+            glossary_auto_search=self._glossary_auto_search,
+            diff_save_mode=self._diff_save_mode,
         )
 
     def _apply_cache(self, cache: AppCache) -> None:
@@ -1405,8 +1575,7 @@ class MainWindow(QMainWindow):
             self.url_related_links = cache.url_related_links
         if cache.current_url:
             self.current_url = cache.current_url
-        if cache.auto_copy:
-            p.auto_copy_cb.setChecked(True)
+        self._auto_copy = bool(cache.auto_copy)
         if cache.batch_folder:
             self._batch_folder = cache.batch_folder
         if cache.author_name:
@@ -1422,6 +1591,10 @@ class MainWindow(QMainWindow):
             self._last_dir = cache.last_open_dir
         if cache.editor_bg_color:
             self._editor_bg_color = cache.editor_bg_color
+        self._work_history_limit = max(1, int(cache.work_history_limit or 10))
+        self._fetch_history_limit = max(1, int(cache.fetch_history_limit or 50))
+        self._glossary_auto_search = bool(cache.glossary_auto_search)
+        self._diff_save_mode = bool(cache.diff_save_mode)
 
     def save_cache(self) -> None:
         self.settings_mgr.save_cache(self._gather_cache())
@@ -1429,6 +1602,40 @@ class MainWindow(QMainWindow):
     def load_cache(self) -> None:
         cache = self.settings_mgr.load_cache()
         self._apply_cache(cache)
+
+    def open_settings_dialog(self) -> None:
+        from aa_settings_dialog_qt import SettingsDialog
+        dlg = SettingsDialog(
+            self,
+            auto_copy=self._auto_copy,
+            work_history_limit=self._work_history_limit,
+            fetch_history_limit=self._fetch_history_limit,
+            glossary_auto_search=self._glossary_auto_search,
+            diff_save_mode=self._diff_save_mode,
+            orig_cache_path=self._orig_cache_path(),
+            on_apply=self._on_settings_applied,
+        )
+        dlg.exec()
+
+    def _on_settings_applied(self, values: dict) -> None:
+        self._auto_copy = bool(values.get('auto_copy', self._auto_copy))
+        self._work_history_limit = max(1, int(values.get(
+            'work_history_limit', self._work_history_limit)))
+        self._fetch_history_limit = max(1, int(values.get(
+            'fetch_history_limit', self._fetch_history_limit)))
+        self._glossary_auto_search = bool(values.get(
+            'glossary_auto_search', self._glossary_auto_search))
+        self._diff_save_mode = bool(values.get(
+            'diff_save_mode', self._diff_save_mode))
+        if self._batch_window is not None:
+            self._batch_window.glossary_auto_search = self._glossary_auto_search
+        # 立即修剪現有歷史以符合新上限
+        if len(self.work_history) > self._work_history_limit:
+            self.work_history = self.work_history[:self._work_history_limit]
+        if len(self.url_history) > self._fetch_history_limit:
+            self.url_history = self.url_history[-self._fetch_history_limit:]
+        self.save_cache()
+        self.show_status("✅ 設定已套用", "#0f0")
 
     def _load_initial_state(self) -> None:
         self.load_cache()
@@ -1454,10 +1661,19 @@ class MainWindow(QMainWindow):
     def export_settings(self) -> None:
         self.save_cache()
         p = self._translate_panel
+        cur_filter = p.get_filter_text().strip()
+        cur_glossary = p.get_glossary_text().strip()
+        cur_glossary_temp = p.get_glossary_temp_text().strip()
+        if self._diff_save_mode:
+            existing = self.settings_mgr.load_settings()
+            cur_filter = merge_filter_diff(existing.filter_text, cur_filter)
+            cur_glossary = merge_glossary_diff(existing.glossary, cur_glossary)
+            cur_glossary_temp = merge_glossary_diff(
+                existing.glossary_temp, cur_glossary_temp)
         settings = AppSettings(
-            filter_text=p.get_filter_text().strip(),
-            glossary=p.get_glossary_text().strip(),
-            glossary_temp=p.get_glossary_temp_text().strip(),
+            filter_text=cur_filter,
+            glossary=cur_glossary,
+            glossary_temp=cur_glossary_temp,
             base_regex=self.current_base_regex,
             invalid_regex=self.current_invalid_regex,
             symbol_regex=self.current_symbol_regex,
@@ -1467,7 +1683,8 @@ class MainWindow(QMainWindow):
             self._saved_glossary_lines = self._count_nonempty(settings.glossary)
             self._saved_glossary_temp_lines = self._count_nonempty(settings.glossary_temp)
             self._saved_filter_lines = self._count_nonempty(settings.filter_text)
-            self.show_status("✅ 設定儲存成功！", "#0f0")
+            tag = "（合併差異）" if self._diff_save_mode else ""
+            self.show_status(f"✅ 設定儲存成功！{tag}", "#0f0")
         except Exception as e:
             self.show_status(f"❌ 設定儲存失敗: {e}", "#dc3545")
 
@@ -1484,6 +1701,9 @@ class MainWindow(QMainWindow):
             self.current_base_regex = settings.base_regex
             self.current_invalid_regex = settings.invalid_regex
             self.current_symbol_regex = settings.symbol_regex
+            self._saved_glossary_lines = self._count_nonempty(settings.glossary or "")
+            self._saved_glossary_temp_lines = self._count_nonempty(settings.glossary_temp or "")
+            self._saved_filter_lines = self._count_nonempty(settings.filter_text or "")
             self.save_cache()
             self.show_status("✅ 設定已成功讀取！", "#0f0")
         except Exception:
@@ -1494,10 +1714,8 @@ class MainWindow(QMainWindow):
         self.show_status("✅ 暫存讀取成功！", "#0f0")
 
     # ════════════════════════════════════════════════════════════
-    #  原文暫存 (依檔名索引，上限 50)
+    #  原文暫存 (依檔名索引，上限由 self._fetch_history_limit 控制)
     # ════════════════════════════════════════════════════════════
-
-    _ORIG_CACHE_LIMIT = 50
 
     def _orig_cache_path(self) -> str:
         return os.path.join(
@@ -1526,6 +1744,29 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
 
+    # 指紋：從第一個投稿標頭抽出「日期 + 時間.毫秒 + ID」組合，例：
+    #   "2023/04/02(日) 20:54:38.52 ID:5UkYdPSV"
+    # 這部分由伺服器產生，翻譯流程不會動到，可作為檔名外的備援索引。
+    _AUTHOR_FP_FULL_RE = _re_mod.compile(
+        r'\d{4}/\d{1,2}/\d{1,2}\([^)\s]+\)\s*\d{1,2}:\d{2}:\d{2}(?:\.\d+)?'
+        r'\s*ID:[A-Za-z0-9+/]+'
+    )
+    # fallback：無 ID 的老格式（5ch 早期），只取日期 + 時間
+    _AUTHOR_FP_DATE_RE = _re_mod.compile(
+        r'\d{4}/\d{1,2}/\d{1,2}\([^)\s]+\)\s*\d{1,2}:\d{2}:\d{2}(?:\.\d+)?'
+    )
+
+    @classmethod
+    def _compute_author_fingerprint(cls, text: str) -> str | None:
+        if not text:
+            return None
+        m = cls._AUTHOR_FP_FULL_RE.search(text)
+        if not m:
+            m = cls._AUTHOR_FP_DATE_RE.search(text)
+        if not m:
+            return None
+        return _re_mod.sub(r'\s+', ' ', m.group(0)).strip()
+
     def save_original_for_file(self, file_path: str,
                                original_text: str) -> None:
         if not file_path or not original_text:
@@ -1533,24 +1774,50 @@ class MainWindow(QMainWindow):
         # 讀回現有資料再合併（保留其他執行緒/進程已寫入的條目）
         data = self._load_orig_cache_data()
         key = os.path.basename(file_path)
-        data[key] = {'text': original_text, 'ts': time.time()}
+        entry: dict = {'text': original_text, 'ts': time.time()}
+        fp = self._compute_author_fingerprint(original_text)
+        if fp:
+            entry['author_key'] = fp
+        data[key] = entry
         # 上限裁切（依時間戳保留最新的 N 筆）
-        if len(data) > self._ORIG_CACHE_LIMIT:
+        if len(data) > self._fetch_history_limit:
             ordered = sorted(data.items(),
                              key=lambda kv: kv[1].get('ts', 0),
                              reverse=True)
-            data = dict(ordered[:self._ORIG_CACHE_LIMIT])
+            data = dict(ordered[:self._fetch_history_limit])
         self._save_orig_cache_data(data)
 
     def load_original_for_file(self, file_path: str) -> str | None:
         if not file_path:
             return None
         data = self._load_orig_cache_data()
+        # 第一層：依檔名 basename 查
         entry = data.get(os.path.basename(file_path))
-        if not isinstance(entry, dict):
+        if isinstance(entry, dict):
+            text = entry.get('text')
+            if isinstance(text, str) and text:
+                return text
+        # 第二層：以「投稿標頭指紋」作備援索引（檔名被改過時仍能命中）
+        try:
+            pre = read_html_pre_content(file_path)
+        except OSError:
             return None
-        text = entry.get('text')
-        return text if isinstance(text, str) and text else None
+        if not pre:
+            return None
+        target_fp = self._compute_author_fingerprint(pre)
+        if not target_fp:
+            return None
+        for cached_entry in data.values():
+            if not isinstance(cached_entry, dict):
+                continue
+            cached_text = cached_entry.get('text')
+            if not isinstance(cached_text, str) or not cached_text:
+                continue
+            entry_fp = (cached_entry.get('author_key')
+                        or self._compute_author_fingerprint(cached_text))
+            if entry_fp == target_fp:
+                return cached_text
+        return None
 
     def _on_editor_bg_changed(self, color: str) -> None:
         self._editor_bg_color = color
@@ -1580,10 +1847,8 @@ class MainWindow(QMainWindow):
                 file_path, self._edit_window._original_text)
 
     # ════════════════════════════════════════════════════════════
-    #  作品 + 作者 歷史記錄 (最多 10 筆)
+    #  作品 + 作者 歷史記錄 (上限由 self._work_history_limit 控制)
     # ════════════════════════════════════════════════════════════
-
-    _WORK_HISTORY_LIMIT = 10
 
     def _record_work_history(self) -> None:
         """按下替換翻譯時呼叫，將當前 (title, author) 記入歷史。"""
@@ -1593,12 +1858,15 @@ class MainWindow(QMainWindow):
         if not title and not author:
             return
         pair = {'title': title, 'author': author}
+        # 持久化：直接對檔案做鎖定 append（多程序安全，不會被其他程序蓋掉）
+        self.settings_mgr.append_work_history(pair,
+                                              max_items=self._work_history_limit)
+        # 同步 in-memory 副本供 UI 立即使用
         history = [h for h in getattr(self, 'work_history', [])
                    if not (h.get('title') == title
                            and h.get('author') == author)]
         history.insert(0, pair)
-        self.work_history = history[:self._WORK_HISTORY_LIMIT]
-        self.schedule_save()
+        self.work_history = history[:self._work_history_limit]
 
     def show_work_history_menu(self) -> None:
         history = getattr(self, 'work_history', [])
@@ -1616,6 +1884,38 @@ class MainWindow(QMainWindow):
         btn = self._translate_panel.btn_work_history
         pos = btn.mapToGlobal(btn.rect().bottomLeft())
         menu.exec(pos)
+
+    def _refresh_shared_history(self) -> None:
+        """每 1.5 秒讀檔比對共享歷史欄位；有變動即刷新 in-memory + 推子程序。
+
+        改用「直接比對內容」而非 mtime，避免某些檔案系統 mtime 解析度只有 1～2 秒
+        造成兩個程序同秒寫入時漏偵測。peek 對小 JSON 開銷微小。
+        """
+        try:
+            state = self.settings_mgr.peek_shared_state(self.current_url)
+        except Exception:
+            return
+        new_url_hist = list(state['url_history'])
+        new_work_hist = list(state['work_history'])
+        url_changed = new_url_hist != self.url_history
+        work_changed = new_work_hist != self.work_history
+        rel = state['url_related_links']
+        rel_changed = bool(rel) and list(rel) != self.url_related_links
+        if not (url_changed or work_changed or rel_changed):
+            return
+        self.url_history = new_url_hist
+        self.work_history = new_work_hist
+        if rel_changed:
+            self.url_related_links = list(rel)
+        # 若有 URL 抓取子程序在跑，將最新 url_history 推送過去即時刷新
+        if (url_changed or rel_changed) and getattr(
+                self, '_url_fetch_qt_process', None):
+            self._write_url_fetch_reverse({
+                'action': 'history_updated',
+                'url_history': self.url_history,
+                'url_related_links': self.url_related_links,
+                'current_url': self.current_url,
+            })
 
     def _apply_work_history(self, entry: dict) -> None:
         p = self._translate_panel
@@ -1666,6 +1966,8 @@ class MainWindow(QMainWindow):
 # ════════════════════════════════════════════════════════════
 
 def main() -> None:
+    from aa_tool.crash_logger import install_crash_logger
+    install_crash_logger()
     app = QApplication(sys.argv)
     load_bundled_fonts()
     qss_path = os.path.join(

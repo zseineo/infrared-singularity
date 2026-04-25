@@ -21,7 +21,7 @@ import sys
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import (
     QColor, QFont, QFontDatabase, QFontMetricsF, QKeySequence, QShortcut,
-    QTextBlockFormat, QTextCursor, QTextDocument,
+    QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument,
 )
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QFileDialog, QHBoxLayout,
@@ -35,11 +35,12 @@ from aa_tool.bubble_alignment import (
     align_to_prev_line as _align_to_prev_line,
 )
 from aa_tool.html_io import (
-    read_html_bg_color, read_html_pre_content, write_html_file,
+    read_html_bg_color, read_html_head, read_html_pre_content, write_html_file,
 )
 from aa_tool.qt_helpers import show_toast
+from aa_tool.text_extraction import extract_text as _extract_text
 from aa_tool.translation_engine import (
-    apply_glossary_to_text, parse_glossary,
+    apply_glossary_to_text, apply_reverse_glossary_to_text, parse_glossary,
 )
 
 LINE_HEIGHT_PERCENT = 120  # 對應 CSS line-height: 1.2，與瀏覽器顯示一致
@@ -47,8 +48,7 @@ DEFAULT_BG = "#ffffff"
 DEFAULT_COLOR = "#ff0000"
 DEFAULT_EDITOR_FONT = "MS PGothic"  # ⚠️ 請勿改動：AA 對齊計算依賴此字體的 metrics
 DEFAULT_EDITOR_FONT_SIZE = 12
-EDITOR_FONT_CHOICES = ["Monapo", "submona", "MS PGothic", "Meiryo", "Consolas",
-                       "Microsoft JhengHei", "MingLiU"]
+EDITOR_FONT_CHOICES = ["MS PGothic", "Monapo"]
 
 # 專案內建字體（fonts/ 資料夾），Qt 啟動後呼叫一次
 _BUNDLED_FONTS_LOADED = False
@@ -72,11 +72,34 @@ class QtFontMeasurer:
     def __init__(self, font: QFont) -> None:
         self._fm = QFontMetricsF(font)
 
-    def measure(self, text: str) -> int:
-        return int(round(self._fm.horizontalAdvance(text)))
+    def measure(self, text: str) -> float:
+        return self._fm.horizontalAdvance(text)
 
 _COLOR_SPAN_OPEN_RE = re.compile(r'<span\s+style="color:[^"]*">')
 _COLOR_SPAN_CLOSE = '</span>'
+
+
+def _css_color_to_qcolor(css: str) -> 'QColor':
+    """將 CSS 顏色字串（#rrggbb、rgb(r,g,b)、rgba(r,g,b,a)、名稱）轉為 QColor。"""
+    s = css.strip()
+    if s.startswith('rgb(') and s.endswith(')'):
+        parts = s[4:-1].split(',')
+        if len(parts) == 3:
+            try:
+                r, g, b = (int(p.strip()) for p in parts)
+                return QColor(r, g, b)
+            except ValueError:
+                pass
+    elif s.startswith('rgba(') and s.endswith(')'):
+        parts = s[5:-1].split(',')
+        if len(parts) == 4:
+            try:
+                r, g, b = (int(p.strip()) for p in parts[:3])
+                a = round(float(parts[3].strip()) * 255)
+                return QColor(r, g, b, a)
+            except ValueError:
+                pass
+    return QColor(s)
 
 
 def _make_button(text: str, color: str, hover: str, *,
@@ -107,6 +130,7 @@ class EditWindow(QMainWindow):
         # Embedded mode: pass callables instead of IPC
         glossary_provider=None,   # () -> str
         glossary_saver=None,      # (orig: str, trans: str) -> None
+        extract_regex_provider=None,  # () -> (base, invalid, symbol, filter_str)
         on_back=None,             # () -> None; embedded 模式回主畫面
         on_open=None,             # () -> None; 開啟已儲存的 HTML
         on_save=None,             # (file_path: str) -> None; 儲存成功後通知
@@ -129,6 +153,7 @@ class EditWindow(QMainWindow):
         # ── Callback（embedded 模式）──
         self._glossary_provider = glossary_provider
         self._glossary_saver = glossary_saver
+        self._extract_regex_provider = extract_regex_provider
         self._on_back = on_back
         self._on_open = on_open
         self._on_save = on_save
@@ -155,6 +180,7 @@ class EditWindow(QMainWindow):
             except OSError:
                 self._original_text = None
         self._compare_active = False
+        self._preview_active = False
         self._edit_buttons: list[QPushButton | QLineEdit | QCheckBox] = []
         self._toolbar_widget: QWidget | None = None
 
@@ -163,6 +189,7 @@ class EditWindow(QMainWindow):
         except OSError as e:
             QMessageBox.critical(self, "讀取失敗", f"無法讀取檔案：\n{e}")
             text = ""
+        self._custom_head = read_html_head(html_file) if html_file else None
         # init_bg（使用者上次調整的顯示底色）優先，
         # 找不到時再嘗試從 HTML 讀取（舊版相容）
         if init_bg:
@@ -211,9 +238,15 @@ class EditWindow(QMainWindow):
             self.orig_view.setPlainText(self._original_text)
             self._apply_line_height_to(self.orig_view)
 
+        self.preview_view = QTextEdit()
+        self.preview_view.setReadOnly(True)
+        self.preview_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.preview_view.setFont(aa_font)
+
         self.stack = QStackedWidget()
-        self.stack.addWidget(self.editor)      # index 0
-        self.stack.addWidget(self.orig_view)   # index 1
+        self.stack.addWidget(self.editor)        # index 0
+        self.stack.addWidget(self.orig_view)     # index 1
+        self.stack.addWidget(self.preview_view)  # index 2
 
         self._apply_editor_colors()
         self._apply_line_height()
@@ -227,11 +260,21 @@ class EditWindow(QMainWindow):
         QShortcut(QKeySequence.StandardKey.Save, self, activated=self._save_overwrite)
         QShortcut(QKeySequence.StandardKey.Find, self,
                   activated=self._toggle_search)
-        QShortcut(QKeySequence("Esc"), self, activated=self._hide_search)
-        QShortcut(QKeySequence("Ctrl+Q"), self,
+        QShortcut(QKeySequence("Esc"), self, activated=self._on_escape)
+        QShortcut(QKeySequence("Alt+Q"), self,
                   activated=self._smart_action)
-        QShortcut(QKeySequence("Ctrl+W"), self,
+        QShortcut(QKeySequence("Alt+W"), self,
+                  activated=self._restore_from_original)
+        QShortcut(QKeySequence("Alt+1"), self,
+                  activated=self._return_to_editor)
+        QShortcut(QKeySequence("Alt+2"), self,
                   activated=self._toggle_compare)
+        QShortcut(QKeySequence("Alt+3"), self,
+                  activated=self._toggle_preview)
+        QShortcut(QKeySequence("Alt+E"), self,
+                  activated=self._reverse_glossary_replace)
+        QShortcut(QKeySequence("Alt+C"), self,
+                  activated=self._extract_jp_from_selection)
 
         if scroll_to_line and scroll_to_line > 0:
             self._scroll_to_line(scroll_to_line)
@@ -319,7 +362,7 @@ class EditWindow(QMainWindow):
 
         btn_smart = _make_button("自動判斷", "#e67e22", "#d35400", width=75)
         btn_smart.clicked.connect(self._smart_action)
-        btn_smart.setToolTip("Ctrl+Q：依選取狀態自動執行對話框修正/上色/對齊")
+        btn_smart.setToolTip("Alt+Q：依選取狀態自動執行對話框修正/上色/對齊")
         tb.addWidget(btn_smart)
 
         btn_bubble_all = _make_button("對話框(全)", "#20c997", "#17a085", width=85)
@@ -353,7 +396,8 @@ class EditWindow(QMainWindow):
 
         if self._on_back is not None:
             btn_back = _make_button("← 返回", "#6c757d", "#5a6268", width=70)
-            btn_back.clicked.connect(self._on_back)
+            btn_back.clicked.connect(
+                lambda: self._on_back() if self._on_back else None)
             tb.addWidget(btn_back)
         else:
             btn_close = _make_button("關閉", "#dc3545", "#c82333", width=50)
@@ -441,9 +485,9 @@ class EditWindow(QMainWindow):
         )
         if hasattr(self, "orig_view"):
             self.orig_view.setStyleSheet(
-                "QTextEdit { background:#f5f5f5;"
-                " color:#000000;"
-                " border:1px solid #cccccc;"
+                f"QTextEdit {{ background:{self._bg_color};"
+                f" color:#000000;"
+                f" border:1px solid #cccccc;"
                 f" font-family:'{fam}';"
                 f" font-size:{sz}pt; }}"
             )
@@ -488,6 +532,16 @@ class EditWindow(QMainWindow):
     def _hide_search(self) -> None:
         self.search_bar.hide()
         self.editor.setFocus()
+
+    def _on_escape(self) -> None:
+        """ESC 行為：搜尋列開啟時優先關閉；否則執行返回（或關閉視窗）。"""
+        if self.search_bar.isVisible():
+            self._hide_search()
+            return
+        if self._on_back is not None:
+            self._on_back()
+        else:
+            self.close()
 
     def _find_next(self) -> None:
         query = self.search_entry.text()
@@ -686,6 +740,29 @@ class EditWindow(QMainWindow):
         cursor.insertText(stripped)
         self._set_status("已消除選取範圍的空白", "#0f0")
 
+    def _reverse_glossary_replace(self) -> None:
+        """Alt+E：選取範圍內的「替代文字」還原回「原文」。"""
+        if self._glossary_provider is None:
+            self._set_status("⚠️ 無法取得術語表", "#ffc107")
+            return
+        cursor = self.editor.textCursor()
+        if not cursor.hasSelection():
+            self._set_status("⚠️ 請先選取要反向替代的文字", "#ffc107")
+            return
+        glossary_str = self._glossary_provider() or ""
+        glossary = parse_glossary(glossary_str)
+        if not glossary:
+            self._set_status("⚠️ 術語表為空", "#ffc107")
+            return
+        selected = cursor.selectedText().replace('\u2029', '\n')
+        new_text = apply_reverse_glossary_to_text(selected, glossary)
+        if new_text == selected:
+            self._set_status("ℹ️ 選取範圍中沒有可還原的術語", "#17a2b8")
+            return
+        cursor.insertText(new_text)
+        self._apply_line_height()
+        self._set_status("✅ 已反向替代", "#0f0")
+
     def _pad_spaces(self) -> None:
         cursor = self.editor.textCursor()
         if not cursor.hasSelection():
@@ -756,11 +833,11 @@ class EditWindow(QMainWindow):
         doc = self.editor.document()
         prev_block = doc.findBlockByLineNumber(line_idx - 1)
         curr_block = doc.findBlockByLineNumber(line_idx)
-        prev_text = prev_block.text().rstrip('\r\n \u3000')
+        prev_text = prev_block.text().rstrip('\r\n \u3000\u2029')
         if not prev_text:
             self._set_status("⚠️ 上一行為空，無法對齊", "#ffc107")
             return
-        curr_text = curr_block.text()
+        curr_text = curr_block.text().rstrip('\u2029')
 
         result = _align_to_prev_line(
             prev_text, curr_text, col_idx, self._measurer)
@@ -867,11 +944,20 @@ class EditWindow(QMainWindow):
         if self._original_text is None:
             self._set_status("⚠️ 無原文可供比對", "#ffc107")
             return
-        self._compare_active = not self._compare_active
+        # 若預覽模式開啟，先沿用其捲動位置切換過去（不必先回編輯模式）
+        if self._preview_active:
+            scroll_val = self.preview_view.verticalScrollBar().value()
+            self._preview_active = False
+            self._set_preview_ui(False)
+            self._compare_active = True
+        else:
+            self._compare_active = not self._compare_active
+            scroll_val = None
         if self._compare_active:
             cursor = self.editor.textCursor()
             line = cursor.blockNumber()
-            scroll_val = self.editor.verticalScrollBar().value()
+            if scroll_val is None:
+                scroll_val = self.editor.verticalScrollBar().value()
             self.stack.setCurrentIndex(1)
             # 同步游標到相同行
             block = self.orig_view.document().findBlockByLineNumber(line)
@@ -881,7 +967,7 @@ class EditWindow(QMainWindow):
                 self.orig_view.setTextCursor(oc)
             self.orig_view.verticalScrollBar().setValue(scroll_val)
             self._set_compare_ui(True)
-            self._set_status("🔍 比對模式：顯示原文（Ctrl+W 切回）", "#0f0")
+            self._set_status("🔍 比對模式：顯示原文（Alt+1 編輯／Alt+3 預覽）", "#0f0")
         else:
             scroll_val = self.orig_view.verticalScrollBar().value()
             self.stack.setCurrentIndex(0)
@@ -897,6 +983,183 @@ class EditWindow(QMainWindow):
             bg = "#8b6f47" if compare else "#343a40"
             self._toolbar_widget.setStyleSheet(
                 f"#mainToolbar {{ background:{bg}; }}")
+
+    # ════════════════════════════════════════════════════════════
+    #  上色預覽模式（Ctrl+E）
+    # ════════════════════════════════════════════════════════════
+
+    _COLOR_SPAN_RUN_RE = re.compile(
+        r'<span style="color:([^"]+)">(.*?)</span>', re.DOTALL)
+
+    def _render_preview_doc(self) -> None:
+        """直接操作 QTextDocument 以 (文字, 顏色) runs 建構預覽，
+        避免 setHtml 對 <pre> 的塊邊界渲染（每行出現橫線）。"""
+        text = self.editor.toPlainText()
+        self.preview_view.setFont(self.editor.font())
+        doc = self.preview_view.document()
+        doc.clear()
+        cursor = QTextCursor(doc)
+        default_fmt = QTextCharFormat()
+        default_fmt.setForeground(QColor("#000000"))
+        pos = 0
+        for m in self._COLOR_SPAN_RUN_RE.finditer(text):
+            if m.start() > pos:
+                cursor.insertText(text[pos:m.start()], default_fmt)
+            colored_fmt = QTextCharFormat()
+            colored_fmt.setForeground(_css_color_to_qcolor(m.group(1)))
+            cursor.insertText(m.group(2), colored_fmt)
+            pos = m.end()
+        if pos < len(text):
+            cursor.insertText(text[pos:], default_fmt)
+        # 套用與編輯器相同的 FixedHeight 行高，使捲動位置能對齊
+        self._apply_line_height_to(self.preview_view)
+        # 沿用編輯器底色與字型樣式
+        fam = self._font_family
+        sz = self._font_size
+        self.preview_view.setStyleSheet(
+            f"QTextEdit {{ background:{self._bg_color};"
+            f" color:#000000;"
+            f" border:1px solid #cccccc;"
+            f" font-family:'{fam}';"
+            f" font-size:{sz}pt; }}"
+        )
+
+    def _toggle_preview(self) -> None:
+        # 若比對模式開啟，先沿用其捲動位置切換過去（不必先回編輯模式）
+        if self._compare_active:
+            scroll_val = self.orig_view.verticalScrollBar().value()
+            self._compare_active = False
+            self._set_compare_ui(False)
+            self._preview_active = True
+        else:
+            self._preview_active = not self._preview_active
+            scroll_val = None
+        if self._preview_active:
+            if scroll_val is None:
+                scroll_val = self.editor.verticalScrollBar().value()
+            self._render_preview_doc()
+            self.stack.setCurrentIndex(2)
+            self.preview_view.verticalScrollBar().setValue(scroll_val)
+            self._set_preview_ui(True)
+            self._set_status("🎨 預覽上色結果（Alt+1 編輯／Alt+2 比對）", "#0f0")
+        else:
+            scroll_val = self.preview_view.verticalScrollBar().value()
+            self.stack.setCurrentIndex(0)
+            self.editor.verticalScrollBar().setValue(scroll_val)
+            self._set_preview_ui(False)
+            self.editor.setFocus()
+            self._set_status("✏️ 編輯模式", "#0f0")
+
+    def _set_preview_ui(self, preview: bool) -> None:
+        for w in self._edit_buttons:
+            w.setEnabled(not preview)
+        if self._toolbar_widget is not None:
+            bg = "#4a3470" if preview else "#343a40"
+            self._toolbar_widget.setStyleSheet(
+                f"#mainToolbar {{ background:{bg}; }}")
+
+    # ════════════════════════════════════════════════════════════
+    #  返回編輯模式（Alt+1）
+    # ════════════════════════════════════════════════════════════
+
+    def _return_to_editor(self) -> None:
+        """Alt+1：從比對/預覽模式回到編輯模式；已在編輯模式則僅 focus。"""
+        if self._compare_active:
+            self._toggle_compare()
+        elif self._preview_active:
+            self._toggle_preview()
+        else:
+            self.editor.setFocus()
+
+    # ════════════════════════════════════════════════════════════
+    #  從原文覆蓋選取範圍（Alt+W）
+    # ════════════════════════════════════════════════════════════
+
+    def _restore_from_original(self) -> None:
+        """Alt+W：將編輯器選取範圍以原文同一 (行, 欄) 區間的內容覆蓋。
+        用於翻譯時想局部還原回日文原文的情境。"""
+        if self._compare_active or self._preview_active:
+            self._set_status("⚠️ 請先回到編輯模式（Alt+1）", "#ffc107")
+            return
+        if self._original_text is None:
+            self._set_status("⚠️ 無原文可供還原", "#ffc107")
+            return
+        cursor = self.editor.textCursor()
+        if not cursor.hasSelection():
+            self._set_status("⚠️ 請先選取要以原文覆蓋的範圍", "#ffc107")
+            return
+        start_pos = cursor.selectionStart()
+        end_pos = cursor.selectionEnd()
+        doc = self.editor.document()
+        sc = QTextCursor(doc)
+        sc.setPosition(start_pos)
+        start_line = sc.blockNumber()
+        start_col = sc.positionInBlock()
+        ec = QTextCursor(doc)
+        ec.setPosition(end_pos)
+        end_line = ec.blockNumber()
+        end_col = ec.positionInBlock()
+
+        orig_lines = self._original_text.split('\n')
+        if start_line >= len(orig_lines):
+            self._set_status("⚠️ 選取範圍超出原文行數", "#ffc107")
+            return
+        last_line = min(end_line, len(orig_lines) - 1)
+
+        if start_line == last_line:
+            line = orig_lines[start_line]
+            extracted = line[min(start_col, len(line)):min(end_col, len(line))]
+        else:
+            first = orig_lines[start_line][min(start_col, len(orig_lines[start_line])):]
+            middle = orig_lines[start_line + 1:last_line]
+            last = orig_lines[last_line][:min(end_col, len(orig_lines[last_line]))]
+            extracted = '\n'.join([first, *middle, last])
+
+        cursor.insertText(extracted)
+        self._set_status(f"↩️ 已以原文覆蓋（{len(extracted)} 字）", "#0f0")
+
+    # ════════════════════════════════════════════════════════════
+    #  從選取範圍提取日文並複製（Alt+C）
+    # ════════════════════════════════════════════════════════════
+
+    def _extract_jp_from_selection(self) -> None:
+        """Alt+C：從選取範圍（編輯器或原文比對模式）提取日文並複製到剪貼簿。
+
+        先複製選取內容，再以主程式「提取日文」相同的正則邏輯剔除 AA 圖形，
+        只保留純文字行後以 \\n 串接寫入剪貼簿。
+        """
+        if self._preview_active:
+            self._set_status("⚠️ 預覽模式不支援提取（請 Alt+1 回編輯或 Alt+2 切比對）", "#ffc107")
+            return
+        view = self.orig_view if self._compare_active else self.editor
+        cursor = view.textCursor()
+        if not cursor.hasSelection():
+            self._set_status("⚠️ 請先選取要提取日文的範圍", "#ffc107")
+            return
+        selected = cursor.selectedText().replace('', '\n')
+        if not selected.strip():
+            self._set_status("⚠️ 選取範圍內沒有內容", "#ffc107")
+            return
+
+        if self._extract_regex_provider is None:
+            self._set_status("⚠️ 無法取得提取正則設定", "#ffc107")
+            return
+        base_re, invalid_re, symbol_re, filter_str = self._extract_regex_provider()
+
+        extracted_set = _extract_text(
+            selected,
+            base_re,
+            invalid_re,
+            symbol_re,
+            (filter_str or "").strip(),
+        )
+        if not extracted_set:
+            self._set_status("ℹ️ 選取範圍內未提取到日文", "#ffc107")
+            return
+        output = '\n'.join(extracted_set.keys())
+        QApplication.clipboard().setText(output)
+        self._set_status(
+            f"✅ 已提取 {len(extracted_set)} 行日文並複製到剪貼簿", "#0f0")
 
     # ════════════════════════════════════════════════════════════
     #  其他
@@ -959,7 +1222,8 @@ class EditWindow(QMainWindow):
         text = self.editor.toPlainText()
         try:
             # 底色僅為編輯器預覽效果，不寫入檔案（交由後續網站控制）
-            write_html_file(file_path, text)
+            # 若原檔已有自訂 <head>（例如外掛字型 CSS），儲存時沿用。
+            write_html_file(file_path, text, head_html=self._custom_head)
         except OSError as e:
             QMessageBox.critical(self, "儲存失敗", str(e))
             return False

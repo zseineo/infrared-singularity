@@ -65,6 +65,54 @@ def apply_glossary_to_text(text: str, glossary: dict[str, str]) -> str:
     return '\n'.join(lines)
 
 
+def apply_reverse_glossary_to_text(text: str, glossary: dict[str, str]) -> str:
+    """對任意文本套用反向術語表：把「替代文字」還原為「原文」。
+
+    與 apply_glossary_to_text 互為反向操作。為抵銷 Auto-Padding 的全形空白，
+    匹配後若緊接 '\u3000' 會吃掉最多 (len(原文) - len(替代文字)) 個。
+
+    同一個替代文字若對應多個原文（反向 map 會衝突），以最長原文為優先。
+    """
+    if not glossary:
+        return text
+
+    # 建立反向 map：repl -> orig；衝突時以最長 orig 為優先
+    reverse_map: dict[str, str] = {}
+    for orig, repl in glossary.items():
+        if not repl:
+            continue
+        if repl not in reverse_map or len(orig) > len(reverse_map[repl]):
+            reverse_map[repl] = orig
+
+    if not reverse_map:
+        return text
+
+    sorted_items = sorted(reverse_map.items(), key=lambda x: len(x[0]), reverse=True)
+    pattern = re.compile('|'.join(re.escape(k) for k, _ in sorted_items))
+
+    lines = text.split('\n')
+    for i, line in enumerate(lines):
+        result_parts: list[str] = []
+        pos = 0
+        for m in pattern.finditer(line):
+            result_parts.append(line[pos:m.start()])
+            repl = m.group(0)
+            orig = reverse_map[repl]
+            len_diff = len(orig) - len(repl)
+            # 吃掉尾端最多 len_diff 個全形空白（抵銷 Auto-Padding）
+            eat = 0
+            end = m.end()
+            if len_diff > 0:
+                while eat < len_diff and end + eat < len(line) and line[end + eat] == '\u3000':
+                    eat += 1
+            result_parts.append(orig)
+            pos = end + eat
+        result_parts.append(line[pos:])
+        lines[i] = ''.join(result_parts)
+
+    return '\n'.join(lines)
+
+
 def apply_translation(
     source: str,
     extracted: str,

@@ -3,13 +3,55 @@ import re
 from .constants import BORDER_CHARS
 
 
+# 用 backtick 作為「保留外圍空白」的分隔符。選 backtick 是因為：
+#   1) 鍵盤可直接打（左上角／Shift+@）
+#   2) CJK 內文與一般日中翻譯內容幾乎不會出現
+#   3) 與雙引號 `"` 比，內文中誤觸機率更低（少數作品會用半形 `"`）
+_GLOSSARY_QUOTE = '`'
+
+
+def decode_glossary_term(s: str) -> str:
+    """解析術語表的單一 key 或 value。
+
+    - 預設：剝除外圍空白（兼容舊行為；例如 `Hello = World` 會被解為 `Hello` 與 `World`）。
+    - 若用 backtick 包覆（`` `...` ``），其內的空白完全保留，backtick 本身會被剝除。
+      用於需要把前後空白也納入比對/取代的場合，例：
+
+        ``` ` は？`=` 蛤？` ```        → key=` は？`, value=` 蛤？`
+        ``` ` Trooper `=Trooper ```   → key=` Trooper `, value=`Trooper`
+
+    - 內部空白不論有沒有包 backtick 都會保留（`Hello World=哈囉 世界` 一直都正常）。
+    """
+    s = s.strip()
+    if len(s) >= 2 and s[0] == _GLOSSARY_QUOTE and s[-1] == _GLOSSARY_QUOTE:
+        return s[1:-1]
+    return s
+
+
+def encode_glossary_term(s: str) -> str:
+    """把術語 key 或 value 寫回術語表字串時使用。
+
+    若字串外圍有空白（或為空字串），用 backtick 包覆以利下次正確解析回原值；
+    否則原樣回傳，避免不必要的視覺雜訊。
+    """
+    if s == '' or s != s.strip():
+        return f'{_GLOSSARY_QUOTE}{s}{_GLOSSARY_QUOTE}'
+    return s
+
+
 def parse_glossary(glossary_str: str) -> dict[str, str]:
-    """將 '日文=中文' 格式的術語表字串解析為 dict。"""
+    """將 '日文=中文' 格式的術語表字串解析為 dict。
+
+    Key 與 value 透過 `decode_glossary_term` 處理：預設剝外圍空白，
+    若用 `"..."` 包覆則完整保留外圍空白（內部空白一律保留）。
+    """
     glossary: dict[str, str] = {}
     for line in glossary_str.split('\n'):
         parts = line.split('=', 1)
-        if len(parts) == 2 and parts[0].strip():
-            glossary[parts[0].strip()] = parts[1].strip()
+        if len(parts) == 2:
+            key = decode_glossary_term(parts[0])
+            if key:
+                glossary[key] = decode_glossary_term(parts[1])
     return glossary
 
 

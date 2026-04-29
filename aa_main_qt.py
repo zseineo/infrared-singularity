@@ -54,6 +54,8 @@ from aa_tool.text_extraction import (
 from aa_tool.translation_engine import (
     parse_glossary,
     apply_translation as _apply_translation,
+    decode_glossary_term,
+    encode_glossary_term,
 )
 from aa_tool.url_fetcher import fetch_url as _fetch_url, parse_page_html as _parse_page_html
 from aa_edit_qt import EditWindow, load_bundled_fonts
@@ -508,7 +510,7 @@ class TranslatePanel(QWidget):
         key_positions: dict[str, list[int]] = {}
         for i, line in enumerate(g_lines):
             if '=' in line:
-                key = line.split('=', 1)[0].strip()
+                key = decode_glossary_term(line.split('=', 1)[0])
                 if key:
                     key_positions.setdefault(key, []).append(i)
 
@@ -621,8 +623,12 @@ class MainWindow(QMainWindow):
         self._auto_copy: bool = False
         self._work_history_limit: int = 10
         self._fetch_history_limit: int = 50
+        self._original_cache_limit: int = 50
         self._glossary_auto_search: bool = True
         self._diff_save_mode: bool = False
+        self._embed_font_in_html: bool = False
+        self._embed_font_name: str = "monapo"
+        self._editor_default_wysiwyg: bool = False
         self._save_timer: QTimer | None = None
         self._saved_glossary_lines = 0
         self._saved_glossary_temp_lines = 0
@@ -777,6 +783,14 @@ class MainWindow(QMainWindow):
                     self.current_symbol_regex,
                     self._translate_panel.get_filter_text(),
                 ),
+                extracted_provider=self._translate_panel.get_extracted_text,
+                translation_provider=self._translate_panel.get_ai_text,
+                extracted_setter=lambda t: (
+                    self._translate_panel.extracted_text.setPlainText(t)),
+                translation_setter=lambda t: (
+                    self._translate_panel.ai_text.setPlainText(t)),
+                embed_font_provider=lambda: (
+                    self._embed_font_name if self._embed_font_in_html else None),
                 on_back=on_back,
                 on_open=self.import_html,
                 on_save=self._on_edit_saved,
@@ -815,10 +829,6 @@ class MainWindow(QMainWindow):
             self._edit_window._on_back = on_back
             self._edit_window._on_open = self.import_html
             self._edit_window._on_save = self._on_edit_saved
-            if scroll_to_line:
-                self._edit_window._scroll_to_line(scroll_to_line)
-            else:
-                self._edit_window._scroll_to_top()
             # 更新比對原文
             if original_text is not None:
                 self._edit_window._original_text = original_text
@@ -829,6 +839,25 @@ class MainWindow(QMainWindow):
             # 若還在比對模式，切回編輯
             if self._edit_window._compare_active:
                 self._edit_window._toggle_compare()
+            # 若目前在 WYSIWYG 模式，先重新渲染預覽以反映新檔內容
+            # （否則 preview_view 仍顯示前一份檔的內容，需手動切編輯模式再回來）。
+            # 必須在 _scroll_to_line 之前執行，這樣後續捲動才能套用到全新的 preview。
+            if self._edit_window._preview_active:
+                self._edit_window._wysiwyg_rerender_after_editor_change()
+            if scroll_to_line:
+                self._edit_window._scroll_to_line(scroll_to_line)
+            else:
+                self._edit_window._scroll_to_top()
+
+        # 若設定要求預設 WYSIWYG 而目前不在預覽模式，於此進入；
+        # 進入後再次補上 scroll_to_line，讓批次搜尋的目標行也能正確捲到。
+        if (self._editor_default_wysiwyg
+                and not self._edit_window._preview_active):
+            self._edit_window._toggle_preview()
+            if scroll_to_line:
+                self._edit_window._scroll_to_line(scroll_to_line)
+            else:
+                self._edit_window._scroll_to_top()
 
         nav_name = display_title or os.path.basename(file_path)
         self._nav_label.setText(f"編輯：{nav_name}")
@@ -883,13 +912,17 @@ class MainWindow(QMainWindow):
     # ════════════════════════════════════════════════════════════
 
     def _save_glossary_entry(self, original: str, translation: str) -> None:
-        """由 EditWindow callback 呼叫，將術語存入一般術語表。"""
+        """由 EditWindow callback 呼叫，將術語存入一般術語表。
+
+        若 original/translation 含外圍空白（例如 ` Trooper ` → `Trooper`），
+        以 backtick 編碼寫入，下次解析時可被 `decode_glossary_term` 正確還原。
+        """
         if not original or not translation:
             return
         g_text = self._translate_panel.get_glossary_text().rstrip('\n')
         if g_text:
             g_text += '\n'
-        g_text += f"{original}={translation}"
+        g_text += f"{encode_glossary_term(original)}={encode_glossary_term(translation)}"
         self._translate_panel.glossary_text.setPlainText(g_text)
         self.schedule_save()
         self.show_status(f"📖 已存入術語：{original} → {translation}", "#17a2b8")
@@ -1551,8 +1584,12 @@ class MainWindow(QMainWindow):
             editor_bg_color=self._editor_bg_color,
             work_history_limit=self._work_history_limit,
             fetch_history_limit=self._fetch_history_limit,
+            original_cache_limit=self._original_cache_limit,
             glossary_auto_search=self._glossary_auto_search,
             diff_save_mode=self._diff_save_mode,
+            embed_font_in_html=self._embed_font_in_html,
+            embed_font_name=self._embed_font_name,
+            editor_default_wysiwyg=self._editor_default_wysiwyg,
         )
 
     def _apply_cache(self, cache: AppCache) -> None:
@@ -1593,8 +1630,13 @@ class MainWindow(QMainWindow):
             self._editor_bg_color = cache.editor_bg_color
         self._work_history_limit = max(1, int(cache.work_history_limit or 10))
         self._fetch_history_limit = max(1, int(cache.fetch_history_limit or 50))
+        self._original_cache_limit = max(1, int(
+            cache.original_cache_limit or self._fetch_history_limit))
         self._glossary_auto_search = bool(cache.glossary_auto_search)
         self._diff_save_mode = bool(cache.diff_save_mode)
+        self._embed_font_in_html = bool(cache.embed_font_in_html)
+        self._embed_font_name = str(cache.embed_font_name or "monapo")
+        self._editor_default_wysiwyg = bool(cache.editor_default_wysiwyg)
 
     def save_cache(self) -> None:
         self.settings_mgr.save_cache(self._gather_cache())
@@ -1610,8 +1652,12 @@ class MainWindow(QMainWindow):
             auto_copy=self._auto_copy,
             work_history_limit=self._work_history_limit,
             fetch_history_limit=self._fetch_history_limit,
+            original_cache_limit=self._original_cache_limit,
             glossary_auto_search=self._glossary_auto_search,
             diff_save_mode=self._diff_save_mode,
+            embed_font_in_html=self._embed_font_in_html,
+            embed_font_name=self._embed_font_name,
+            editor_default_wysiwyg=self._editor_default_wysiwyg,
             orig_cache_path=self._orig_cache_path(),
             on_apply=self._on_settings_applied,
         )
@@ -1623,10 +1669,18 @@ class MainWindow(QMainWindow):
             'work_history_limit', self._work_history_limit)))
         self._fetch_history_limit = max(1, int(values.get(
             'fetch_history_limit', self._fetch_history_limit)))
+        self._original_cache_limit = max(1, int(values.get(
+            'original_cache_limit', self._original_cache_limit)))
         self._glossary_auto_search = bool(values.get(
             'glossary_auto_search', self._glossary_auto_search))
         self._diff_save_mode = bool(values.get(
             'diff_save_mode', self._diff_save_mode))
+        self._embed_font_in_html = bool(values.get(
+            'embed_font_in_html', self._embed_font_in_html))
+        self._embed_font_name = str(values.get(
+            'embed_font_name', self._embed_font_name) or "monapo")
+        self._editor_default_wysiwyg = bool(values.get(
+            'editor_default_wysiwyg', self._editor_default_wysiwyg))
         if self._batch_window is not None:
             self._batch_window.glossary_auto_search = self._glossary_auto_search
         # 立即修剪現有歷史以符合新上限
@@ -1714,7 +1768,7 @@ class MainWindow(QMainWindow):
         self.show_status("✅ 暫存讀取成功！", "#0f0")
 
     # ════════════════════════════════════════════════════════════
-    #  原文暫存 (依檔名索引，上限由 self._fetch_history_limit 控制)
+    #  原文暫存 (依檔名索引，上限由 self._original_cache_limit 控制)
     # ════════════════════════════════════════════════════════════
 
     def _orig_cache_path(self) -> str:
@@ -1780,11 +1834,11 @@ class MainWindow(QMainWindow):
             entry['author_key'] = fp
         data[key] = entry
         # 上限裁切（依時間戳保留最新的 N 筆）
-        if len(data) > self._fetch_history_limit:
+        if len(data) > self._original_cache_limit:
             ordered = sorted(data.items(),
                              key=lambda kv: kv[1].get('ts', 0),
                              reverse=True)
-            data = dict(ordered[:self._fetch_history_limit])
+            data = dict(ordered[:self._original_cache_limit])
         self._save_orig_cache_data(data)
 
     def load_original_for_file(self, file_path: str) -> str | None:

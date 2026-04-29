@@ -18,15 +18,15 @@ import os
 import re
 import sys
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QPoint, Qt, QTimer
 from PyQt6.QtGui import (
     QColor, QFont, QFontDatabase, QFontMetricsF, QKeySequence, QShortcut,
-    QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument,
+    QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument, QTextFormat,
 )
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QFileDialog, QHBoxLayout,
     QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QSpinBox,
-    QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
+    QSplitter, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from aa_tool.bubble_alignment import (
@@ -40,7 +40,8 @@ from aa_tool.html_io import (
 from aa_tool.qt_helpers import show_toast
 from aa_tool.text_extraction import extract_text as _extract_text
 from aa_tool.translation_engine import (
-    apply_glossary_to_text, apply_reverse_glossary_to_text, parse_glossary,
+    apply_glossary_to_text, apply_reverse_glossary_to_text, apply_translation,
+    parse_glossary, decode_glossary_term,
 )
 
 LINE_HEIGHT_PERCENT = 120  # 對應 CSS line-height: 1.2，與瀏覽器顯示一致
@@ -48,7 +49,7 @@ DEFAULT_BG = "#ffffff"
 DEFAULT_COLOR = "#ff0000"
 DEFAULT_EDITOR_FONT = "MS PGothic"  # ⚠️ 請勿改動：AA 對齊計算依賴此字體的 metrics
 DEFAULT_EDITOR_FONT_SIZE = 12
-EDITOR_FONT_CHOICES = ["MS PGothic", "Monapo"]
+EDITOR_FONT_CHOICES = ["MS PGothic", "Monapo", "TEXTAR", "Saitamaar"]
 
 # 專案內建字體（fonts/ 資料夾），Qt 啟動後呼叫一次
 _BUNDLED_FONTS_LOADED = False
@@ -131,6 +132,11 @@ class EditWindow(QMainWindow):
         glossary_provider=None,   # () -> str
         glossary_saver=None,      # (orig: str, trans: str) -> None
         extract_regex_provider=None,  # () -> (base, invalid, symbol, filter_str)
+        extracted_provider=None,  # () -> str; Alt+4 局部重套用：取得「提取結果」
+        translation_provider=None,  # () -> str; Alt+4 局部重套用：取得「填入翻譯」
+        extracted_setter=None,    # (str) -> None; Alt+4 套用後寫回主面板
+        translation_setter=None,  # (str) -> None; Alt+4 套用後寫回主面板
+        embed_font_provider=None,  # () -> str | None; 儲存時要內嵌的字型名稱，None 表示不嵌
         on_back=None,             # () -> None; embedded 模式回主畫面
         on_open=None,             # () -> None; 開啟已儲存的 HTML
         on_save=None,             # (file_path: str) -> None; 儲存成功後通知
@@ -154,6 +160,11 @@ class EditWindow(QMainWindow):
         self._glossary_provider = glossary_provider
         self._glossary_saver = glossary_saver
         self._extract_regex_provider = extract_regex_provider
+        self._extracted_provider = extracted_provider
+        self._translation_provider = translation_provider
+        self._extracted_setter = extracted_setter
+        self._translation_setter = translation_setter
+        self._embed_font_provider = embed_font_provider
         self._on_back = on_back
         self._on_open = on_open
         self._on_save = on_save
@@ -181,7 +192,11 @@ class EditWindow(QMainWindow):
                 self._original_text = None
         self._compare_active = False
         self._preview_active = False
+        # 進入 WYSIWYG 時透過 _render_preview_doc 重建文件會觸發 textChanged；
+        # 為避免被當成「使用者編輯」標 dirty，期間以這個旗標暫時抑制。
+        self._preview_suppress_dirty = False
         self._edit_buttons: list[QPushButton | QLineEdit | QCheckBox] = []
+        self._color_buttons: list[QPushButton | QLineEdit | QCheckBox] = []
         self._toolbar_widget: QWidget | None = None
 
         try:
@@ -239,9 +254,13 @@ class EditWindow(QMainWindow):
             self._apply_line_height_to(self.orig_view)
 
         self.preview_view = QTextEdit()
+        self.preview_view.setAcceptRichText(False)
+        # WYSIWYG 模式下需可編輯；進入時於 _toggle_preview 切為 readonly=False，
+        # 預設仍 readonly 確保 stack 切到 idx 2 之前不會被誤觸打字。
         self.preview_view.setReadOnly(True)
         self.preview_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.preview_view.setFont(aa_font)
+        self.preview_view.textChanged.connect(self._on_preview_changed)
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self.editor)        # index 0
@@ -252,7 +271,21 @@ class EditWindow(QMainWindow):
         self._apply_line_height()
 
         self.editor.textChanged.connect(self._on_changed)
-        root.addWidget(self.stack, 1)
+
+        # 右側翻譯面板（Alt+4 切換顯示）：可同時編輯「提取結果」與「填入翻譯」，
+        # 按下「重新套用」會用新內容重跑 apply_translation，但**只覆蓋目前可視
+        # 行以下的部分**，可視行以上的編輯成果保留不動。
+        self._translate_side = self._build_translate_side_panel()
+        self._translate_side.hide()
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self.stack)
+        splitter.addWidget(self._translate_side)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        splitter.setChildrenCollapsible(False)
+        self._main_splitter = splitter
+        root.addWidget(splitter, 1)
 
         # 浮動狀態提示改為右上角 Toast（show_toast），由 _set_status 統一呼叫
 
@@ -271,6 +304,8 @@ class EditWindow(QMainWindow):
                   activated=self._toggle_compare)
         QShortcut(QKeySequence("Alt+3"), self,
                   activated=self._toggle_preview)
+        QShortcut(QKeySequence("Alt+4"), self,
+                  activated=self._toggle_translate_side)
         QShortcut(QKeySequence("Alt+E"), self,
                   activated=self._reverse_glossary_replace)
         QShortcut(QKeySequence("Alt+C"), self,
@@ -372,9 +407,12 @@ class EditWindow(QMainWindow):
         # 比對模式時需要 disable 的控制項
         self._edit_buttons.extend([
             self.quick_orig, self.quick_trans, btn_exec, btn_reapply,
-            btn_color, btn_pick_color, btn_strip, btn_pad,
+            btn_strip, btn_pad,
             btn_bubble, btn_align, btn_smart, btn_bubble_all,
         ])
+        # WYSIWYG 模式（Alt+3 編輯預覽）下仍可使用的「上色」相關控制項
+        # 與 _edit_buttons 互斥：在 _set_preview_ui 時，只有這組保持 enabled。
+        self._color_buttons.extend([btn_color, btn_pick_color])
 
         tb.addStretch()
 
@@ -396,8 +434,7 @@ class EditWindow(QMainWindow):
 
         if self._on_back is not None:
             btn_back = _make_button("← 返回", "#6c757d", "#5a6268", width=70)
-            btn_back.clicked.connect(
-                lambda: self._on_back() if self._on_back else None)
+            btn_back.clicked.connect(self._handle_back_click)
             tb.addWidget(btn_back)
         else:
             btn_close = _make_button("關閉", "#dc3545", "#c82333", width=50)
@@ -494,6 +531,9 @@ class EditWindow(QMainWindow):
 
     def _apply_line_height(self) -> None:
         self._apply_line_height_to(self.editor)
+        # WYSIWYG 期間 preview_view 也是被編輯的目標，行高需同步
+        if self._preview_active:
+            self._apply_line_height_to(self.preview_view)
 
     def _apply_line_height_to(self, widget: QTextEdit) -> None:
         # 以主字型 × 120% 與 CJK fallback 字型自然高度取 max，套用 FixedHeight。
@@ -506,7 +546,7 @@ class EditWindow(QMainWindow):
         fm_cjk = QFontMetricsF(cjk_font)
         fixed_px = max(
             fm_main.lineSpacing() * LINE_HEIGHT_PERCENT / 100.0,
-            fm_cjk.lineSpacing() * 1.02,  # 1.02 為 CJK fallback 上下緣留白
+            fm_cjk.lineSpacing() * 1.05,  # 1.05 為 CJK fallback 上下緣留白
         )
         cursor = QTextCursor(widget.document())
         cursor.select(QTextCursor.SelectionType.Document)
@@ -531,13 +571,25 @@ class EditWindow(QMainWindow):
 
     def _hide_search(self) -> None:
         self.search_bar.hide()
-        self.editor.setFocus()
+        self._active_edit_widget().setFocus()
+
+    def _handle_back_click(self) -> None:
+        """工具列「← 返回」按鈕：WYSIWYG 中先序列化回 editor 再返回。"""
+        if self._preview_active:
+            self._sync_preview_to_editor()
+        if self._on_back is not None:
+            self._on_back()
 
     def _on_escape(self) -> None:
-        """ESC 行為：搜尋列開啟時優先關閉；否則執行返回（或關閉視窗）。"""
+        """ESC 行為：搜尋列開啟時優先關閉；否則執行返回（或關閉視窗）。
+
+        若目前在 WYSIWYG 模式，先把編輯成果序列化回 editor 再返回，避免遺失。
+        """
         if self.search_bar.isVisible():
             self._hide_search()
             return
+        if self._preview_active:
+            self._sync_preview_to_editor()
         if self._on_back is not None:
             self._on_back()
         else:
@@ -547,19 +599,21 @@ class EditWindow(QMainWindow):
         query = self.search_entry.text()
         if not query:
             return
-        saved_cursor = self.editor.textCursor()
-        saved_scroll = self.editor.verticalScrollBar().value()
-        found = self.editor.find(query)
+        # WYSIWYG 模式下搜尋對 preview_view 生效
+        target = self._active_edit_widget()
+        saved_cursor = target.textCursor()
+        saved_scroll = target.verticalScrollBar().value()
+        found = target.find(query)
         if not found:
             # wrap around
-            cursor = self.editor.textCursor()
+            cursor = target.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.Start)
-            self.editor.setTextCursor(cursor)
-            found = self.editor.find(query)
+            target.setTextCursor(cursor)
+            found = target.find(query)
         if not found:
             # 找不到時恢復原本游標位置與捲動，避免跳到最上面
-            self.editor.setTextCursor(saved_cursor)
-            self.editor.verticalScrollBar().setValue(saved_scroll)
+            target.setTextCursor(saved_cursor)
+            target.verticalScrollBar().setValue(saved_scroll)
             self._set_status("🔍 找不到符合的文字", "#ffc107")
         else:
             self._set_status(f"找到：{query}", "#0f0")
@@ -607,11 +661,18 @@ class EditWindow(QMainWindow):
     # ════════════════════════════════════════════════════════════
 
     def _replace_all(self) -> None:
-        orig = self.quick_orig.text().strip()
-        trans = self.quick_trans.text().strip()
+        # 與術語表同樣支援 backtick 包覆來保留外圍空白：
+        # 例：輸入 `` ` Trooper ` `` → 實際比對的字串是 ` Trooper `（含空白）。
+        # 不包 backtick 則照舊 strip，避免使用者不小心多打空白。
+        orig = decode_glossary_term(self.quick_orig.text())
+        trans = decode_glossary_term(self.quick_trans.text())
         if not orig or not trans:
             self._set_status("⚠️ 原文與翻譯皆不可為空", "#ffc107")
             return
+        # WYSIWYG 模式：先把編輯結果序列化回 editor，再以 editor 為基準執行替換，
+        # 套用後重建 preview，確保彩色標記不會在 preview/editor 之間漂移。
+        if self._preview_active:
+            self._sync_preview_to_editor()
         text = self.editor.toPlainText()
         if orig not in text:
             self._set_status(f"🔍 找不到「{orig}」", "#ffc107")
@@ -619,6 +680,7 @@ class EditWindow(QMainWindow):
         count = text.count(orig)
         new_text = text.replace(orig, trans)
         self._replace_document(new_text)
+        self._wysiwyg_rerender_after_editor_change()
 
         # 若勾選「存入術語」，通知主程式
         if self.save_to_glossary_cb.isChecked():
@@ -657,6 +719,9 @@ class EditWindow(QMainWindow):
         if not glossary:
             self._set_status("⚠️ 術語表格式不正確", "#ffc107")
             return
+        # WYSIWYG：先 sync 再運行，套完重建 preview
+        if self._preview_active:
+            self._sync_preview_to_editor()
         current_text = self.editor.toPlainText()
         new_text = apply_glossary_to_text(current_text, glossary)
         if new_text == current_text:
@@ -667,6 +732,7 @@ class EditWindow(QMainWindow):
         scroll_val = scroll_bar.value()
         self._replace_document(new_text)
         scroll_bar.setValue(scroll_val)
+        self._wysiwyg_rerender_after_editor_change()
         self._set_status(
             f"✅ 已套用術語表（{len(glossary)} 條）", "#0f0")
 
@@ -691,7 +757,17 @@ class EditWindow(QMainWindow):
             self._set_status(f"當前顏色：{self._current_color}", "#0f0")
 
     def _apply_color(self) -> None:
-        """對選取範圍套用顏色；若已有 color span 則移除。"""
+        """對選取範圍套用顏色。
+
+        - 編輯模式：對 `editor` 的 plain text 包字面 `<span>` markup（既有行為）；
+          若選取已包含 markup 則移除標籤。
+        - WYSIWYG 模式（`_preview_active`）：對 `preview_view` 用 `QTextCharFormat`
+          的 foreground 直接套色；若該段已有非黑顏色，再次按下會還原成黑色
+          （視為「移除顏色」）。
+        """
+        if self._preview_active:
+            self._apply_color_wysiwyg()
+            return
         cursor = self.editor.textCursor()
         if not cursor.hasSelection():
             self._set_status("⚠️ 請先選取要上色的文字", "#ffc107")
@@ -708,6 +784,50 @@ class EditWindow(QMainWindow):
                 f'{selected}</span>'
             )
             cursor.insertText(colored)
+            self._set_status(f"已套用顏色：{self._current_color}", "#0f0")
+
+    def _apply_color_wysiwyg(self) -> None:
+        """WYSIWYG 模式下的上色：直接走 QTextCharFormat 的 foreground。
+
+        若選取範圍中任一 fragment 已有非黑色 foreground，視為「已上色」，
+        再次按下會 merge 成黑色（移除顏色）；否則套上目前 `_current_color`。
+        """
+        cursor = self.preview_view.textCursor()
+        if not cursor.hasSelection():
+            self._set_status("⚠️ 請先選取要上色的文字", "#ffc107")
+            return
+        already_colored = False
+        doc = self.preview_view.document()
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        block = doc.findBlock(start)
+        while block.isValid() and block.position() < end:
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid():
+                    f_start = frag.position()
+                    f_end = f_start + frag.length()
+                    if f_end > start and f_start < end:
+                        fmt = frag.charFormat()
+                        if fmt.hasProperty(
+                                QTextFormat.Property.ForegroundBrush):
+                            col = fmt.foreground().color()
+                            if col.name().lower() != '#000000':
+                                already_colored = True
+                                break
+                it += 1
+            if already_colored:
+                break
+            block = block.next()
+        new_fmt = QTextCharFormat()
+        if already_colored:
+            new_fmt.setForeground(QColor("#000000"))
+            cursor.mergeCharFormat(new_fmt)
+            self._set_status("已移除顏色", "#0f0")
+        else:
+            new_fmt.setForeground(QColor(self._current_color))
+            cursor.mergeCharFormat(new_fmt)
             self._set_status(f"已套用顏色：{self._current_color}", "#0f0")
 
     # ════════════════════════════════════════════════════════════
@@ -731,7 +851,8 @@ class EditWindow(QMainWindow):
     # ════════════════════════════════════════════════════════════
 
     def _strip_spaces(self) -> None:
-        cursor = self.editor.textCursor()
+        target = self._active_edit_widget()
+        cursor = target.textCursor()
         if not cursor.hasSelection():
             self._set_status("⚠️ 請先選取要消空白的文字", "#ffc107")
             return
@@ -745,7 +866,8 @@ class EditWindow(QMainWindow):
         if self._glossary_provider is None:
             self._set_status("⚠️ 無法取得術語表", "#ffc107")
             return
-        cursor = self.editor.textCursor()
+        target = self._active_edit_widget()
+        cursor = target.textCursor()
         if not cursor.hasSelection():
             self._set_status("⚠️ 請先選取要反向替代的文字", "#ffc107")
             return
@@ -764,7 +886,8 @@ class EditWindow(QMainWindow):
         self._set_status("✅ 已反向替代", "#0f0")
 
     def _pad_spaces(self) -> None:
-        cursor = self.editor.textCursor()
+        target = self._active_edit_widget()
+        cursor = target.textCursor()
         if not cursor.hasSelection():
             self._set_status("⚠️ 請先選取要補空白的文字", "#ffc107")
             return
@@ -779,9 +902,14 @@ class EditWindow(QMainWindow):
     #  對話框工具（Phase C）
     # ════════════════════════════════════════════════════════════
 
-    def _extend_selection_to_full_lines(self) -> QTextCursor:
-        """將目前選取擴展到完整行；回傳調整後的 cursor。"""
-        cursor = self.editor.textCursor()
+    def _extend_selection_to_full_lines(self, target: QTextEdit | None = None) -> QTextCursor:
+        """將目前選取擴展到完整行；回傳調整後的 cursor。
+
+        `target` 預設為目前可編輯的 widget（WYSIWYG 下是 preview_view）。
+        """
+        if target is None:
+            target = self._active_edit_widget()
+        cursor = target.textCursor()
         start = cursor.selectionStart()
         end = cursor.selectionEnd()
 
@@ -798,15 +926,16 @@ class EditWindow(QMainWindow):
 
         cursor.setPosition(new_start)
         cursor.setPosition(new_end, QTextCursor.MoveMode.KeepAnchor)
-        self.editor.setTextCursor(cursor)
+        target.setTextCursor(cursor)
         return cursor
 
     def _adjust_bubble(self) -> None:
-        cursor = self.editor.textCursor()
+        target = self._active_edit_widget()
+        cursor = target.textCursor()
         if not cursor.hasSelection():
             self._set_status("⚠️ 請先選取想要調整的對話框", "#ffc107")
             return
-        cursor = self._extend_selection_to_full_lines()
+        cursor = self._extend_selection_to_full_lines(target)
         selected = cursor.selectedText().replace('\u2029', '\n')
         if not selected:
             return
@@ -822,7 +951,8 @@ class EditWindow(QMainWindow):
         self._set_status("✅ 對話框已修正", "#0f0")
 
     def _align_to_prev(self) -> None:
-        cursor = self.editor.textCursor()
+        target = self._active_edit_widget()
+        cursor = target.textCursor()
         line_idx = cursor.blockNumber()
         col_idx = cursor.positionInBlock()
 
@@ -830,7 +960,7 @@ class EditWindow(QMainWindow):
             self._set_status("⚠️ 這是第一行，沒有上一行可以對齊", "#ffc107")
             return
 
-        doc = self.editor.document()
+        doc = target.document()
         prev_block = doc.findBlockByLineNumber(line_idx - 1)
         curr_block = doc.findBlockByLineNumber(line_idx)
         prev_text = prev_block.text().rstrip('\r\n \u3000\u2029')
@@ -857,17 +987,18 @@ class EditWindow(QMainWindow):
         self._apply_line_height()
 
         # 移到新游標位置
-        new_block = self.editor.document().findBlockByLineNumber(line_idx)
+        new_block = target.document().findBlockByLineNumber(line_idx)
         if new_block.isValid():
-            cursor = self.editor.textCursor()
+            cursor = target.textCursor()
             cursor.setPosition(new_block.position()
                                + min(new_col, new_block.length() - 1))
-            self.editor.setTextCursor(cursor)
+            target.setTextCursor(cursor)
         self._set_status("✅ 已對齊上一行", "#0f0")
 
     def _smart_action(self) -> None:
         """自動判斷：有多行選取→對話框修正；單行選取→上色；無選取→對齊上一行。"""
-        cursor = self.editor.textCursor()
+        target = self._active_edit_widget()
+        cursor = target.textCursor()
         if cursor.hasSelection():
             selected = cursor.selectedText().replace('\u2029', '\n')
             if '\n' in selected:
@@ -878,6 +1009,11 @@ class EditWindow(QMainWindow):
             self._align_to_prev()
 
     def _adjust_all_bubbles(self) -> None:
+        # WYSIWYG：先 sync 把 markup 還原回 editor，運算後再重建 preview。
+        # 對話框邏輯本身仍然以 editor 的字面 markup-laden 文字為輸入；
+        # `<span>` 標記不會干擾 bubble_alignment 的偵測（裡面只看 ￣/＿/| 等字元）。
+        if self._preview_active:
+            self._sync_preview_to_editor()
         text = self.editor.toPlainText()
         new_text, count = _adjust_all_bubbles(text, self._measurer)
         if count == 0:
@@ -893,6 +1029,7 @@ class EditWindow(QMainWindow):
                                self.editor.document().characterCount() - 1))
         self.editor.setTextCursor(cursor)
         scroll_bar.setValue(scroll_val)
+        self._wysiwyg_rerender_after_editor_change()
         self._set_status(f"✅ 已自動調整 {count} 個對話框", "#0f0")
 
     # ════════════════════════════════════════════════════════════
@@ -946,6 +1083,10 @@ class EditWindow(QMainWindow):
             return
         # 若預覽模式開啟，先沿用其捲動位置切換過去（不必先回編輯模式）
         if self._preview_active:
+            # 先把 WYSIWYG 編輯成果序列化回 editor，再翻轉 flag；
+            # 否則 _sync_preview_to_editor 會被早期 return 擋住，WYSIWYG 中
+            # 的編輯會在後續切回時遺失（與 _toggle_preview 同樣的順序陷阱）。
+            self._sync_preview_to_editor()
             scroll_val = self.preview_view.verticalScrollBar().value()
             self._preview_active = False
             self._set_preview_ui(False)
@@ -1025,6 +1166,11 @@ class EditWindow(QMainWindow):
         )
 
     def _toggle_preview(self) -> None:
+        # 即將「離開」WYSIWYG：先把編輯成果序列化回 editor，再翻轉 flag。
+        # （否則 _sync_preview_to_editor 開頭的 `if not self._preview_active: return`
+        # 會把同步擋掉，造成 Alt+1 切回編輯模式時 WYSIWYG 中的編輯被還原。）
+        if self._preview_active and not self._compare_active:
+            self._sync_preview_to_editor()
         # 若比對模式開啟，先沿用其捲動位置切換過去（不必先回編輯模式）
         if self._compare_active:
             scroll_val = self.orig_view.verticalScrollBar().value()
@@ -1037,13 +1183,21 @@ class EditWindow(QMainWindow):
         if self._preview_active:
             if scroll_val is None:
                 scroll_val = self.editor.verticalScrollBar().value()
+            # _render_preview_doc 重建 document 會觸發 textChanged → _on_preview_changed；
+            # 進入 WYSIWYG 不算「使用者編輯」，先把 flag 拉起阻擋 dirty 標記。
+            self._preview_suppress_dirty = True
             self._render_preview_doc()
+            self.preview_view.setReadOnly(False)
             self.stack.setCurrentIndex(2)
             self.preview_view.verticalScrollBar().setValue(scroll_val)
             self._set_preview_ui(True)
-            self._set_status("🎨 預覽上色結果（Alt+1 編輯／Alt+2 比對）", "#0f0")
+            self._preview_suppress_dirty = False
+            self._set_status(
+                "🎨 所見即所得編輯（Alt+1 回編輯／Alt+2 比對）", "#0f0")
         else:
+            # 離開：sync 已在進入本函式時完成（見開頭註解），這裡只處理捲動與 UI
             scroll_val = self.preview_view.verticalScrollBar().value()
+            self.preview_view.setReadOnly(True)
             self.stack.setCurrentIndex(0)
             self.editor.verticalScrollBar().setValue(scroll_val)
             self._set_preview_ui(False)
@@ -1051,12 +1205,306 @@ class EditWindow(QMainWindow):
             self._set_status("✏️ 編輯模式", "#0f0")
 
     def _set_preview_ui(self, preview: bool) -> None:
+        # WYSIWYG 模式下所有按鈕都可用（各 handler 內部會分流 editor / preview_view）
         for w in self._edit_buttons:
-            w.setEnabled(not preview)
+            w.setEnabled(True)
+        for w in self._color_buttons:
+            w.setEnabled(True)
         if self._toolbar_widget is not None:
-            bg = "#4a3470" if preview else "#343a40"
+            bg = "#0d1b2e" if preview else "#343a40"
             self._toolbar_widget.setStyleSheet(
                 f"#mainToolbar {{ background:{bg}; }}")
+
+    def _active_edit_widget(self) -> QTextEdit:
+        """回傳目前可編輯的文字 widget：WYSIWYG 模式下為 preview_view，否則為 editor。"""
+        return self.preview_view if self._preview_active else self.editor
+
+    def _wysiwyg_rerender_after_editor_change(self) -> None:
+        """WYSIWYG 期間，若工具用 sync→在 editor 上執行→需要把結果反映回 preview_view。
+
+        由 sync_preview_to_editor 改完 editor 後呼叫；本 method 重建 preview 文件
+        並保留捲動位置，期間以 _preview_suppress_dirty 抑制 textChanged 標 dirty。
+        editor.textChanged 已經透過 _replace_document 觸發 _on_changed，dirty 旗標
+        由那邊正確設置。
+        """
+        if not self._preview_active:
+            return
+        scroll_val = self.preview_view.verticalScrollBar().value()
+        self._preview_suppress_dirty = True
+        self._render_preview_doc()
+        self.preview_view.setReadOnly(False)
+        self.preview_view.verticalScrollBar().setValue(scroll_val)
+        self._preview_suppress_dirty = False
+
+    def _on_preview_changed(self) -> None:
+        """preview_view 內容改變時標記 dirty（WYSIWYG 模式下生效）。"""
+        if getattr(self, "_preview_suppress_dirty", False):
+            return
+        # 與 _on_changed 同樣強制重繪 viewport，避免刪除繁中 fallback 字元後殘影
+        self.preview_view.viewport().update()
+        if self._preview_active and not self._dirty:
+            self._dirty = True
+            self.setWindowTitle("* " + self.windowTitle().lstrip("* "))
+
+    def _serialize_preview_to_markup(self) -> str:
+        """走訪 preview_view 的 QTextDocument，emit 帶字面 `<span>` 標記的 plain text。
+
+        Fragment 的 foreground 顏色非預設黑（#000000）且實際被設定過，才包 `<span>`；
+        否則 emit 原文。Block 之間以 '\n' 分隔。
+        """
+        doc = self.preview_view.document()
+        parts: list[str] = []
+        block = doc.firstBlock()
+        first = True
+        while block.isValid():
+            if not first:
+                parts.append('\n')
+            first = False
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid():
+                    text = frag.text()
+                    fmt = frag.charFormat()
+                    color_set = fmt.hasProperty(
+                        QTextFormat.Property.ForegroundBrush)
+                    color = fmt.foreground().color() if color_set else None
+                    if (color_set and color is not None
+                            and color.name().lower() != '#000000'):
+                        parts.append(
+                            f'<span style="color:{color.name()}">{text}</span>')
+                    else:
+                        parts.append(text)
+                it += 1
+            block = block.next()
+        return ''.join(parts)
+
+    def _sync_preview_to_editor(self) -> None:
+        """把 WYSIWYG 編輯成果序列化回 editor 的字面 markup。
+
+        若內容未變動則不動 editor（避免無意義 _replace_document 重建文件）。
+        呼叫端負責切換 stack / readonly；本方法只搬資料。
+        """
+        if not self._preview_active:
+            return
+        new_text = self._serialize_preview_to_markup()
+        if new_text != self.editor.toPlainText():
+            scroll_val = self.editor.verticalScrollBar().value()
+            self._replace_document(new_text)
+            self.editor.verticalScrollBar().setValue(scroll_val)
+
+    # ════════════════════════════════════════════════════════════
+    #  右側翻譯面板（Alt+4）：局部重套用提取/翻譯
+    # ════════════════════════════════════════════════════════════
+
+    def _build_translate_side_panel(self) -> QWidget:
+        """構建右側「提取結果＋填入翻譯＋重新套用」面板。"""
+        w = QWidget()
+        w.setStyleSheet("background:#262a2f;")
+        vl = QVBoxLayout(w)
+        vl.setContentsMargins(6, 6, 6, 6)
+        vl.setSpacing(4)
+
+        # 標題列 + 重新套用按鈕
+        head = QHBoxLayout()
+        title = QLabel("局部重套用（Alt+4）")
+        title.setFont(QFont("MS PGothic", 11))
+        title.setStyleSheet("color:#ddd; font-weight:bold;")
+        head.addWidget(title)
+        head.addStretch()
+        btn_reapply = _make_button("重新套用", "#28a745", "#218838", width=85)
+        btn_reapply.setToolTip(
+            "用右側「提取結果」與「填入翻譯」重新跑替換；\n"
+            "**只覆蓋目前可視行以下**的內容，可視行以上維持現狀。")
+        btn_reapply.clicked.connect(self._reapply_below_visible)
+        head.addWidget(btn_reapply)
+        vl.addLayout(head)
+
+        hint = QLabel("可編輯下方兩欄後按「重新套用」；只會覆蓋畫面捲動到的當前行以下")
+        hint.setFont(QFont("MS UI Gothic", 9))
+        hint.setStyleSheet("color:#888;")
+        hint.setWordWrap(True)
+        vl.addWidget(hint)
+
+        # 「提取結果（可編輯）」
+        lbl1 = QLabel("提取結果（ID|原文）")
+        lbl1.setFont(QFont("MS UI Gothic", 10))
+        lbl1.setStyleSheet("color:#9ecbff; font-weight:bold;")
+        vl.addWidget(lbl1)
+
+        self.side_extracted = QTextEdit()
+        self.side_extracted.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.side_extracted.setAcceptRichText(False)
+        self.side_extracted.setStyleSheet("background:#1e1e1e; color:#ddd;")
+        self.side_extracted.setFont(QFont(self._font_family, self._font_size))
+        vl.addWidget(self.side_extracted, 1)
+
+        # 「填入翻譯（可編輯）」
+        lbl2 = QLabel("填入翻譯（ID|翻譯）")
+        lbl2.setFont(QFont("MS UI Gothic", 10))
+        lbl2.setStyleSheet("color:#9ecbff; font-weight:bold;")
+        vl.addWidget(lbl2)
+
+        self.side_ai = QTextEdit()
+        self.side_ai.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.side_ai.setAcceptRichText(False)
+        self.side_ai.setStyleSheet("background:#1e1e1e; color:#ddd;")
+        self.side_ai.setFont(QFont(self._font_family, self._font_size))
+        vl.addWidget(self.side_ai, 1)
+
+        return w
+
+    def _toggle_translate_side(self) -> None:
+        """Alt+4：切換右側翻譯面板顯示／隱藏（編輯與 WYSIWYG 模式都支援）。"""
+        if self._compare_active:
+            self._set_status("⚠️ 請先回到編輯模式（Alt+1）", "#ffc107")
+            return
+        if self._translate_side.isVisible():
+            self._translate_side.hide()
+            self._active_edit_widget().setFocus()
+            self._set_status("關閉局部重套用面板", "#0f0")
+            return
+
+        # 開啟前先用 provider 拉最新內容
+        if self._extracted_provider is not None:
+            self.side_extracted.setPlainText(self._extracted_provider() or "")
+        if self._translation_provider is not None:
+            self.side_ai.setPlainText(self._translation_provider() or "")
+
+        self._translate_side.show()
+        # 兩欄捲動位置對齊到當前可視行對應的 ID
+        self._jump_side_panels_to_current_line()
+        self._set_status(
+            "📝 Alt+4：編輯後按「重新套用」；只會覆蓋當前可視行以下", "#17a2b8")
+
+    def _get_visible_top_line(self) -> int:
+        """回傳目前可編輯 widget 的可視範圍最上方那行的 0-based 行索引。
+
+        WYSIWYG 模式以 preview_view 為基準（使用者實際看到的視圖）；
+        一般模式以 editor 為基準。
+        """
+        target = self._active_edit_widget()
+        cursor = target.cursorForPosition(QPoint(0, 0))
+        return cursor.blockNumber()
+
+    def _jump_side_panels_to_current_line(self) -> None:
+        """把 side_extracted / side_ai 捲動到對應「目前編輯器可視行」的位置。
+
+        提取結果格式為 `NNN-N|text`（NNN 是 1-based source 行號）。
+        找出第一條 source_line ≥ 目前可視行的 ID，把兩個面板都捲到該行。
+        """
+        top_line_1based = self._get_visible_top_line() + 1
+
+        target_id = None
+        target_extracted_idx = -1
+        for i, ln in enumerate(self.side_extracted.toPlainText().split('\n')):
+            if '|' not in ln:
+                continue
+            id_part = ln.split('|', 1)[0].strip()
+            if not id_part:
+                continue
+            try:
+                id_line = int(id_part.split('-')[0])
+            except ValueError:
+                continue
+            if id_line >= top_line_1based:
+                target_id = id_part
+                target_extracted_idx = i
+                break
+
+        if target_id is None:
+            return
+
+        self._scroll_text_to_line(self.side_extracted, target_extracted_idx)
+
+        for i, ln in enumerate(self.side_ai.toPlainText().split('\n')):
+            if '|' not in ln:
+                continue
+            if ln.split('|', 1)[0].strip() == target_id:
+                self._scroll_text_to_line(self.side_ai, i)
+                break
+
+    def _scroll_text_to_line(self, widget: QTextEdit, line_idx: int) -> None:
+        block = widget.document().findBlockByLineNumber(max(0, line_idx))
+        if not block.isValid():
+            return
+        cursor = widget.textCursor()
+        cursor.setPosition(block.position())
+        widget.setTextCursor(cursor)
+        widget.ensureCursorVisible()
+
+    def _reapply_below_visible(self) -> None:
+        """以目前 side_extracted / side_ai 內容重跑 apply_translation，
+        但**只覆蓋目前可視行以下**的部分；可視行以上維持現狀。
+
+        WYSIWYG 模式：先 sync 把 markup 還原回 editor，使用 editor 的行作為
+        merge 來源；merge 完寫回 editor 後再 _wysiwyg_rerender_after_editor_change
+        重建 preview，讓使用者看到的彩色檢視即時反映新內容。
+        """
+        if self._compare_active:
+            self._set_status("⚠️ 請先回到編輯模式（Alt+1）", "#ffc107")
+            return
+        if not self._original_text:
+            self._set_status("⚠️ 無原文可供重跑替換", "#ffc107")
+            return
+        if self._preview_active:
+            self._sync_preview_to_editor()
+
+        new_extracted = self.side_extracted.toPlainText()
+        new_ai = self.side_ai.toPlainText()
+        if not new_extracted.strip() or not new_ai.strip():
+            self._set_status("⚠️ 提取結果或翻譯為空", "#ffc107")
+            return
+
+        glossary_str = ""
+        if self._glossary_provider is not None:
+            try:
+                glossary_str = self._glossary_provider() or ""
+            except Exception:
+                glossary_str = ""
+        glossary = parse_glossary(glossary_str)
+
+        try:
+            new_full = apply_translation(
+                self._original_text, new_extracted, new_ai, glossary)
+        except Exception as e:
+            self._set_status(f"❌ 套用失敗：{e}", "#dc3545")
+            return
+
+        # 合併：保留 0..top_line-1（使用者已編輯的部分），top_line..end 用新結果
+        top_line = self._get_visible_top_line()
+        old_lines = self.editor.toPlainText().split('\n')
+        new_lines = new_full.split('\n')
+        if top_line < 0:
+            top_line = 0
+        if top_line > len(old_lines):
+            top_line = len(old_lines)
+        if top_line > len(new_lines):
+            top_line = len(new_lines)
+        merged = old_lines[:top_line] + new_lines[top_line:]
+        merged_text = '\n'.join(merged)
+
+        # 保留捲動位置
+        scroll_val = self.editor.verticalScrollBar().value()
+        self._replace_document(merged_text)
+        self.editor.verticalScrollBar().setValue(scroll_val)
+        self._wysiwyg_rerender_after_editor_change()
+
+        # 套用後寫回主面板（讓使用者下次回到主畫面看到的是修改過的版本）
+        if self._extracted_setter is not None:
+            try:
+                self._extracted_setter(new_extracted)
+            except Exception:
+                pass
+        if self._translation_setter is not None:
+            try:
+                self._translation_setter(new_ai)
+            except Exception:
+                pass
+
+        affected = len(new_lines) - top_line
+        self._set_status(
+            f"✅ 已重新套用（覆蓋第 {top_line + 1} 行起共 {affected} 行）", "#0f0")
 
     # ════════════════════════════════════════════════════════════
     #  返回編輯模式（Alt+1）
@@ -1077,20 +1525,25 @@ class EditWindow(QMainWindow):
 
     def _restore_from_original(self) -> None:
         """Alt+W：將編輯器選取範圍以原文同一 (行, 欄) 區間的內容覆蓋。
-        用於翻譯時想局部還原回日文原文的情境。"""
-        if self._compare_active or self._preview_active:
+        用於翻譯時想局部還原回日文原文的情境。
+
+        WYSIWYG 也支援：以 preview_view 的 (行, 欄) 為座標查原文，
+        覆蓋進來的文字以 cursor 預設 charFormat 寫入（亦即無顏色）。
+        """
+        if self._compare_active:
             self._set_status("⚠️ 請先回到編輯模式（Alt+1）", "#ffc107")
             return
         if self._original_text is None:
             self._set_status("⚠️ 無原文可供還原", "#ffc107")
             return
-        cursor = self.editor.textCursor()
+        target = self._active_edit_widget()
+        cursor = target.textCursor()
         if not cursor.hasSelection():
             self._set_status("⚠️ 請先選取要以原文覆蓋的範圍", "#ffc107")
             return
         start_pos = cursor.selectionStart()
         end_pos = cursor.selectionEnd()
-        doc = self.editor.document()
+        doc = target.document()
         sc = QTextCursor(doc)
         sc.setPosition(start_pos)
         start_line = sc.blockNumber()
@@ -1123,15 +1576,16 @@ class EditWindow(QMainWindow):
     # ════════════════════════════════════════════════════════════
 
     def _extract_jp_from_selection(self) -> None:
-        """Alt+C：從選取範圍（編輯器或原文比對模式）提取日文並複製到剪貼簿。
+        """Alt+C：從選取範圍（編輯器、WYSIWYG 預覽或原文比對模式）提取日文並複製到剪貼簿。
 
         先複製選取內容，再以主程式「提取日文」相同的正則邏輯剔除 AA 圖形，
         只保留純文字行後以 \\n 串接寫入剪貼簿。
         """
-        if self._preview_active:
-            self._set_status("⚠️ 預覽模式不支援提取（請 Alt+1 回編輯或 Alt+2 切比對）", "#ffc107")
-            return
-        view = self.orig_view if self._compare_active else self.editor
+        if self._compare_active:
+            view = self.orig_view
+        else:
+            # WYSIWYG 與一般編輯都從 _active_edit_widget 取
+            view = self._active_edit_widget()
         cursor = view.textCursor()
         if not cursor.hasSelection():
             self._set_status("⚠️ 請先選取要提取日文的範圍", "#ffc107")
@@ -1166,12 +1620,21 @@ class EditWindow(QMainWindow):
     # ════════════════════════════════════════════════════════════
 
     def _scroll_to_top(self) -> None:
-        """將游標與捲軸移到文件最上方（切入編輯器時使用）。"""
+        """將游標與捲軸移到文件最上方（切入編輯器時使用）。
+
+        WYSIWYG 模式下同時把 preview_view 也歸零，避免從別份檔切回時殘留舊捲動位置。
+        """
         cursor = self.editor.textCursor()
         cursor.setPosition(0)
         self.editor.setTextCursor(cursor)
         self.editor.verticalScrollBar().setValue(0)
         self.editor.horizontalScrollBar().setValue(0)
+        if self._preview_active:
+            pcur = self.preview_view.textCursor()
+            pcur.setPosition(0)
+            self.preview_view.setTextCursor(pcur)
+            self.preview_view.verticalScrollBar().setValue(0)
+            self.preview_view.horizontalScrollBar().setValue(0)
 
     def _scroll_to_line(self, line: int) -> None:
         doc = self.editor.document()
@@ -1182,6 +1645,16 @@ class EditWindow(QMainWindow):
         cursor.setPosition(block.position())
         self.editor.setTextCursor(cursor)
         self.editor.ensureCursorVisible()
+        # WYSIWYG 模式下同步把 preview_view 也捲到對應行（preview 與 editor
+        # 的文字行序一致：_render_preview_doc 以同一份 plain text 重建文件）
+        if self._preview_active:
+            pdoc = self.preview_view.document()
+            pblock = pdoc.findBlockByLineNumber(line - 1)
+            if pblock.isValid():
+                pcur = self.preview_view.textCursor()
+                pcur.setPosition(pblock.position())
+                self.preview_view.setTextCursor(pcur)
+                self.preview_view.ensureCursorVisible()
 
     # 將常見「亮綠」對應到 toast 風格的深綠底（與 MainWindow.show_status 對齊）
     _STATUS_COLOR_MAP = {
@@ -1219,11 +1692,41 @@ class EditWindow(QMainWindow):
             self.setWindowTitle("* " + self.windowTitle().lstrip("* "))
 
     def _write_current(self, file_path: str) -> bool:
+        # 若目前在 WYSIWYG（Alt+3 編輯預覽）模式，先把編輯成果序列化回 editor，
+        # 再從 editor 取 plain text 寫檔，避免 WYSIWYG 中的編輯遺漏。
+        if self._preview_active:
+            self._sync_preview_to_editor()
         text = self.editor.toPlainText()
+        # 是否要把字型 Base64 內嵌到 <head>（離線手機可正確顯示）
+        embed_font_path = None
+        embed_font_family = None
+        if self._embed_font_provider is not None:
+            try:
+                font_key = self._embed_font_provider()
+                if font_key:
+                    _FONT_MAP = {
+                        "monapo":    ("monapo.ttf",    "Monapo"),
+                        "Saitamaar": ("Saitamaar.ttf", "Saitamaar"),
+                        "textar":    ("textar.ttf",    "textar"),
+                    }
+                    fn, fam = _FONT_MAP.get(font_key, ("monapo.ttf", "Monapo"))
+                    fonts_dir = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)), "fonts")
+                    cand = os.path.join(fonts_dir, fn)
+                    if os.path.exists(cand):
+                        embed_font_path = cand
+                        embed_font_family = fam
+            except Exception:
+                pass
         try:
             # 底色僅為編輯器預覽效果，不寫入檔案（交由後續網站控制）
-            # 若原檔已有自訂 <head>（例如外掛字型 CSS），儲存時沿用。
-            write_html_file(file_path, text, head_html=self._custom_head)
+            # 若原檔已有自訂 <head>（例如外掛字型 CSS），儲存時沿用；
+            # 但啟用內嵌字型時會強制重產 head（write_html_file 行為）。
+            write_html_file(
+                file_path, text, head_html=self._custom_head,
+                embed_font_path=embed_font_path,
+                embed_font_family=embed_font_family,
+            )
         except OSError as e:
             QMessageBox.critical(self, "儲存失敗", str(e))
             return False

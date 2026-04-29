@@ -12,14 +12,14 @@
 *   **技術棧**: Python 3, **PyQt6** (UI 框架), `re`, `math`, `os`, `html`, `urllib.request`, `threading`, `gzip`, `json`, `subprocess`
 *   **狀態存儲機制**:
     *   `aa_settings_cache.json` — 暫存 UI 狀態 (原文、過濾規則、術語表、話數、預覽暫存、URL 記錄、背景/文字色、各開關狀態、作品+作者歷史 `work_history` 等)，確保關閉重開後不丟失資料。**正則表達式不從暫存讀取**，由 `AA_Settings.json` 管理。
-    *   `AA_Settings.json` — 正式設定檔，儲存 `filter`、`glossary`、`glossary_temp`、`base_regex`、`invalid_regex`、`symbol_regex`。
+    *   `AA_Settings.json` — 正式設定檔。寫入順序固定為 `base_regex`、`invalid_regex`、`symbol_regex`、`filter`、`glossary`、`glossary_temp`（regex 在前、文字內容在後，方便人工編輯時優先看到 regex）。讀取使用 `data.get(key)`，不依賴順序。`save_regex_to_settings()` 也會以同一順序重建 dict 寫回。
     *   `aa_original_cache.json` — 原文暫存。**主索引為 HTML 檔名 basename**，值為 `{text, ts, author_key?}`；**上限由 `aa_settings_cache.json` 的 `fetch_history_limit` 控制（預設 50）**，超過時以時間戳保留最新。編輯器儲存／翻譯按鈕按下時寫入（參見 §4.3）。`import_html` 或從批次搜尋開啟同名檔案時自動載入為比對原文。**備援索引**：`author_key` 為從原文第一則投稿標頭抽出的「日期 + 時間.毫秒 + ID」指紋（例：`2023/04/02(日) 20:54:38.52 ID:5UkYdPSV`），由 `MainWindow._compute_author_fingerprint()` 生成。`load_original_for_file()` 檔名查無時會讀取該 HTML 的 `<pre>` 內容、算出同樣指紋，掃描 cache 中 `author_key` 相符的 entry 作為 fallback；舊 entry 若無 `author_key` 欄位，在掃描當下以同規則從 `entry['text']` 即時計算，不需強制 migration。用途：使用者重新命名 HTML 檔後仍能找到對應原文。
-    *   `aa_settings_cache.json` 新增 key：`work_history_limit`（作者歷史上限，預設 10）、`fetch_history_limit`（URL 讀取紀錄 + `aa_original_cache.json` 共用上限，預設 50）、`glossary_auto_search`（批次搜尋術語按鈕是否自動搜尋，預設 True）；皆由 ⚙ 設定視窗（詳見 §4.12）調整並持久化。
+    *   `aa_settings_cache.json` 新增 key：`work_history_limit`（作者歷史上限，預設 10）、`fetch_history_limit`（URL 讀取紀錄上限，預設 50）、`original_cache_limit`（`aa_original_cache.json` 上限，預設 50；舊版只有 `fetch_history_limit` 共用，讀取時若新欄位缺失則沿用 `fetch_history_limit` 作為遷移值）、`glossary_auto_search`（批次搜尋術語按鈕是否自動搜尋，預設 True）、`editor_default_wysiwyg`（進入編輯器時是否自動切換成所見即所得模式，預設 False）、`embed_font_name`（儲存 HTML 時要內嵌的字型名稱，可選 `"monapo"` / `"Saitamaar"` / `"textar"`，預設 `"monapo"`）；皆由 ⚙ 設定視窗（詳見 §4.12）調整並持久化。
     *   `aa_crash.log` — 啟動期錯誤日誌（append 模式）。`aa_tool/crash_logger.py` 的 `install_crash_logger()` 於 `main()` 最前面呼叫一次，安裝三層攔截：(1) `faulthandler.enable(file=...)` 捕 C 層 segfault（PyQt6 widget 生命期問題等）並 dump 所有執行緒的 C 堆疊；(2) `sys.excepthook` 記錄未捕捉的 Python 例外；(3) `qInstallMessageHandler` 記錄 Qt 的 WARNING / CRITICAL / FATAL 訊息（DEBUG/INFO 過濾）。閃退時打開檔案即可看到最後一次 session 的 trace。
 *   **字體設計**:
     *   PyQt6 編輯器 (`aa_edit_qt.py`) 預設 **`MS PGothic` 12pt** — **⚠️ 不可改動預設值**：整個專案所有 AA 對齊演算法（`bubble_alignment.py`、`_pad_to_width`、吶喊/斜線/普通/方框寬度計算、`QtFontMeasurer`）都以 MS PGothic 的字寬 metrics 為基準；一旦改成 submona / Meiryo / 其他字體，對齊結果會全部錯位。`DEFAULT_EDITOR_FONT` 常數與 `aa_settings_cache.json` 的 `editor_font_family` 都必須維持 `"MS PGothic"`。
-    *   `Ctrl+F` 延伸出的搜尋列提供字體下拉（可編輯，預設清單僅含 **MS PGothic** 與 **Monapo**）與 6–48pt `QSpinBox`，**僅供使用者臨時切換預覽效果**，不應修改預設值。變更後同步更新 `editor`、`orig_view`、`_measurer`、CSS 與行高；使用者個人選擇持久化於 `aa_settings_cache.json` 的 `editor_font_family` / `editor_font_size`
-    *   **內建字體載入** (`load_bundled_fonts()`)：`aa_main_qt.main()` 與 `aa_edit_qt.main()` 在 QApplication 建立後各呼叫一次，掃描 `fonts/` 資料夾中的 `.ttf` / `.otf` 並以 `QFontDatabase.addApplicationFont()` 載入；目前含 `fonts/monapo.ttf`（家族名 `Monapo`）
+    *   `Ctrl+F` 延伸出的搜尋列提供字體下拉（可編輯，預設清單為 **MS PGothic / Monapo / TEXTAR / Saitamaar**，定義於 `aa_edit_qt.py:EDITOR_FONT_CHOICES`）與 6–48pt `QSpinBox`，**僅供使用者臨時切換預覽效果**，不應修改預設值。變更後同步更新 `editor`、`orig_view`、`_measurer`、CSS 與行高；使用者個人選擇持久化於 `aa_settings_cache.json` 的 `editor_font_family` / `editor_font_size`
+    *   **內建字體載入** (`load_bundled_fonts()`)：`aa_main_qt.main()` 與 `aa_edit_qt.main()` 在 QApplication 建立後各呼叫一次，掃描 `fonts/` 資料夾中的 `.ttf` / `.otf` 並以 `QFontDatabase.addApplicationFont()` 載入；目前含 `fonts/monapo.ttf`（家族名 `Monapo`）、`fonts/textar.ttf`（家族名 `TEXTAR`）、`fonts/Saitamaar.ttf`（家族名 `Saitamaar`）。要新增字型只需放入 `fonts/`，並把家族名加進 `EDITOR_FONT_CHOICES`。
     *   主視窗 UI 字體以 Qt 預設 Style Sheet（`aa_tool/dark_theme.qss`）控制；主面板各輸入區共用 `MS PGothic` 作為顯示字體以利 AA 對齊預覽。
 
 ## 2. 核心目標與工作流程 (Core Workflow)
@@ -115,7 +115,7 @@
         3. **斜線框** (`＼─|──|─／` / `／─|──|─＼`)：與吶喊框邏輯類似，辨識 `│` 或 `─` 作為內容分隔符重建邊框。
         4. **方框** (`┌─┐` / `│…│` / `└─┘`)：邏輯同上。
         * **Padding 字元定義**：半形空白 ` `、全形空白 `　`、半形點 `.` 三者統一視為對齊填白（常數 `_PAD_CHARS`）。`.` 等價於空白是為了相容 AA 作者以點代替空白避免瀏覽器壓縮的慣用寫法。
-        * **統一寬度公式**：四種框型一律以「內容寬」為目標寬，並多留一格全形空白餘裕。普通框 `tw = 內容最大寬 + 兩個全形空白寬`；方框/吶喊/斜線 `tw = 內容最大寬 + 一個全形空白寬`（其量測時已含一個全形邊距，加總後等同視覺上多 1 格）。**會依內容縮減**：原邊框比內容寬時也會被壓縮回內容寬度；只有在偵測不到內容時才退回原邊框寬度。「內容寬度」透過 `_content_width()`（`m.measure(text.rstrip(_PAD_CHARS))`）量測。不再使用 `VALID_TEXT_RE` 的特殊字元白名單。
+        * **統一寬度公式**：四種框型一律以「內容寬」為目標寬。方框/吶喊/斜線 `tw = 內容最大寬 + 一個全形空白寬`（其量測時已含一個全形邊距，加總後等同視覺上多 1 格）。普通框 `tw = border 左側錨點寬 + 對話框內側最大寬 + border 右側錨點寬`，**不額外加全形空白餘裕**——因為「對話框內側最大寬」量測自 content 行最右邊 `|`/`│`/`｜` 之後到末尾非 padding，這段已自然包含框內 leading pad（如 `　 ` ≈ 1.5 fw），就是視覺餘裕本身；若再加會多出 1-2 個 ￣ 不必要延伸。**會依內容縮減**：原邊框比內容寬時也會被壓縮回內容寬度。**普通框 ref_n 對稱重建**：上下邊框 (`f´…￣` / `乂…＿`) 用 top border 算出的 ￣ 數量套到所有 border，維持視覺對稱；各 border 自身的 right (`｀ヽ` 2 fw vs `ノ` 1 fw) 不同會讓總寬差 1 fw，符合手寫慣例。**選 content 行最右邊 `|`/`│`/`｜` 而不是用 content.left 整段**，是為避開 content 行 AA 前綴與 border 行 AA 前綴在字寬量測上的差異（例 `,,..-＜` 累積寬度與 `（＿ノ--'　　ﾉ` 累積寬度可能差 ~3 fw），否則本應縮減的對話框會被誤判延伸。「內容寬度」透過 `_content_width()`（`m.measure(text.rstrip(_PAD_CHARS))`）量測。不再使用 `VALID_TEXT_RE` 的特殊字元白名單。
         * **浮點量測**：`QtFontMeasurer.measure()` 回傳 `QFontMetricsF.horizontalAdvance()` 的浮點值，避免多次 snap 累積 ±0.5px 誤差。`_pad_to_width()` 內建最終 snap，無需另外的 `_pad_to_width_snap`。
     *   **對話框(全) (`adjust_all_bubbles()`)**: 掃描全文，自動偵測並對齊所有獨立對話框（普通/吶喊/斜線/方框），由下而上逐框處理以避免行號偏移。與單選修正共用同一組 `process_*` 函式與 padding/寬度規則。
     *   **對齊上一行 (`align_to_prev_line()`)**: 於游標處往前補足空白，將游標後第一個非空白字元對齊到上一行末端。演算法：① 找游標後第一個非空白字元 (`target_col`)；② 先以 `_PAD_CHARS` 剝除上一行尾端 padding 得 `prev_content`，再取 `m.measure(prev_content[:-1])` 作為目標寬（若 `prev_content` 僅 1 字元則取全寬，避免 `[:-1]` 產生 0 的 bug）；③ 以 `_pad_to_width()` 補空白至目標；④ 回傳 `res_prefix + ' ' + selected_text`。UI 端（`_align_to_prev`）對 `QTextBlock.text()` 加入 `\u2029` 防禦，與 `_adjust_bubble` 一致。
@@ -129,8 +129,32 @@
     *   **📂 開啟（PyQt6 編輯器）**: 位於「儲存」與「返回」之間，呼叫 `MainWindow.import_html()`，與主畫面「打開已儲存的 HTML」按鈕相同；開啟時會自動查找 `aa_original_cache.json` 中的同名紀錄作為比對原文。
     *   **進入編輯器時自動回到最上層 (`_scroll_to_top()`)**: `MainWindow.show_edit_panel()` 重新載入既有 `EditWindow` 時，若沒有指定 `scroll_to_line`，會呼叫 `_scroll_to_top()` 將游標與 `verticalScrollBar`/`horizontalScrollBar` 都歸零；避免「按替換進入」或「開啟舊檔」時還停留在上一份檔案的捲動位置。
     *   **檢視模式快捷鍵（Alt+1/2/3）**: `Alt+1 = _return_to_editor()` 回到編輯模式（若目前在比對/預覽則自動切回；已在編輯則僅 focus）；`Alt+2 = _toggle_compare()` 進/出原文比對；`Alt+3 = _toggle_preview()` 進/出上色預覽。三模式可直接互切：在比對模式按 Alt+3 會直接跳到預覽（沿用比對視圖的捲動位置），在預覽模式按 Alt+2 會直接跳到比對；同一模式的快捷鍵重複按下則退出回編輯（toggle）。
+    *   **局部重套用面板 (`_toggle_translate_side()` — Hotkey: `Alt+4`)**: 在編輯器右側展開可同時編輯「提取結果」與「填入翻譯」的面板（兩個 `QTextEdit`），按下「重新套用」會用新內容重跑 `apply_translation`，但**只覆蓋目前可視行以下**的部分（可視行以上維持使用者已編輯的成果）。實作要點：
+        1. **UI 結構**：把 `self.stack`（編輯/比對/預覽 `QStackedWidget`）與 `self._translate_side`（右側面板 `QWidget`）放進 `QSplitter(Horizontal)`，預設右側 hide；Alt+4 切換可見。
+        2. **資料來源**：開啟時呼叫 `extracted_provider()` / `translation_provider()`（由主程式接到 `_translate_panel.get_extracted_text` / `get_ai_text`）拉最新內容；不會 cache 上次的編輯。
+        3. **可視行對齊**：以 `editor.cursorForPosition(QPoint(0,0)).blockNumber()` 取得目前可視最頂行（0-based）。提取結果格式為 `NNN-N|text`（NNN 是 1-based source 行號），找出第一條 `id_line ≥ 可視行+1` 的 ID，把 `side_extracted` 與 `side_ai` 都捲到對應 ID 的那一行。
+        4. **重新套用**：以 `self._original_text` 為 source 重跑 `apply_translation(source, side_extracted, side_ai, glossary)`；切割合併 `editor.lines[:top]` + `new_full.lines[top:]`；保留 `verticalScrollBar` 位置。
+        5. **回寫主面板**：套用後呼叫 `extracted_setter` / `translation_setter` 把右側內容寫回主畫面的「提取結果」與「填入翻譯」，下次回主畫面看到的是修改過的版本。
+        6. **限制**：必須有 `_original_text`（編輯器是從 `apply_translation` 進入時才會有）；比對/預覽模式中按下會提示先回編輯。
     *   **原文比對模式 (`_toggle_compare()` — Hotkey: `Alt+2`)**: 切換至 `QStackedWidget` index 1（`self.orig_view`，唯讀 `QTextEdit`），內容為傳入的 `_original_text`（或從 `aa_original_cache.json` 載入）。進入時同步游標行號與 `verticalScrollBar`；比對中停用 `_edit_buttons`、工具列染棕 (`#8b6f47`)。`orig_view` 底色沿用編輯器 `_bg_color`。
-    *   **上色預覽模式 (`_toggle_preview()` — Hotkey: `Alt+3`)**: 將編輯器文字中的 `<span style="color:...">...</span>` 標籤實際渲染為彩色（模擬瀏覽器輸出），切換至 `QStackedWidget` 的 index 2（`self.preview_view`，唯讀 `QTextEdit`）。`_render_preview_doc()` 直接以 `QTextCursor` 逐段 `insertText`，依 `_COLOR_SPAN_RUN_RE` 解析出 (文字, 顏色) runs 並套用 `QTextCharFormat.setForeground`；**不使用 `setHtml`**，以避免 Qt 對 `<pre>` 區塊邊界產生的橫線與忽略 `line-height` 的問題。最後呼叫與編輯器相同的 `_apply_line_height_to(self.preview_view)` 取得一致的 FixedHeight 行高，使進入/離開預覽時的捲動位置可逐行對齊；同時套用與編輯器一致的底色/字型 stylesheet。預覽中停用 `_edit_buttons`、工具列染紫 (`#4a3470`)。
+    *   **WYSIWYG 開檔自動重渲染**：`MainWindow.show_edit_panel()` 對既有 `EditWindow` `_replace_document()` 寫入新檔內容後，若 `_preview_active` 為 True 會立即呼叫 `_wysiwyg_rerender_after_editor_change()` 並**在捲動之前**執行，確保後續 `_scroll_to_line()` / `_scroll_to_top()` 能作用於最新的 preview 文件。`_scroll_to_line()` 與 `_scroll_to_top()` 在 `_preview_active=True` 時會同步把 `preview_view` 也捲到相同行（透過 `findBlockByLineNumber` 對 preview 文件取得對應 block）。批次搜尋從 WYSIWYG 預設開啟（`editor_default_wysiwyg=True`）切換到目標檔/目標行也走這條路徑：`_toggle_preview()` 之後額外補一次 `_scroll_to_line()` 才能正確捲到批次搜尋指定的行。先前需要手動 Alt+1 切回編輯再 Alt+3 切回預覽才會更新。
+    *   **所見即所得編輯模式 (`_toggle_preview()` — Hotkey: `Alt+3`)**: 將編輯器文字中的 `<span style="color:...">...</span>` 標籤實際渲染為彩色（模擬瀏覽器輸出）並**直接在彩色檢視中編輯**，切換至 `QStackedWidget` 的 index 2（`self.preview_view`，WYSIWYG 模式下 `setReadOnly(False)`）。`_render_preview_doc()` 直接以 `QTextCursor` 逐段 `insertText`，依 `_COLOR_SPAN_RUN_RE` 解析出 (文字, 顏色) runs 並套用 `QTextCharFormat.setForeground`；**不使用 `setHtml`**，以避免 Qt 對 `<pre>` 區塊邊界產生的橫線與忽略 `line-height` 的問題。最後呼叫與編輯器相同的 `_apply_line_height_to(self.preview_view)` 取得一致的 FixedHeight 行高，使進入/離開預覽時的捲動位置可逐行對齊；同時套用與編輯器一致的底色/字型 stylesheet。預覽中停用 `_edit_buttons`（對話框/補空白/全文替換等需操作 plain text 的工具），但**保留 `_color_buttons`**（上色 / 🎨 取色器）可用，工具列染紫 (`#4a3470`)。
+
+        實作要點：
+        1. **資料模型維持單一來源**：`editor` 仍是「plain text + 字面 `<span>` markup」的 source of truth；preview_view 只在 WYSIWYG 期間以 `QTextCharFormat.foreground` 表現顏色。
+        2. **離開時序列化** (`_sync_preview_to_editor()` → `_serialize_preview_to_markup()`)：走訪 `preview_view.document()` 的每個 `QTextBlock` / `QTextFragment`，foreground 顏色非 `#000000` 時包成 `<span style="color:#xxxxxx">…</span>`，否則 emit 原文，block 之間以 `\n` 分隔。完成後 `_replace_document` 寫回 editor，保留 verticalScrollBar。
+        3. **進入時抑制 dirty**：`_render_preview_doc` 重建文件會觸發 `preview_view.textChanged`，用 `_preview_suppress_dirty` 旗標暫時擋掉 `_on_preview_changed`，避免「進入即標 dirty」。
+        4. **使用者編輯標 dirty**：`preview_view.textChanged` → `_on_preview_changed` 在 WYSIWYG 期間觸發 `_dirty=True`，使 closeEvent 的「未儲存」提醒對 WYSIWYG 編輯也有效。
+        5. **儲存路徑接通**：`_write_current()` 開頭判斷 `_preview_active`，先 `_sync_preview_to_editor()` 再從 editor 取 plain text 寫檔。Ctrl+S / 另存 / 工具列「← 返回」(`_handle_back_click`) / Esc (`_on_escape`) 都會觸發同步。Alt+1 (`_return_to_editor`) 走 `_toggle_preview` 的離開分支，自動序列化。
+            - **Flag 翻轉順序陷阱**：`_sync_preview_to_editor()` 開頭有 `if not self._preview_active: return` 的安全檢查，因此在 `_toggle_preview` 與 `_toggle_compare` 中，**必須在翻轉 `_preview_active = False` 之前就呼叫 sync**，否則同步會被早期 return 擋掉，造成 WYSIWYG 中的編輯在切回 Alt+1 編輯模式 / Alt+2 比對模式時被「還原」。所有未來新增的「離開 WYSIWYG」路徑都必須遵守此順序（先 sync、再翻 flag）。
+        6. **上色雙路徑** (`_apply_color`)：偵測 `_preview_active`，True → `_apply_color_wysiwyg()` 用 `cursor.mergeCharFormat(QTextCharFormat).setForeground` 直接改 fragment 顏色；若選取範圍中已有非黑顏色，再次按下會 merge 成黑色（移除顏色）。False → 既有的字面 `<span>` markup 包覆/拆除路徑。
+        7. **Round-trip 注意**：既有 markup 中的 CSS 命名色（`color:red`）會被序列化正規化為 `#rrggbb`（`QColor.name()` 格式）。`<` `>` `&` 等字元保持原樣不做 HTML escape。
+        8. **工具列功能對等**：WYSIWYG 模式下所有編輯工具與既有編輯模式對等，由各 handler 透過 `_active_edit_widget()` helper 路由到 preview_view（WYSIWYG）或 editor（一般）。具體分流：
+            - **Selection-based 工具直接作用於 preview_view**（`_strip_spaces` / `_pad_spaces` / `_adjust_bubble` / `_align_to_prev` / `_smart_action` / `_reverse_glossary_replace` / `_restore_from_original` / `_extract_jp_from_selection`）。`_extend_selection_to_full_lines(target)` 改為帶 widget 參數。代價：被 `cursor.insertText()` 替換掉的選取範圍會以 cursor 預設 charFormat 寫入（顏色可能歸零），使用者可重新上色。
+            - **Whole-doc 工具走 sync→run-on-editor→re-render**（`_replace_all` / `_on_glossary_received` / `_adjust_all_bubbles` / `_reapply_below_visible`）：`_sync_preview_to_editor()` 把 markup 還原回 editor → 在 editor 上跑既有邏輯（`_replace_document` 觸發 editor.textChanged → dirty）→ `_wysiwyg_rerender_after_editor_change()` 重建 preview。期間 `_preview_suppress_dirty=True` 避免 preview.textChanged 重複標 dirty。**這條路徑能完整保留顏色**，因為運算發生在帶字面 `<span>` markup 的 editor plain text 上。
+            - **搜尋 Ctrl+F**（`_find_next` / `_hide_search`）改為作用於 `_active_edit_widget()`，WYSIWYG 中可直接搜尋彩色檢視。
+            - **Alt+4 局部重套用**：解除 WYSIWYG 阻擋；`_get_visible_top_line()` 改用 `_active_edit_widget()` 取使用者實際看到的可視行；reapply 完走 `_wysiwyg_rerender_after_editor_change()` 即時更新彩色檢視。
+            - **`_apply_line_height()`** 在 `_preview_active` 時連帶呼叫 `_apply_line_height_to(self.preview_view)`，避免插入新文字後行高不一致。
     *   **術語反向取代 (`_reverse_glossary_replace()` — Hotkey: `Alt+E`)**: 在使用者選取範圍內，把術語表等號「右邊」的替代文字還原回等號「左邊」的原文。透過既有 `self._glossary_provider` callback 取得合併術語表（一般 + 臨時），呼叫 `aa_tool.translation_engine.apply_reverse_glossary_to_text()`：以「替代文字 → 原文」反向 map 做長度遞減單輪 regex 取代，並會吃掉匹配尾端最多 `len(原文) - len(替代文字)` 個 `\u3000`（反向抵銷 Auto-Padding）。若反向 map 有衝突（多個原文對應同一替代文字），保留最長原文。替換後呼叫 `_apply_line_height()`。選取為空、術語表為空、無命中各有對應 toast。
     *   **選取範圍提取日文並複製 (`_extract_jp_from_selection()` — Hotkey: `Alt+C`)**: 在編輯模式或原文比對模式下有選取時，沿用主程式「提取日文」的正則邏輯（`aa_tool.text_extraction.extract_text`）剔除選取範圍內的 AA 圖形，只保留純文字行，以 `\n` 串接後寫入剪貼簿。資料來源：`_compare_active=True` 時讀 `orig_view`、否則讀 `editor`；預覽模式按下會提示切回。正則與過濾規則由 `EditWindow(extract_regex_provider=…)` callback 提供（主程式傳入 `(current_base_regex, current_invalid_regex, current_symbol_regex, get_filter_text())`），與主畫面「提取日文」使用同一組設定。選取為空、未取到文字各有對應 toast。與 Alt+W 差異：Alt+W 是把選取以原文覆寫（改變文件），Alt+C 只讀取選取並把剔 AA 後的結果放到剪貼簿（不改文件）。
     *   **ESC 返回 (`_on_escape()` — Hotkey: `Esc`)**: 搜尋列（Ctrl+F）開啟中時優先關閉搜尋列（對應舊行為 `_hide_search`）；否則呼叫 `self._on_back()` 回主畫面（無 back callback 時則 `self.close()` 關閉視窗）。
@@ -161,7 +185,7 @@
 *   **Qt 端功能**:
     *   URL 輸入 + 忽略留言 Checkbox + 讀取按鈕（綠）+ Enter 觸發。
     *   關聯記事列表（含當前話標記 `▶`）+ 上一話/下一話按鈕。
-    *   讀取紀錄列表（最多 50 筆，倒序顯示）+ 清除紀錄按鈕（紅）。
+    *   讀取紀錄列表（最多 `fetch_history_limit` 筆，倒序顯示）+ 清除紀錄按鈕（紅）+ 搜尋框（`hist_search` `QLineEdit`，placeholder「🔍 搜尋紀錄（標題或網址）」、`setClearButtonEnabled(True)`）。`textChanged` 觸發 `_on_history_search_changed()` 即時把 `_history_filter` 存成 lower-case 子字串，再由 `_refresh_history()` 對 `entry["title"]` / `entry["url"]` 做 case-insensitive 子字串比對；無命中時顯示「（無符合「…」的紀錄）」提示。
     *   點擊關聯/紀錄項目自動填入 URL 並觸發抓取。
     *   成功後 400ms 自動關閉。
     *   `closeEvent` 同步最終 `author_only` 狀態。
@@ -176,6 +200,7 @@
     *   **blog.fc2.com (`_parse_fc2blog`)**: `div.ently_text` **或 `div.entry_body`**（兩種 FC2 模板擇一） + `dl.relate_dl`（含 `web.archive.org` 封存版、`yaruok.blog.fc2.com` 等變體）
     *   **yaruobook.jp (`_parse_yaruobook`)**: `dt.author-res-dt` / `dd.author-res` + `ul.relatedPostsWrap.relatedPostsPrev/Next`；`li.currentPost` 標記當前話。**關聯清單排序**：原始 Prev 區塊為 `[currentPost, 前一話, 前前話, ...]`（當前在前、舊話倒序），解析時須將 Prev **反轉**後再接 Next，才能得到按時間順序排列的清單，供「下一話」按鈕以 `current_idx + 1` 正確取得下一集
     *   **yaruobook.net (`_parse_yaruobook_net`)**: 早期文章用的站點，內文幾乎全以 HTML 數字字元引用表示（`&#65306;` = `：`、`&#26085;` = `日` 等）。入口容器改用 `<div id="entry-content" class="entry-content cf">`（不受 entity 影響），結束邊界為 `<div id="custom_html-` / `widget-single-content-bottom` / `relatedPostsWrap` 任一最先出現者；內文仍為 `<dl>/<dt>/<dd>`，交由 `_extract_dt_dd_posts` 處理（其內部 `html.unescape` 會把 entity 還原成正常字元，讓 `_POST_HEADER_RE` / `_POSTER_NAME_RE_ALT` 正常匹配「N ： AUTHOR ： YYYY/MM/DD...」標頭）。關聯連結沿用 `.jp` 的 `relatedPostsWrap.relatedPostsPrev/Next` 結構與 Prev 反轉邏輯。
+    *   **yaruo-matome.com (`_parse_yaruo_matome`)**: 入口容器為 `<div id="entry-content">`，結束邊界為 `<ul class="nexe-prev-post">`；內文為 `<dl>/<dt>/<dd>`，`<dt>` 使用 `<font color>` 包住 trip code，由 `_normalize_color_tags` 轉換為 color span。呼叫 `_extract_dt_dd_posts` 前做一項預處理：WordPress 會在每個 `<br />` 後插入 source HTML `\n`，若不處理會讓 `<br />` → `\n` 後變成 `\n\n`（每行多一個空行）；以 `re.sub(r'<br\s*/?>[ \t]*\n', '<br />', ...)` 移除 `<br />` 後的多餘換行。`<p>&nbsp;</p>` 等空白 spacer 不做處理，保留其自然轉換成的空行（對應作者行與內容之間的視覺空行）。`_extract_dt_dd_posts` 的 regex lookahead 已加入 `</dd>` 以防止最後一則 dd 因無後續 `<dt>`／`</dl>` 而把 `</dd>` 後的頁面垃圾內容一併擷取（此修改對所有解析器均有效）。關聯連結從 `<ul class="nexe-prev-post">` 解析：有 `<a>` 的 `<li>` 為其他話，只有 `<span>` 的 `<li>` 為當前話（`is_current=True`）。原始清單為「最新話 → … → 當前話（最底）」，解析後 **reverse** 為時間順序，讓「下一話」按鈕以 `current_idx + 1` 正確取得下一集。**平面 `<p>...<br/>...` 變體 fallback**：部分文章（例：`yaruo-matome.com/archives/21514`）整批貼文塞在單一 `<p>` 內、用 `<br/>` 分行，每行首字 `.` 為防瀏覽器壓縮空行的占位符；標頭格式為「.N ： AUTHOR ： YYYY/MM/DD(曜) HH:MM:SS.ms ID:XXX」。**僅在 `_extract_dt_dd_posts` 抽取為空時啟用**，避免影響既有正常頁面。流程：先以 regex 移除 `<button>` 與 `class="wpfp-*"` 的 span（書籤按鈕、收藏連結 cruft），`<br/>`→`\n`，`_strip_tags_keep_color`，每行 `^\.` 剝除占位字元；之後沿用 `_filter_color_by_author` 處理作者過濾。**安全閥**：只有當 `out_lines` 中存在符合 `_POST_HEADER_RE` 的標頭行才採用 fallback 結果，避免把純 cruft 文字當成內文。
 *   **保留貼文內空行**: `_extract_dt_dd_posts()` 在切 dd 內容時，只 trim 尾端空行、不 trim 開頭空行，以避免「作者行」與實際 AA 內文之間的排版空行被吃掉。
 *   **作者名稱格式**: `_is_author_post()` 支援三種標頭格式並自動正規化空白（透過 `_extract_poster_name()` 共用解析）：
     1.「N 名前：AUTHOR[...]」(5ch / FC2 / himana)
@@ -183,6 +208,7 @@
     3.「N : AUTHOR [sage]/[] YYYY/MM/DD(曜) HH:MM:SS ID:XXX」(yarucha.blog.fc2.com 等站點，以 `[...]` 方括號而非 `：` 分隔名稱與日期)
 
     行內切分用的 `_POST_HEADER_RE`（供 `_filter_color_by_author` 判斷貼文邊界）同樣支援三種格式；`_POSTER_NAME_RE_ALT` 的第二分隔符擴為 `(?:[：:]|\[[^\]]*\])`，同時涵蓋 2 與 3。
+    **尾端標點容錯**：名稱比對先做 `==` 精確比較，失敗時再以 `_NAME_TRAIL_RE`（`[\s.．。・,，、]+$`）剝除兩邊尾端標點後再比一次。用於容許作者在連續貼文偶爾在名稱後多打 dot 等情況（例：`yaruobookshelf.jp` 上 `三流 ◆WiAEg3iQI` ↔ `三流 ◆WiAEg3iQI.`，trip 碼與 ID 相同確認為同一人；若不容錯，第 2 篇之後在 `author_only=True` 時會被全部過濾掉）。
 *   **編碼自動偵測**: 依序嘗試 `utf-8`、`cp932`、`euc-jp`、`shift_jis`。
 *   **Gzip 解壓縮**: 自動解壓縮伺服器回傳的 gzip 內容。
 *   **關聯記事導航**: 顯示同系列各話的連結清單，可直接點擊切換；提供上一話/下一話按鈕。
@@ -191,7 +217,7 @@
 *   **直接讀取上/下一話 (`fetch_prev_chapter()` / `fetch_next_chapter()`)**: 首頁原文區標頭提供「◀ 上一話」「下一話 ▶」按鈕，皆透過共用 `_fetch_adjacent_chapter(direction)` 從已存的關聯記事中背景讀取相鄰話。
 *   **讀取紀錄列**: 每列依序為 **複製按鈕（最左）→ 標題按鈕（可點擊直接讀取）**；原本獨立的「讀取」按鈕已移除，點擊標題即呼叫 `_fetch_url(url)`。複製按鈕對應 `_copy_url_to_clipboard()`。
 *   **複製按鈕的 DPI 縮放處理**: Windows 顯示縮放設定（100% / 125% / 150%）會同時放大按鈕寬度與字型，但中文字形在 Qt 的實際渲染會略大於英數字，導致「複製」二字在高縮放下溢出按鈕邊界。解法：以 `self.screen().logicalDotsPerInch() / 96.0` 取 DPI 比例，字型 pointSize 於 `dpi_scale >= 1.2` 時再 −2pt（否則 −1pt）、按鈕 `width` 乘以 `max(1.0, dpi_scale)`，並以 stylesheet 追加 `padding:0 2px`。若未來新增其他中文字按鈕在類似狹窄寬度場景出現相同問題，可比照此策略處理。
-*   **章節號碼自動偵測 (`check_chapter_number()`)**: 貼上或讀取文字後，掃描前五行尋找 `第N話` 或 `番外編N` 格式，自動填入話數欄位。
+*   **章節號碼自動偵測 (`check_chapter_number()`)**: 貼上或讀取文字後，掃描前 200 字尋找話數格式，自動填入話數欄位。支援格式（依序嘗試）：`第N話`（阿拉伯數字 / 漢數字）、`番外編N`、`その N`（全形/半形）、**裸 `N話`（無「第」前綴）—— 僅限文本第一行**，例：「やる夫の淫らな日々　2話　きっと掌の上だった日…」。裸 `N話` 因易與內文誤命中，刻意限制在第一行；若需擴展請維持此限制。
 *   **複製網址 (`copy_current_url()`)**: 複製目前讀取的網址至剪貼簿。
 
 ### 4.6 批次搜尋（獨立 PyQt6 視窗）
@@ -238,7 +264,9 @@
 *   **HTML 讀寫 Helpers**:
     *   `read_html_pre_content(file_path)`: 讀取 HTML 並以 `re.search(r'<pre>...<\/pre>')` 擷取 `<pre>` 內容並 `html.unescape`。
     *   `read_html_head(file_path)`: 以 `re.search(r'<head\b[^>]*>[\s\S]*?</head>')` 擷取整段 `<head>...</head>`（含標籤），供儲存時沿用；找不到或讀取失敗回傳 None。
-    *   `write_html_file(file_path, text_content, bg_color="#fff", head_html=None)`: 封裝 HTML（CSS 字體設定為 `MS PGothic`/`Meiryo` monospace, 16px），用 `re.split` 把白名單 `<span>` 標籤切出後原樣保留，其餘內容一律 `html.escape`，以防 AA 圖形中的 `<` `>` 被瀏覽器誤判為標籤。白名單（`_PRESERVED_SPAN_OPEN_RE`）目前收錄兩個特例起始標籤：上色 `<span style="color:...">` 與隱藏 `<span style="display:none;">`（容許少量空白變體），加上共用關閉標籤 `</span>`。`head_html` 參數：若傳入非空字串則直接作為 `<head>` 區塊寫入（供保留原檔自訂 head，例如外掛字型 CSS）；未傳入時使用預設 head 模板（含 `bg_color` 背景色）。包含 `viewport` meta 與手機 RWD 樣式（768px 以下字體縮小至 10px），支援觸控橫向捲動。
+    *   `write_html_file(file_path, text_content, bg_color="#fff", head_html=None, embed_font_path=None, embed_font_family=None)`: 封裝 HTML（CSS 字體設定為 `MS PGothic`/`Meiryo` monospace, 16px），用 `re.split` 把白名單 `<span>` 標籤切出後原樣保留，其餘內容一律 `html.escape`，以防 AA 圖形中的 `<` `>` 被瀏覽器誤判為標籤。白名單（`_PRESERVED_SPAN_OPEN_RE`）目前收錄兩個特例起始標籤：上色 `<span style="color:...">` 與隱藏 `<span style="display:none;">`（容許少量空白變體），加上共用關閉標籤 `</span>`。`head_html` 參數：若傳入非空字串則直接作為 `<head>` 區塊寫入（供保留原檔自訂 head，例如外掛字型 CSS）；未傳入時使用預設 head 模板（含 `bg_color` 背景色）。包含 `viewport` meta 與手機 RWD 樣式（768px 以下字體縮小至 10px），支援觸控橫向捲動。
+        - **內嵌字型模式 `embed_font_path`**：指定 TTF/OTF 路徑時，呼叫 `_build_embed_font_face()` 把字型 Base64 編碼後組成 `@font-face` CSS 注入 `<head>`，並把 `pre.font-family` 設為 `'<embed_font_family>', 'MS PGothic', 'Meiryo', monospace`。產出的單一 HTML 不需任何外部資源，下載到手機本地直接打開即可正確顯示 AA。代價：每個檔案會增大約「字型檔大小 × 1.33」（Base64 overhead，Monapo 約 +3.6MB）。**啟用此模式時會強制重產 head（覆寫 `head_html`）**，以確保 `@font-face` 與 `pre.font-family` 一致。MIME 用 RFC 8081 的 `font/ttf` / `font/otf`，format hint 為 `truetype` / `opentype`。
+        - **設定開關**：`AppCache.embed_font_in_html: bool` 與 `AppCache.embed_font_name: str`（預設 `"monapo"`）持久化於 `aa_settings_cache.json`；`SettingsDialog` 提供 checkbox + 字型下拉（Monapo / Saitamaar / textar，各有預估大小增量的 tooltip）。`MainWindow` 透過 `embed_font_provider` callback（回傳 `str | None`）把字型名稱傳到 `EditWindow._write_current()`；`None` 表示不嵌，非空字串則從 `_FONT_MAP` 查出對應 `(filename, css_family)` 帶入 `write_html_file`。
     *   ⚠️ **重點原則 — 所有存檔路徑的行為必須一致**：凡是呼叫 `write_html_file()` 覆寫 AA HTML 檔案的地方（編輯器儲存、批次取代、復原、其他任何未來新增的路徑），其存檔邏輯都必須一致，不能因入口不同而產生差異。目前已約定的一致行為包含：覆寫既有檔案時保留原 `<head>`（以 `read_html_head(fpath)` 讀出後傳入 `head_html`）、僅「產出全新檔案」的情境（例如翻譯結果初次輸出）才套用預設 head 模板。未來若要調整存檔行為（例如換 head 模板、加入新欄位），必須同步更新所有呼叫點，避免分歧。
     *   **EditWindow 載入/儲存連動**: `EditWindow.__init__` 載入檔案時同步呼叫 `read_html_head()` 存入 `self._custom_head`；`_write_current()` 儲存時把 `self._custom_head` 傳入 `write_html_file(..., head_html=self._custom_head)`。
     *   **批次搜尋/取代覆寫連動 (`aa_batch_search_qt.py`)**: `_replace_single` / `_replace_all_impl` / `_undo_single` / `_undo_all_batch_impl` 四處覆寫位置均於寫入前即時呼叫 `read_html_head(fpath)` 作為 `head_html` 傳入 `write_html_file`，避免批次取代與復原時把原檔的自訂 head 清掉。（復原時 head 仍能正確取回，因為先前的覆寫已保留了原 head。）
@@ -266,10 +294,13 @@
 *   **設定項目**：
     *   **提取後自動複製**（對應 `aa_settings_cache.json.auto_copy`）：先前置於主畫面提取結果區的 `auto_copy_cb` checkbox 已移除，改由此處集中控制；提取自動複製邏輯改讀 `MainWindow._auto_copy` bool 屬性。
     *   **作者名稱歷史記錄數量**（對應 `work_history_limit`，預設 10）：原 `_WORK_HISTORY_LIMIT` 常數已移除，改為 `MainWindow._work_history_limit`。
-    *   **網址/原文紀錄儲存數量**（對應 `fetch_history_limit`，預設 50）：同時控制 `url_history` 與 `aa_original_cache.json` 兩者的上限（原 `_ORIG_CACHE_LIMIT` 常數及 `append_url_history(..., max_items=50)` 的硬編值均改為讀取 `MainWindow._fetch_history_limit`）。
+    *   **網址讀取紀錄儲存數量**（對應 `fetch_history_limit`，預設 50）：控制 `url_history` 上限（透過 `append_url_history(..., max_items=self._fetch_history_limit)` 套用）。
+    *   **原文暫存儲存數量**（對應 `original_cache_limit`，預設 50）：獨立控制 `aa_original_cache.json` 的條目上限。`save_original_for_file()` 以 `self._original_cache_limit` 為裁切依據，與 URL 讀取紀錄的上限分離（先前共用 `fetch_history_limit`，舊 cache 載入時若缺欄會以 `fetch_history_limit` 值遷移）。
     *   **原文暫存檔**：以同一個 `QHBoxLayout` 同列放置「原文暫存檔：」標籤、檔案大小（`os.path.getsize(aa_original_cache.json)` 格式化為 B / KB / MB）與「清除暫存」按鈕。
     *   **清除暫存按鈕**：二次確認（`QMessageBox.question`）後把 `aa_original_cache.json` 覆寫為 `{}`，即時更新大小顯示。
     *   **批次搜尋：點擊術語按鈕時自動搜尋**（對應 `glossary_auto_search`，預設 True）：控制批次搜尋視窗右側「術語快捷面板」的 `[→]` 按鈕是否在填入搜尋/替換欄後自動觸發搜尋。對應 `MainWindow._glossary_auto_search`；套用時同步至 `self._batch_window.glossary_auto_search`。
+    *   **儲存 HTML 時內嵌字型**（對應 `embed_font_in_html` + `embed_font_name`）：checkbox 開啟後可從下拉選單選擇要嵌入的 AA 字型（Monapo +3.5 MB、Saitamaar +2.7 MB、textar +4.3 MB）；checkbox 勾選/取消連動下拉可用狀態（`toggled → setEnabled`）。checkbox 與 combobox 同列以 `QHBoxLayout` 並排；各提示文字均以 tooltip 顯示，不寫在 label 內。
+    *   **進入編輯器時預設開啟「所見即所得」模式**（對應 `editor_default_wysiwyg`，預設 False）：開啟後，每次 `MainWindow.show_edit_panel()` 切換到編輯面板時，若 `EditWindow._preview_active` 為 False 會自動呼叫 `_toggle_preview()` 進入 Alt+3 WYSIWYG 模式（替換翻譯、開啟 HTML、批次開檔等所有路徑都生效）。對應 `MainWindow._editor_default_wysiwyg`。
 *   **套用流程**：按「確定」呼叫 `MainWindow._on_settings_applied(values)` → 寫回 instance 屬性（含 `_glossary_auto_search`）→ 立即修剪 in-memory `work_history` / `url_history` 以符合新上限 → 同步給已開啟的 `BatchSearchWindow` → `save_cache()` 持久化。「取消」不套用任何變更。
 
 ## 5. UI 介面關聯變數
@@ -299,5 +330,15 @@ UI widget 屬於 `TranslatePanel`（除特別註明外）：
 3.  **保持替換長度優先排序規矩**: 修改 `apply_translation()` 邏輯時，必須延續「由原文長度遞減排序 (`valid_ids.sort`) 後再 replace」，否則疊加翻譯文將互相破壞（如先替「あ」再替「あはは」）。
 4.  **術語表有兩張（臨時 UI 已隱藏）**: 一般術語表 (`glossary_text`) 與臨時術語表 (`glossary_text_temp`)。臨時術語表的 UI 在主視窗已被隱藏（不加入 layout、無 tab 切換），但物件保留供 cache / `AA_Settings.json` I/O 使用；資料載入後仍會合併到 `get_combined_glossary()`。所有需要套用術語的地方仍應呼叫 `get_combined_glossary()` 合併後使用。
 5.  **術語表重複偵測**: 貼上術語時，系統會自動掃描**一般術語表**中等號左邊的原文是否重複（臨時 UI 已隱藏，不再參與檢查）。若偵測到重複，會在術語表標題旁顯示警告，並出現「跳到重複」按鈕，可循環跳躍至每個重複項目。對應 Function: `_check_glossary_duplicates()`、`_jump_to_glossary_dup()`。
+
+    **Key/Value 含空白的處理**：所有術語表處理路徑（`parse_glossary` / `_check_glossary_duplicates` / `merge_glossary_diff` / 編輯器全文替換 `_replace_all` / 存入術語 `_save_glossary_entry`）共用 `decode_glossary_term()` 與 `encode_glossary_term()`（位於 `aa_tool/translation_engine.py`）。規則：
+    - **預設**：剝除外圍空白、保留內部空白。`Hello World = 哈囉 世界` → `key="Hello World"`、`value="哈囉 世界"`；`term=val` 與 `term = val` 視為同一條規則。
+    - **保留外圍空白**：以半形 backtick `` `...` `` 包覆 key 或 value，backtick 內的空白完整保留，backtick 本身被剝除。選 backtick 的原因：1) 鍵盤可直接打、2) CJK 內文與一般日中翻譯內容幾乎不會出現、3) 比 ASCII 雙引號 `"` 更不易誤觸（少數作品會用半形雙引號）。例：
+        - `` ` は？`=` 蛤？` `` → key=` は？`、value=` 蛤？`（用於日文標點前的視覺空白也要納入比對）
+        - `` ` Trooper `=Trooper `` → key=` Trooper `、value=`Trooper`（消除英文詞兩側的空白）
+    - 兩側可獨立決定要不要包 backtick（`` ` 帶空白 `=不帶空白 `` 合法）。`re.escape` 處理 key 中的空白/符號，regex 單輪掃描照常匹配。
+    - **重複偵測與 merge**：`` ` Trooper `=… `` 與 `Trooper=…` 因 decode 後 key 不同（前者含空白），會被當作**不同條目**保留而非互相覆蓋。
+    - **編輯器全文替換輸入框**也支援同樣語法：在「原文」欄輸入 `` ` Trooper ` ``、「翻譯」欄輸入 `Trooper`，會精確比對含空白的字串。
+    - **存入術語**會用 `encode_glossary_term()` 自動處理：若值有外圍空白會用 backtick 包好寫入術語表，下次解析可正確還原；無空白則原樣寫入避免雜訊。
 5.  **批次操作的行號偏移**: `batch_replace_all()` 和 `adjust_all_bubbles()` 都採用「由下而上」或「由行尾至行首」逐筆替換策略，以避免替換後行號/字元位置偏移。新增類似功能時請維持此慣例。
 6.  **URL 讀取功能**: `parse_page_html()`（於 `aa_tool/url_fetcher.py`）以 `_DOMAIN_PARSERS` 對應表分派到各網域專屬解析器 (`_parse_default` / `_parse_himanatokiniyaruo` / `_parse_fc2blog` / `_parse_yaruobook`)。新增網站支援時，需撰寫新的 `_parse_XXX` 函式並註冊至該對應表；若作者標頭格式不同，亦需擴充 `_is_author_post()` 的匹配規則。**未知網域**會自動依序嘗試所有解析器（預設優先），回傳第一個非空內文的結果；因此新網站若與既有格式類似，即使尚未註冊也可能直接可用。

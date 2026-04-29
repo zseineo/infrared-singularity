@@ -70,6 +70,7 @@ class UrlFetchWindow(QMainWindow):
                 pass
 
         self._fetching = False
+        self._history_filter: str = ""
 
         self._build_ui()
 
@@ -179,6 +180,17 @@ class UrlFetchWindow(QMainWindow):
         hist_top.addWidget(self.clear_btn)
         hist_outer.addLayout(hist_top)
 
+        # 搜尋框：對標題 + URL 做 case-insensitive 子字串過濾
+        search_row = QHBoxLayout()
+        search_row.setContentsMargins(0, 0, 0, 0)
+        self.hist_search = QLineEdit()
+        self.hist_search.setFont(self.ui_small_font)
+        self.hist_search.setPlaceholderText("🔍 搜尋紀錄（標題或網址）")
+        self.hist_search.setClearButtonEnabled(True)
+        self.hist_search.textChanged.connect(self._on_history_search_changed)
+        search_row.addWidget(self.hist_search, 1)
+        hist_outer.addLayout(search_row)
+
         self.hist_scroll = QScrollArea()
         self.hist_scroll.setWidgetResizable(True)
         self.hist_inner = QWidget()
@@ -276,12 +288,31 @@ class UrlFetchWindow(QMainWindow):
             br.addStretch()
             insert_at(btn_row)
 
+    def _on_history_search_changed(self, text: str) -> None:
+        self._history_filter = (text or "").strip().lower()
+        self._refresh_history()
+
     def _refresh_history(self):
         self._clear_layout_rows(self.hist_inner_layout)
         insert_at = lambda w: self.hist_inner_layout.insertWidget(
             self.hist_inner_layout.count() - 1, w)
 
-        for entry in reversed(self._url_history):
+        kw = self._history_filter
+        entries = list(reversed(self._url_history))
+        if kw:
+            entries = [
+                e for e in entries
+                if kw in (e.get("title") or "").lower()
+                or kw in (e.get("url") or "").lower()
+            ]
+            if not entries:
+                lbl = QLabel(f"（無符合「{self.hist_search.text()}」的紀錄）")
+                lbl.setFont(self.ui_small_font)
+                lbl.setStyleSheet("color: #888888; padding: 4px;")
+                insert_at(lbl)
+                return
+
+        for entry in entries:
             row = QWidget()
             rl = QHBoxLayout(row)
             rl.setContentsMargins(0, 0, 0, 0)

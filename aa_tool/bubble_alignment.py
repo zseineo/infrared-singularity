@@ -318,43 +318,76 @@ def process_slash(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
 def process_normal(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
     """處理普通對話框，回傳對齊後的各行。失敗回傳 None。
 
-    目標寬計算與吶喊/斜線/方框統一：內容最大寬 + 兩個全形空白寬（多留一格視覺餘裕）；
-    若無內容則 fallback 為原邊框寬。
-    內容寬度判定一律走 `_content_width`（剝除 ` ` / `　` / `.`）。
+    目標寬計算：邊框左側錨點 + 對話框內側內容最大寬 + 邊框右側。
+    對話框內側寬度只量 content 行裡「最右邊 |/│/｜ 之後到末尾非 padding」的部分。
+    這個量會自然包含框內 leading pad（例如 `　 `），因此不需要再額外加全形空白餘裕；
+    若再加會多出 1-2 個 ￣ 變成不必要的延伸/不夠縮減。
+
+    上下邊框 (`f´…￣` / `乂…＿`) 用相同的 ￣/＿ 數量重建（以 top 為基準算 ref_n，
+    再套用到所有 border），維持對話框視覺對稱；各 border 自身的 right (`｀ヽ` 2 fw vs
+    `ノ` 1 fw) 不同會讓總寬不同 0.5-1 fw，但符合手寫慣例。
     """
     parsed = _parse_normal_lines(box_lines)
     fw_w = m.measure('　')
 
-    # 原邊框寬度（取第一個 border 行的整體寬度）
+    # 邊框錨點（取第一個 border 行）：整行寬度、左側（`AA + pad + f´`）、右側（`｀ヽ`）
     obw = 0.0
+    border_left_w = 0.0
+    border_right_w = 0.0
+    top_border = None
     for p in parsed:
         if p['type'] == 'border':
             obw = m.measure(str(p['orig']))
+            border_left_w = m.measure(str(p['left']))
+            border_right_w = m.measure(str(p['right']))
+            top_border = p
             break
 
-    # 內容最大寬（用統一 helper，含 padding 剝除）
-    max_left_w = 0.0
+    # 對話框內側最大寬（從 content 行最右邊的 |/│/｜ 之後量起）
+    max_inner_w = 0.0
     for p in parsed:
-        if p['type'] == 'content':
-            w = _content_width(str(p.get('left', '')), m)
-            if w > max_left_w:
-                max_left_w = w
-    if max_left_w <= 0 and obw <= 0:
+        if p['type'] == 'content' and p.get('right'):
+            left = str(p.get('left', ''))
+            pos = max(left.rfind('|'), left.rfind('│'), left.rfind('｜'))
+            if pos >= 0:
+                inner = left[pos + 1:].rstrip(_PAD_CHARS)
+                w = m.measure(inner)
+                if w > max_inner_w:
+                    max_inner_w = w
+    if max_inner_w <= 0 and obw <= 0:
         return None
 
-    tw = (max_left_w + fw_w * 2) if max_left_w > 0 else obw
+    tw = (border_left_w + max_inner_w + border_right_w) if max_inner_w > 0 else obw
+
+    # 從 top border 算出 ref_n（￣ 數量），再套用到所有 border 維持對稱
+    ref_n = 0
+    if top_border is not None and max_inner_w > 0:
+        pc = str(top_border['char'])
+        right = str(top_border['right'])
+        target_left_w = tw - m.measure(right)
+        res = str(top_border['left'])
+        while m.measure(res + pc) <= target_left_w:
+            res += pc
+            ref_n += 1
+        if (m.measure(res + pc) - target_left_w) < (target_left_w - m.measure(res)):
+            ref_n += 1
 
     new_box: list[str] = []
     for p in parsed:
         if p['type'] == 'border':
             pc = str(p['char'])
             right = str(p['right'])
-            target_left_w = tw - m.measure(right)
-            res = str(p['left'])
-            while m.measure(res + pc) <= target_left_w:
-                res += pc
-            if (m.measure(res + pc) - target_left_w) < (target_left_w - m.measure(res)):
-                res += pc
+            if max_inner_w > 0:
+                # 使用 top 的 ref_n 數量套到 top/bot 兩邊邊框
+                res = str(p['left']) + (pc * ref_n)
+            else:
+                # 無 content：保持原長
+                target_left_w = tw - m.measure(right)
+                res = str(p['left'])
+                while m.measure(res + pc) <= target_left_w:
+                    res += pc
+                if (m.measure(res + pc) - target_left_w) < (target_left_w - m.measure(res)):
+                    res += pc
             new_box.append(res + right)
         elif p['type'] == 'content':
             if p.get('right'):

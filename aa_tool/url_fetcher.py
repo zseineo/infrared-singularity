@@ -5,6 +5,7 @@
   - himanatokiniyaruo.com（dt[id] / dd 結構 + related-entries）
   - blog.fc2.com（ently_text div + relate_dl，含 web.archive.org 封存版）
   - yaruobook.jp（author-res-dt / author-res 結構 + relatedPostsWrap）
+  - yaruo-matome.com（entry-content div + nexe-prev-post ul）
 """
 from __future__ import annotations
 
@@ -203,13 +204,19 @@ def _detect_main_author_from_lines(text_content: str) -> str:
     return ""
 
 
+_NAME_TRAIL_RE = re.compile(r'[\s.．。・,，、]+$')
+
+
 def _is_author_post(header_text: str, author_name: str) -> bool:
     """判斷貼文標頭是否屬於指定作者。
 
     依序嘗試兩種標頭格式提取投稿者名稱：
     1.「N 名前：POSTER_NAME[...]」（5ch 類型）
     2.「N ： POSTER_NAME ： YYYY/MM/DD...」（yaruobook.jp 類型）
-    名稱比對時會將連續空白正規化為單一空白，避免 HTML 多空白差異造成失配。
+    名稱比對時會將連續空白正規化為單一空白，避免 HTML 多空白差異造成失配；
+    並會去除名稱尾端常見標點（`.`/`。`/`、` 等），以容許作者在不同貼文偶爾在
+    名稱後加 dot 的情況（如 yaruobookshelf 上 `三流 ◆WiAEg3iQI` ↔
+    `三流 ◆WiAEg3iQI.`，trip 碼與 ID 相同確認為同一人）。
     """
     if not author_name:
         return False
@@ -217,7 +224,9 @@ def _is_author_post(header_text: str, author_name: str) -> bool:
     if not poster_name:
         return author_name in header_text  # fallback
     target = re.sub(r'\s+', ' ', author_name.strip())
-    return poster_name == target
+    if poster_name == target:
+        return True
+    return _NAME_TRAIL_RE.sub('', poster_name) == _NAME_TRAIL_RE.sub('', target)
 
 
 def _filter_color_by_author(text: str, author_name: str, *, author_only: bool = False) -> str:
@@ -269,7 +278,7 @@ def _extract_dt_dd_posts(
         author_name = _detect_main_author_from_dt(container_html)
 
     posts = re.finditer(
-        r'<dt(?:\s[^>]*)?>(.+?)</dt>\s*<dd(?:\s[^>]*)?>(.*?)(?=<dt|</dl>|$)',
+        r'<dt(?:\s[^>]*)?>(.+?)</dt>\s*<dd(?:\s[^>]*)?>(.*?)(?=<dt|</dl>|</dd>|$)',
         container_html, re.DOTALL,
     )
 
@@ -696,6 +705,112 @@ def _parse_yaruobook_net(page_html: str, base_url: str, *,
 
 
 # ════════════════════════════════════════════════════════════════
+#  解析器：yaruo-matome.com
+# ════════════════════════════════════════════════════════════════
+
+def _parse_yaruo_matome(page_html: str, base_url: str, *,
+                        author_name: str = "",
+                        author_only: bool = False) -> tuple[str | None, list[dict], str]:
+    """解析 yaruo-matome.com 格式。
+
+    內文：<div id="entry-content" class="entry-content"> 內的 <dt>/<dd>。
+    標頭格式：「N ：<font color="green">NAME</font>：YYYY/MM/DD(曜) HH:MM:SS ID:XXX」
+    （<font color> 標籤由 _strip_tags_keep_color 轉換為 color span）
+    關聯：<ul class="nexe-prev-post"> — <li><a> 為其他話，<li><span> 為當前話（無連結）。
+    清單原始順序為「最新話 → 舊話 → 當前話」，反轉後即為時間順序。
+    """
+    # ── 標題 ──
+    title_m = re.search(r'<title>([^<]+)</title>', page_html)
+    page_title = html.unescape(title_m.group(1)).strip() if title_m else ""
+    # 去除常見站名後綴（「タイトル - やる夫まとめ」等）
+    page_title = re.sub(r'\s*[\|｜\-－–—]\s*.{0,20}まとめ.*$', '', page_title)
+
+    # ── 內文區塊：找 <div ... id="entry-content" ...> ──
+    start_m = re.search(r'<div\b[^>]*\bid="entry-content"[^>]*>', page_html)
+    if not start_m:
+        return None, [], page_title
+
+    # 截止點：關聯記事列表或其他常見頁尾區塊
+    end_m = re.search(
+        r'<ul\b[^>]*\bclass="[^"]*nexe-prev-post'
+        r'|<div\b[^>]*\bclass="[^"]*wp-block-related'
+        r'|<div\b[^>]*\bid="comments"',
+        page_html[start_m.end():],
+    )
+    content_end = start_m.end() + end_m.start() if end_m else len(page_html)
+    content_html = page_html[start_m.end():content_end]
+
+    # WordPress が <br /> の直後に source HTML の改行を挿入するため、
+    # <br />\n が後で \n\n（空行）になるのを防ぐ。
+    # <p>&nbsp;</p> のような空行 spacer はそのまま残して blank line として保持する。
+    content_html = re.sub(r'<br\s*/?>[ \t]*\n', '<br />', content_html)
+
+    lines_out = _extract_dt_dd_posts(
+        content_html, author_name=author_name, author_only=author_only)
+    text_content = '\n\n'.join(lines_out) if lines_out else None
+
+    # ── 平面 <p>...<br/>... 變體 fallback（無 dt/dd 結構）──
+    # 例：yaruo-matome.com/archives/21514 — 整批貼文塞在一個 <p> 內，
+    # 每行前綴 `.` 是防瀏覽器壓縮空行的占位符。標頭格式為
+    # 「.N ： AUTHOR ： YYYY/MM/DD(曜) HH:MM:SS.ms ID:XXX」（dot 前綴）。
+    # 僅在 dt/dd 抽取失敗時啟用，避免影響既有正常頁面。
+    if not text_content:
+        flat = content_html
+        # 移除非內文元素（書籤按鈕、收藏連結 span）
+        flat = re.sub(r'<button\b[^>]*>.*?</button>', '', flat, flags=re.DOTALL)
+        flat = re.sub(
+            r"<span\b[^>]*\bclass=['\"][^'\"]*wpfp[^'\"]*['\"][^>]*>.*?</span>",
+            '', flat, flags=re.DOTALL,
+        )
+        flat = re.sub(r'<br\s*/?>', '\n', flat)
+        flat = _strip_tags_keep_color(flat)
+        flat = html.unescape(flat)
+        # 每行去除首字 `.`（防壓縮占位）
+        flat_lines = [re.sub(r'^\.', '', ln) for ln in flat.split('\n')]
+        flat = '\n'.join(flat_lines)
+        if author_name or author_only:
+            flat = _filter_color_by_author(
+                flat, author_name, author_only=author_only)
+        else:
+            flat = re.sub(r'<span\s+style="color:[^"]*">|</span>', '', flat)
+        out_lines = flat.split('\n')
+        while out_lines and not out_lines[0].strip():
+            out_lines.pop(0)
+        while out_lines and not out_lines[-1].strip():
+            out_lines.pop()
+        # 確認真的取到貼文（標頭行存在）才採用，避免把純 cruft 當內文
+        if out_lines and any(_POST_HEADER_RE.search(_COLOR_SPAN_RE.sub('', ln))
+                             for ln in out_lines):
+            text_content = '\n'.join(out_lines)
+
+    # ── 關聯連結 ──
+    nav_links: list[dict] = []
+    ul_m = re.search(
+        r'<ul\b[^>]*\bclass="[^"]*nexe-prev-post[^"]*"[^>]*>(.*?)</ul>',
+        page_html, re.DOTALL,
+    )
+    if ul_m:
+        for li in re.finditer(r'<li[^>]*>(.*?)</li>', ul_m.group(1), re.DOTALL):
+            li_inner = li.group(1)
+            a_m = re.search(r'<a\s+href="([^"]+)"[^>]*>(.*?)</a>', li_inner, re.DOTALL)
+            if a_m:
+                href = urljoin(base_url, a_m.group(1))
+                title = html.unescape(re.sub(r'<[^>]+>', '', a_m.group(2))).strip()
+                if title:
+                    nav_links.append({'title': title, 'url': href, 'is_current': False})
+            else:
+                # <span> のみ（リンクなし）→ 当前話
+                title = html.unescape(re.sub(r'<[^>]+>', '', li_inner)).strip()
+                if title:
+                    nav_links.append({'title': title, 'url': None, 'is_current': True})
+        # 原始清單為「最新話 → … → 當前話」；反轉為時間順序，
+        # 讓「下一話」按鈕可以 current_idx + 1 正確取得下一集。
+        nav_links.reverse()
+
+    return text_content, nav_links, page_title
+
+
+# ════════════════════════════════════════════════════════════════
 #  公開入口
 # ════════════════════════════════════════════════════════════════
 
@@ -705,6 +820,7 @@ _DOMAIN_PARSERS: dict[str, callable] = {
     'blog.fc2.com': _parse_fc2blog,
     'yaruobook.jp': _parse_yaruobook,
     'yaruobook.net': _parse_yaruobook_net,
+    'yaruo-matome.com': _parse_yaruo_matome,
 }
 
 

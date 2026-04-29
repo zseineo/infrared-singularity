@@ -15,12 +15,19 @@ def merge_glossary_diff(existing: str, current: str) -> str:
     - 檔案中已有的 key：若 current 也有 → 用 current 的整行覆蓋；否則保留檔上行。
     - current 中的新 key（不在 existing 內）：依出現順序 append 到末端。
     - 空行 / 不含等號的行：原樣保留（依「先 existing 後 current 新增」順序）。
+
+    Key 比對與 `parse_glossary()` / `_check_glossary_duplicates()` 一致：
+    走 `decode_glossary_term`（無引號 → strip；`"..."` → 保留外圍空白）。
+    所以 `term=val` 和 `term = val`、` term=val ` 都會被視為同一條規則；
+    `" Trooper "=…` 與 `Trooper=…` 則視為**不同** key（前者保留外圍空白）。
     """
+    from .translation_engine import decode_glossary_term
+
     def parse_lines(text: str):
         for raw in (text or "").splitlines():
             line = raw.rstrip('\r')
             if '=' in line:
-                key = line.split('=', 1)[0]
+                key = decode_glossary_term(line.split('=', 1)[0])
                 yield key, line, True
             else:
                 yield None, line, False
@@ -108,14 +115,20 @@ class AppCache:
     author_name: str = ""
     author_only: bool = False
     work_history: list = field(default_factory=list)
-    editor_font_family: str = "submona"
+    editor_font_family: str = "MS PGothic"
     editor_font_size: int = 12
     last_open_dir: str = ""
     editor_bg_color: str = "#ffffff"
     work_history_limit: int = 10
     fetch_history_limit: int = 50
+    original_cache_limit: int = 50
     glossary_auto_search: bool = True
     diff_save_mode: bool = False
+    editor_default_wysiwyg: bool = False
+    # 儲存 HTML 時是否把字型 Base64 內嵌到 <head>（離線手機可正確顯示，
+    # 代價是檔案會增大約 1MB+）；先固定嵌入 fonts/monapo.ttf。
+    embed_font_in_html: bool = False
+    embed_font_name: str = "monapo"
 
 
 class SettingsManager:
@@ -157,12 +170,12 @@ class SettingsManager:
     def save_settings(self, settings: AppSettings) -> None:
         """將 AppSettings 寫入 AA_Settings.json。"""
         data = {
-            'filter': settings.filter_text,
-            'glossary': settings.glossary,
-            'glossary_temp': settings.glossary_temp,
             'base_regex': settings.base_regex,
             'invalid_regex': settings.invalid_regex,
             'symbol_regex': settings.symbol_regex,
+            'filter': settings.filter_text,
+            'glossary': settings.glossary,
+            'glossary_temp': settings.glossary_temp,
         }
         try:
             with open(self.get_settings_file(), 'w', encoding='utf-8') as f:
@@ -171,21 +184,33 @@ class SettingsManager:
             print("AA_Settings.json save failed:", e)
 
     def save_regex_to_settings(self, base: str, invalid: str, symbol: str) -> None:
-        """僅更新 AA_Settings.json 中的三條正則表達式，保留其他欄位。"""
+        """僅更新 AA_Settings.json 中的三條正則表達式，保留其他欄位。
+
+        為維持「三條 regex 在前、filter/glossary 在後」的固定順序，
+        這裡用全新 dict 重建後寫入；其他未知欄位則 append 在尾端，避免被丟棄。
+        """
         settings_file = self.get_settings_file()
-        data: dict = {}
+        existing: dict = {}
         if os.path.exists(settings_file):
             try:
                 with open(settings_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
+                    existing = json.load(f)
             except Exception:
                 pass
-        data['base_regex'] = base
-        data['invalid_regex'] = invalid
-        data['symbol_regex'] = symbol
+        ordered = {
+            'base_regex': base,
+            'invalid_regex': invalid,
+            'symbol_regex': symbol,
+            'filter': existing.get('filter', ''),
+            'glossary': existing.get('glossary', ''),
+            'glossary_temp': existing.get('glossary_temp', ''),
+        }
+        for k, v in existing.items():
+            if k not in ordered:
+                ordered[k] = v
         try:
             with open(settings_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+                json.dump(ordered, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print("AA_Settings.json regex save failed:", e)
 
@@ -244,10 +269,22 @@ class SettingsManager:
                     'fetch_history_limit', cache.fetch_history_limit))
             except (TypeError, ValueError):
                 pass
+            try:
+                # 舊版只有 fetch_history_limit 共用；若新欄位缺失則沿用舊值
+                cache.original_cache_limit = int(data.get(
+                    'original_cache_limit', cache.fetch_history_limit))
+            except (TypeError, ValueError):
+                pass
             cache.glossary_auto_search = bool(data.get(
                 'glossary_auto_search', cache.glossary_auto_search))
             cache.diff_save_mode = bool(data.get(
                 'diff_save_mode', cache.diff_save_mode))
+            cache.embed_font_in_html = bool(data.get(
+                'embed_font_in_html', cache.embed_font_in_html))
+            cache.editor_default_wysiwyg = bool(data.get(
+                'editor_default_wysiwyg', cache.editor_default_wysiwyg))
+            cache.embed_font_name = str(data.get(
+                'embed_font_name', cache.embed_font_name))
         except Exception as e:
             print("Cache load failed:", e)
         return cache
@@ -305,8 +342,12 @@ class SettingsManager:
                 'editor_bg_color': cache.editor_bg_color,
                 'work_history_limit': cache.work_history_limit,
                 'fetch_history_limit': cache.fetch_history_limit,
+                'original_cache_limit': cache.original_cache_limit,
                 'glossary_auto_search': cache.glossary_auto_search,
                 'diff_save_mode': cache.diff_save_mode,
+                'embed_font_in_html': cache.embed_font_in_html,
+                'editor_default_wysiwyg': cache.editor_default_wysiwyg,
+                'embed_font_name': cache.embed_font_name,
             }
             self._atomic_write_json(cache_file, data)
 

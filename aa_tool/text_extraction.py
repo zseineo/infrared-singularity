@@ -432,6 +432,15 @@ def get_chapter_display(text_first_lines: str) -> tuple[str, str] | None:
         n = str(int(num_str))
         return (n, f"その{n}")
 
+    # 裸 N話（無「第」前綴）— 限定第一行，避免內文中的「N話」誤命中。
+    # 例：「やる夫の淫らな日々　2話　きっと掌の上だった日…」
+    first_line = text_first_lines.split('\n', 1)[0]
+    match = re.search(r'(?<![第そ])(?<!\d)([０-９\d]+)\s*話', first_line)
+    if match:
+        num_str = match.group(1).translate(str.maketrans('０１２３４５６７８９', '0123456789'))
+        n = str(int(num_str))
+        return (n, f"第{n}話")
+
     return None
 
 

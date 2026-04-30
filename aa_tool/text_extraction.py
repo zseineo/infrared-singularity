@@ -329,6 +329,52 @@ def analyze_extraction(
     return "\n".join(report)
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# 特別提取：單個假名字符夾在特定邊界符號之間
+# 第一字元：空白、點、破折號、長音符號（半形/全形皆可）
+# 第二字元：任意平假名或片假名
+# 第三字元：句號、問號或空白（半形/全形皆可）
+# ────────────────────────────────────────────────────────────────────────────
+_SINGLE_KANA_RE = re.compile(
+    r'[ 　.．\-－‐—―ーｰ]'  # pos 1
+    r'([ぁ-ゖァ-ヿｦ-ﾟ])'              # pos 2（捕捉）
+    r'[。.．?？ 　]'                                 # pos 3
+)
+
+
+def extract_single_kana(
+    source: str,
+    filter_str: str,
+) -> dict[str, int]:
+    """特別提取：單個假名字符夾在特定邊界符號之間的單字。
+
+    連續三字元條件：
+    - 第一字元：空白（ / 　）、點（. / ．）、破折號（- / － / ‐ / — / ―）
+                或長音符號（ー / ｰ），半形/全形皆可
+    - 第二字元：任意一個平假名（ぁ–ゖ）或片假名（ァ–ヿ / 半形ｦ–ｯ）
+    - 第三字元：句號（。/ . / ．）、問號（? / ？）或空白（ / 　）
+
+    完全獨立於 base_regex / invalid_regex / symbol_regex；
+    只受自訂過濾規則（filter_str）影響。
+
+    Returns:
+        dict[str, int]: {提取文字: 來源行號}，保持插入順序。
+    """
+    custom_regexes = _compile_custom_filters(filter_str)
+    lines = source.split('\n')
+    extracted: dict[str, int] = {}
+
+    for line_num, line in enumerate(lines, 1):
+        for match in _SINGLE_KANA_RE.finditer(line):
+            text = match.group(0)
+            if any(reg.search(text) for reg in custom_regexes):
+                continue
+            if text and text not in extracted:
+                extracted[text] = line_num
+
+    return extracted
+
+
 def validate_ai_text(ai_content: str) -> list[str]:
     """驗證 AI 翻譯結果格式，回傳警告訊息列表（空 = 格式正確）。"""
     if not ai_content.strip():

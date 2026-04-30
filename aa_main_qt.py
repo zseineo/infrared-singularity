@@ -45,6 +45,7 @@ from aa_tool.settings_manager import (
 )
 from aa_tool.text_extraction import (
     extract_text as _extract_text,
+    extract_single_kana as _extract_single_kana,
     format_extraction_output,
     analyze_extraction as _analyze_extraction,
     validate_ai_text as _validate_ai_text,
@@ -937,15 +938,20 @@ class MainWindow(QMainWindow):
             self.show_status("⚠️ 請先貼上原始文本！", "#f39c12")
             return
         self.save_cache()
+        filter_text = self._translate_panel.get_filter_text().strip()
         extracted_set = _extract_text(
             source,
             self.current_base_regex,
             self.current_invalid_regex,
             self.current_symbol_regex,
-            self._translate_panel.get_filter_text().strip(),
+            filter_text,
             skip_title=self._last_fetched_title,
             author_name=self._author_name,
         )
+        single_kana_set = _extract_single_kana(source, filter_text)
+        for text, ln in single_kana_set.items():
+            if text not in extracted_set:
+                extracted_set[text] = ln
         output = format_extraction_output(extracted_set)
         self._translate_panel.extracted_text.setPlainText(output)
         self._translate_panel.ext_count_label.setText(

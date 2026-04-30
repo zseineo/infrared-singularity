@@ -67,6 +67,12 @@
     *   `author_name`：提取結果經過後處理後，若去除前後空白等於此名稱則剔除（避免作者自述／簽名單獨被提取）。主程式傳入 `self._author_name`。另因作者名稱常含開頭符號（如「◆Hr94QM5gdI」），而提取後處理會去掉符號僅保留英數字 trip code，故會從 `author_name` 以 `re.findall(r'[A-Za-z0-9]{6,}')` 抽出最長英數字串作為額外比對鍵（符合即剔除）。
 *   **自動複製**: 若 `auto_copy_switch` 開啟，提取後自動複製至剪貼簿。
 *   **Debug 工具**: Toolbar 上的「提取 Debug」按鈕(`analyze_extraction()`)可對選取文字逐步分析提取流程，於 Modal 顯示報告。
+*   **單字特別提取（`extract_single_kana()`，獨立邏輯）**: 對應 `aa_tool/text_extraction.py: extract_single_kana(source, filter_str)`。完全獨立於主提取邏輯（不套用 `base_regex` / `invalid_regex` / `symbol_regex` / 後處理 / 括號補完），**只受自訂過濾規則影響**。掃描原文中連續三字元符合下列條件的 Token 並提取中間字元：
+    *   第一字元：空白（` ` / `　`）、點（`.` / `．`）、破折號（`-` / `－` / `‐` / `—` / `―`）、長音符號（`ー` / `ｰ`），半形/全形皆可
+    *   第二字元：任意一個平假名（ぁ–ゖ）或片假名（ァ–ヿ / 半形ｦ–ﾟ）
+    *   第三字元：句號（`。` / `.` / `．`）、問號（`?` / `？`）或空白（` ` / `　`），半形/全形皆可
+    *   提取結果為完整三字元序列（含前後邊界符號），而非只取中間假名。
+    *   主程式在 `MainWindow.extract_text()` 中呼叫此函式，結果合併進主提取的 `extracted_set`（不重複加入），一同排版輸出。
 
 ### 4.2a 加入自訂過濾器 (`add_selection_to_filter()`)
 *   **對應 Function**: `MainWindow.add_selection_to_filter()`；按鈕位於「提取結果」標題列左側（「複製全部」左邊）。

@@ -67,6 +67,12 @@ def _qt_message_handler(mode, context, message) -> None:
     _append(f"[{ts}] Qt {label}: {message}{ctx}\n")
 
 
+def log_info(msg: str) -> None:
+    """寫入一般資訊訊息（不限於 crash，可用於診斷啟動流程）。"""
+    ts = time.strftime('%Y-%m-%d %H:%M:%S')
+    _append(f"[{ts}] INFO: {msg}\n")
+
+
 def install_crash_logger() -> None:
     """安裝所有錯誤攔截器；可重複呼叫安全。"""
     global _LOG_FILE

@@ -143,8 +143,8 @@ def extract_text(
             空字串表示不套用此規則。
 
     Returns:
-        list[tuple[str, int]]: [(提取文字, 來源行號), ...]，允許相同文字出現於
-        不同行（跨行不去重）；同一行的相同文字只保留第一次（行內去重）。
+        list[tuple[str, int]]: [(提取文字, 來源行號), ...]，不去重（同一行內出現
+        多次的相同文字也會全部保留，依匹配順序排列）。
     """
     base_regex = _compile_regex(base_regex_str, DEFAULT_BASE_REGEX)
     invalid_regex = _compile_regex(invalid_regex_str, DEFAULT_INVALID_REGEX)
@@ -153,7 +153,6 @@ def extract_text(
 
     lines = source.split('\n')
     extracted: list[tuple[str, int]] = []
-    seen: set[tuple[str, int]] = set()
 
     # 定位「第一個非空行」的行號（供 skip_title 比對用）
     title_line_num = 0
@@ -224,10 +223,8 @@ def extract_text(
                 if any(reg.search(text) for reg in custom_regexes):
                     continue
 
-                key = (text, line_num)
-                if text and key not in seen:
-                    extracted.append(key)
-                    seen.add(key)
+                if text:
+                    extracted.append((text, line_num))
 
     return extracted
 
@@ -356,14 +353,14 @@ def analyze_extraction(
 
 # ────────────────────────────────────────────────────────────────────────────
 # 特別提取：單個假名字符夾在特定邊界符號之間
-# 第一字元：空白、點、破折號、長音符號（半形/全形皆可）
+# 第一字元：空白、點、破折號、長音符號、省略號（半形/全形皆可）
 # 第二字元：任意平假名或片假名
 # 第三字元：句號（。）或問號（? / ？）或驚嘆號（！ / !）
 # ────────────────────────────────────────────────────────────────────────────
 _SINGLE_KANA_RE = re.compile(
-    r'[ 　.．\-－‐—―ーｰ]'   # pos 1
-    r'([アあハはンんオおで])'   # pos 2（捕捉）：限定 ア/あ ハ/は ン/ん オ/お で
-    r'[。?？！!]'                 # pos 3：句號、問號、驚嘆號（不含空白）
+    r'[ 　.．\-－‐—―ーｰ…]'   # pos 1
+    r'([アあハはンんオおで])'    # pos 2（捕捉）：限定 ア/あ ハ/は ン/ん オ/お で
+    r'[。?？！!]'                  # pos 3：句號、問號、驚嘆號（不含空白）
 )
 
 
@@ -375,7 +372,7 @@ def extract_single_kana(
 
     連續三字元條件：
     - 第一字元：空白（ / 　）、點（. / ．）、破折號（- / － / ‐ / — / ―）
-                或長音符號（ー / ｰ），半形/全形皆可
+                、長音符號（ー / ｰ）或省略號（…），半形/全形皆可
     - 第二字元：ア/あ、ハ/は、ン/ん、オ/お（平假名或片假名，各四種）
     - 第三字元：句號（。）或問號（? / ？）或驚嘆號（！ / !）；不含空白
 
@@ -383,22 +380,20 @@ def extract_single_kana(
     只受自訂過濾規則（filter_str）影響。
 
     Returns:
-        list[tuple[str, int]]: [(提取文字, 來源行號), ...]，跨行不去重，行內去重。
+        list[tuple[str, int]]: [(提取文字, 來源行號), ...]，不去重（同一行內出現
+        多次的相同文字也會全部保留）。
     """
     custom_regexes = _compile_custom_filters(filter_str)
     lines = source.split('\n')
     extracted: list[tuple[str, int]] = []
-    seen: set[tuple[str, int]] = set()
 
     for line_num, line in enumerate(lines, 1):
         for match in _SINGLE_KANA_RE.finditer(line):
             text = match.group(0)
             if any(reg.search(text) for reg in custom_regexes):
                 continue
-            key = (text, line_num)
-            if text and key not in seen:
-                extracted.append(key)
-                seen.add(key)
+            if text:
+                extracted.append((text, line_num))
 
     return extracted
 

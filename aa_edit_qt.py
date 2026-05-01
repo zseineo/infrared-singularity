@@ -60,12 +60,33 @@ def load_bundled_fonts() -> None:
     if _BUNDLED_FONTS_LOADED:
         return
     _BUNDLED_FONTS_LOADED = True
+
+    try:
+        from aa_tool.crash_logger import log_info
+    except Exception:
+        log_info = None  # crash_logger 尚未初始化時的保護
+
     fonts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
     if not os.path.isdir(fonts_dir):
+        if log_info:
+            log_info(f"[font] fonts/ 目錄不存在：{fonts_dir}（內建字型無法載入）")
         return
+
+    loaded, failed = [], []
     for fname in os.listdir(fonts_dir):
         if fname.lower().endswith((".ttf", ".otf")):
-            QFontDatabase.addApplicationFont(os.path.join(fonts_dir, fname))
+            fid = QFontDatabase.addApplicationFont(os.path.join(fonts_dir, fname))
+            if fid == -1:
+                failed.append(fname)
+            else:
+                families = QFontDatabase.applicationFontFamilies(fid)
+                loaded.append(f"{fname}→{families}")
+
+    if log_info:
+        if loaded:
+            log_info(f"[font] 載入成功：{loaded}")
+        if failed:
+            log_info(f"[font] 載入失敗（addApplicationFont 回傳 -1）：{failed}")
 
 
 class QtFontMeasurer:
@@ -646,6 +667,22 @@ class EditWindow(QMainWindow):
     def _apply_editor_font(self) -> None:
         new_font = QFont(self._font_family, self._font_size)
         new_font.setStyleHint(QFont.StyleHint.TypeWriter)
+
+        # 診斷：記錄 Qt 實際套用的字型（若與要求不符代表 fallback）
+        try:
+            from PyQt6.QtGui import QFontInfo
+            from aa_tool.crash_logger import log_info
+            resolved = QFontInfo(new_font).family()
+            if resolved.lower() != self._font_family.lower():
+                log_info(
+                    f"[font] 字型 fallback：要求 '{self._font_family}' "
+                    f"→ Qt 實際套用 '{resolved}'（該字型可能未載入）"
+                )
+            else:
+                log_info(f"[font] 套用字型：'{resolved}' {self._font_size}pt")
+        except Exception:
+            pass
+
         self.editor.setFont(new_font)
         self.orig_view.setFont(new_font)
         self._measurer = QtFontMeasurer(new_font)

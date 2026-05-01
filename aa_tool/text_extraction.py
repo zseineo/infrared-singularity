@@ -37,8 +37,6 @@ def _postprocess_text(text: str) -> str:
         '', text
     ).strip()
 
-    # 移除結尾的骰子格式 【數字D數字:數字】
-    text = re.sub(r'【\d+D\d+:\d+】$', '', text).strip()
     # 移除開頭的「數字＋點」格式（全形半形皆可），如 １．、1.、３.
     text = re.sub(r'^[0-9０-９]+[.．]', '', text).strip()
     # 若句尾包含特定符號，則將其刪除
@@ -50,6 +48,13 @@ def _postprocess_text(text: str) -> str:
 # 2ch/5ch 發文者行：形如「4402 ： ◆GESU1/dEaE ： 2021/05/06(木) 23:19:36 ID:nGcM5Umt」
 # 特徵：含 ID:xxxxxx（trip code），這組標記對發文者行幾乎是唯一判別
 _POSTER_LINE_RE = re.compile(r'ID:[A-Za-z0-9+/.]{6,}')
+
+# 骰子格式 【NDN:N】（如 【1D10:10】）：句中出現時，內部的半形 `:` 不在
+# DEFAULT_BASE_REGEX 字元集中，會把整句切成兩段提取。
+# 解法：提取前先把骰子內的 `:` 改成全形 `：`（base regex 字元集已含 `：`），
+# 提取後再 `_DICE_NOTATION_FW_RE` 把它換回半形，使最終輸出維持原始的半形冒號。
+_DICE_NOTATION_RE = re.compile(r'(【\d+D\d+):(\d+】)')
+_DICE_NOTATION_FW_RE = re.compile(r'(【\d+D\d+)：(\d+】)')
 
 
 _BRACKET_PAIRS = {
@@ -128,7 +133,7 @@ def extract_text(
     filter_str: str,
     skip_title: str = "",
     author_name: str = "",
-) -> dict[str, int]:
+) -> list[tuple[str, int]]:
     """從原始文本中提取日文文字片段。
 
     Args:
@@ -138,7 +143,8 @@ def extract_text(
             空字串表示不套用此規則。
 
     Returns:
-        dict[str, int]: {提取文字: 來源行號}，保持插入順序。
+        list[tuple[str, int]]: [(提取文字, 來源行號), ...]，允許相同文字出現於
+        不同行（跨行不去重）；同一行的相同文字只保留第一次（行內去重）。
     """
     base_regex = _compile_regex(base_regex_str, DEFAULT_BASE_REGEX)
     invalid_regex = _compile_regex(invalid_regex_str, DEFAULT_INVALID_REGEX)
@@ -146,7 +152,8 @@ def extract_text(
     custom_regexes = _compile_custom_filters(filter_str)
 
     lines = source.split('\n')
-    extracted_set: dict[str, int] = {}
+    extracted: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
 
     # 定位「第一個非空行」的行號（供 skip_title 比對用）
     title_line_num = 0
@@ -173,7 +180,9 @@ def extract_text(
             continue
         if _POSTER_LINE_RE.search(line):
             continue
-        chunks = re.split(r'[ 　]{2,}', line)
+        # 骰子格式內的半形 `:` 暫時改全形 `：`，避免句子在骰子處被 base regex 切開
+        proc_line = _DICE_NOTATION_RE.sub(r'\1：\2', line)
+        chunks = re.split(r'[ 　]{2,}', proc_line)
 
         for chunk in chunks:
             if not chunk.strip():
@@ -189,6 +198,10 @@ def extract_text(
                 text = text.strip()
                 if len(text) < 3:
                     continue
+
+                # 把骰子內的全形 `：` 還原為半形 `:`，使後續規則（結尾骰子移除等）
+                # 維持原行為，最終輸出也保留原始的半形冒號。
+                text = _DICE_NOTATION_FW_RE.sub(r'\1:\2', text)
 
                 if invalid_regex.match(text):
                     continue
@@ -211,17 +224,19 @@ def extract_text(
                 if any(reg.search(text) for reg in custom_regexes):
                     continue
 
-                if text and text not in extracted_set:
-                    extracted_set[text] = line_num
+                key = (text, line_num)
+                if text and key not in seen:
+                    extracted.append(key)
+                    seen.add(key)
 
-    return extracted_set
+    return extracted
 
 
-def format_extraction_output(extracted_set: dict[str, int]) -> str:
+def format_extraction_output(extracted: list[tuple[str, int]]) -> str:
     """將提取結果格式化為 '001-1|text' 格式。"""
     line_sub_index: dict[int, int] = {}
     output = ""
-    for text, ln in extracted_set.items():
+    for text, ln in extracted:
         sub = line_sub_index.get(ln, 1)
         line_sub_index[ln] = sub + 1
         output += f"{ln:03d}-{sub}|{text}\n"
@@ -255,7 +270,12 @@ def analyze_extraction(
             report.append("\n" + "=" * 40 + "\n")
             continue
 
-        chunks = re.split(r'[ 　]{2,}', line)
+        # 骰子格式內的半形 `:` 暫時改全形 `：`（與 extract_text 一致），避免被切開
+        proc_line = _DICE_NOTATION_RE.sub(r'\1：\2', line)
+        if proc_line != line:
+            report.append(
+                "[骰子格式預處理] 將句中 【NDN:N】 內的半形 `:` 暫換為 `：` 以維持整句連續匹配")
+        chunks = re.split(r'[ 　]{2,}', proc_line)
         report.append(f"[步驟 1] 藉由連續兩個以上空白進行分割，分割出 {len(chunks)} 個區塊:")
         for i, chunk in enumerate(chunks):
             report.append(f"  區塊 {i+1}: '{chunk}'")
@@ -289,6 +309,11 @@ def analyze_extraction(
             for j, match_text in enumerate(matches):
                 report.append(f"\n  >> 對 [結果 {j+1}] '{match_text}' 進行進階檢驗:")
                 t = match_text.strip()
+                # 還原骰子格式的全形 `：` → 半形 `:`（與 extract_text 一致）
+                t_restored = _DICE_NOTATION_FW_RE.sub(r'\1:\2', t)
+                if t_restored != t:
+                    report.append(f"    [骰子格式還原] '{t}' => '{t_restored}'")
+                t = t_restored
 
                 if len(t) < 3:
                     report.append("    -> ❌ 剔除：去除前後空白後，長度小於 3 字元。")
@@ -333,44 +358,47 @@ def analyze_extraction(
 # 特別提取：單個假名字符夾在特定邊界符號之間
 # 第一字元：空白、點、破折號、長音符號（半形/全形皆可）
 # 第二字元：任意平假名或片假名
-# 第三字元：句號、問號或空白（半形/全形皆可）
+# 第三字元：句號（。）或問號（? / ？）或驚嘆號（！ / !）
 # ────────────────────────────────────────────────────────────────────────────
 _SINGLE_KANA_RE = re.compile(
-    r'[ 　.．\-－‐—―ーｰ]'  # pos 1
-    r'([ぁ-ゖァ-ヿｦ-ﾟ])'              # pos 2（捕捉）
-    r'[。.．?？ 　]'                                 # pos 3
+    r'[ 　.．\-－‐—―ーｰ]'   # pos 1
+    r'([アあハはンんオおで])'   # pos 2（捕捉）：限定 ア/あ ハ/は ン/ん オ/お で
+    r'[。?？！!]'                 # pos 3：句號、問號、驚嘆號（不含空白）
 )
 
 
 def extract_single_kana(
     source: str,
     filter_str: str,
-) -> dict[str, int]:
+) -> list[tuple[str, int]]:
     """特別提取：單個假名字符夾在特定邊界符號之間的單字。
 
     連續三字元條件：
     - 第一字元：空白（ / 　）、點（. / ．）、破折號（- / － / ‐ / — / ―）
                 或長音符號（ー / ｰ），半形/全形皆可
-    - 第二字元：任意一個平假名（ぁ–ゖ）或片假名（ァ–ヿ / 半形ｦ–ｯ）
-    - 第三字元：句號（。/ . / ．）、問號（? / ？）或空白（ / 　）
+    - 第二字元：ア/あ、ハ/は、ン/ん、オ/お（平假名或片假名，各四種）
+    - 第三字元：句號（。）或問號（? / ？）或驚嘆號（！ / !）；不含空白
 
     完全獨立於 base_regex / invalid_regex / symbol_regex；
     只受自訂過濾規則（filter_str）影響。
 
     Returns:
-        dict[str, int]: {提取文字: 來源行號}，保持插入順序。
+        list[tuple[str, int]]: [(提取文字, 來源行號), ...]，跨行不去重，行內去重。
     """
     custom_regexes = _compile_custom_filters(filter_str)
     lines = source.split('\n')
-    extracted: dict[str, int] = {}
+    extracted: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
 
     for line_num, line in enumerate(lines, 1):
         for match in _SINGLE_KANA_RE.finditer(line):
             text = match.group(0)
             if any(reg.search(text) for reg in custom_regexes):
                 continue
-            if text and text not in extracted:
-                extracted[text] = line_num
+            key = (text, line_num)
+            if text and key not in seen:
+                extracted.append(key)
+                seen.add(key)
 
     return extracted
 
@@ -383,7 +411,7 @@ def validate_ai_text(ai_content: str) -> list[str]:
     ai_lines = [l for l in ai_content.split('\n') if l.strip()]
     warnings: list[str] = []
 
-    id_pattern = re.compile(r'\d{2,4}-\d+\|')
+    id_pattern = re.compile(r'\d{2,5}-\d+\|')
     multi_id_lines = []
     for i, line in enumerate(ai_lines, 1):
         ids_found = id_pattern.findall(line)

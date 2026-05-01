@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 
 from aa_tool.html_io import read_html_head, read_html_pre_content, write_html_file
 from aa_tool.qt_helpers import make_button, show_toast
+from aa_tool.translation_engine import expand_glossary_entry
 
 # ════════════════════════════════════════════════════════════════
 #  QSS 載入
@@ -256,7 +257,7 @@ class BatchSearchWindow(QMainWindow):
             b = line[sep_idx + 1:].strip()
             if not a:
                 continue
-            entries.append((a, b))
+            entries.extend(expand_glossary_entry(a, b))
         return entries
 
     def _refresh_glossary_list(self):

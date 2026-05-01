@@ -56,12 +56,12 @@
 *   **字串後處理**:
     *   若被 `│` 或 `|` 邊框包圍，只取邊框內的文字
     *   去除非平假名/片假名/漢字/英文/數字等開頭字元
-    *   移除結尾的骰子格式 `【數字D數字:數字】`
     *   移除開頭的「數字+點」格式（如 `１．`、`1.`）
     *   移除句尾 `|`、`（`、`(` 等符號
+*   **句中骰子格式保留**: `DEFAULT_BASE_REGEX` 字元集含全形 `：` 但不含半形 `:`，且 `DEFAULT_SYMBOL_REGEX` 把半形 `:` 列為 AA 符號。當骰子格式 `【NDN:N】`（如 `【1D10:10】`）出現於句中時，內部的半形 `:` 會把整句切成兩段提取，產生兩個 ID。解法：`extract_text()` 對每一行先用 `_DICE_NOTATION_RE = re.compile(r'(【\d+D\d+):(\d+】)')` 預處理把骰子內的半形 `:` 暫換成全形 `：`（base regex 字元集已含 `：`），讓整句保持連續匹配；base regex 抓出 text 後立刻用 `_DICE_NOTATION_FW_RE = re.compile(r'(【\d+D\d+)：(\d+】)')` 還原為半形 `:`，使最終輸出維持原始的半形冒號。`_complete_brackets(text, line)` 第二參傳的是**原始 line**（含半形 `:`），text 已還原，兩者匹配無誤。`analyze_extraction()` 同步在預處理與還原處輸出對應追蹤訊息。
 *   **括號自動補完**: 提取後處理後，檢查文字中的括號（`【】「」""''『』（）()`）是否成對。處理兩種情況：(1) `text` 內部有未配對括號 → 在 `source_line` 中定位 `text`，若未配對右括號前一格或未配對左括號後一格恰為對應括號則補上；(2) `text` 內沒有括號但整個括號在 `text` 外（被提取時剝掉）→ 檢查 `source_line` 中 `text` 前一格為開括號 / 後一格為閉括號則補回（避免重複補已有的同字元）。對應 Function: `_complete_brackets(text, source_line)`。
 *   **自訂正則過濾（作用於最終結果）**: 讀取 UI 上的過濾規則（每行一條正則），於整個提取流程（基底 regex、無效符號、後處理、括號補完）**結束之後**才對最終提取結果執行 `reg.search(text)` 比對；命中任一條即剔除。`analyze_extraction` 的步驟順序亦同步調整為「後處理 → 長度檢驗 → 自訂濾網」，報告訊息明確標示「對最終提取結果過濾」。
-*   **資料去重與排版**: 將過濾後的字詞存入 Dict 作去重，以 `{行號:03d}-{流水號}|日文原文` 格式輸出，並顯示提取計數於 `ext_count_label`。
+*   **去重邏輯與回傳型別**: `extract_text()` 回傳 `list[tuple[str, int]]`（文字、行號配對列表）。**相同文字出現於不同行時各自保留**（跨行不去重）；同一行出現相同文字則只保留第一次（行內去重）。`extract_single_kana()` 亦採用相同策略。ID 格式為 `{行號:03d}-{流水號}|日文原文`（行號最少 3 位，超過時自動擴展，最高支援五位數行號）；同行多條文字的流水號從 1 遞增。提取計數顯示於 `ext_count_label`，計數為所有條目總數（含跨行重複）。ID 相關正則統一更新為 `\d{2,5}`（支援 2–5 位行號）。
 *   **URL 來源跳過規則**: `extract_text(..., skip_title, author_name)` 提供兩個可選參數：
     *   `skip_title`：若 source 的第一個非空行內容等於此字串，則整行跳過（URL 讀取會以作品標題作為首行，此機制避免標題被提取）。主程式傳入 `self._last_fetched_title`，該值於 URL 讀取／下一話成功時寫入；若使用者手動貼上新文字覆蓋標題行則不會命中，規則自動失效。
     *   `author_name`：提取結果經過後處理後，若去除前後空白等於此名稱則剔除（避免作者自述／簽名單獨被提取）。主程式傳入 `self._author_name`。另因作者名稱常含開頭符號（如「◆Hr94QM5gdI」），而提取後處理會去掉符號僅保留英數字 trip code，故會從 `author_name` 以 `re.findall(r'[A-Za-z0-9]{6,}')` 抽出最長英數字串作為額外比對鍵（符合即剔除）。
@@ -69,8 +69,8 @@
 *   **Debug 工具**: Toolbar 上的「提取 Debug」按鈕(`analyze_extraction()`)可對選取文字逐步分析提取流程，於 Modal 顯示報告。
 *   **單字特別提取（`extract_single_kana()`，獨立邏輯）**: 對應 `aa_tool/text_extraction.py: extract_single_kana(source, filter_str)`。完全獨立於主提取邏輯（不套用 `base_regex` / `invalid_regex` / `symbol_regex` / 後處理 / 括號補完），**只受自訂過濾規則影響**。掃描原文中連續三字元符合下列條件的 Token 並提取中間字元：
     *   第一字元：空白（` ` / `　`）、點（`.` / `．`）、破折號（`-` / `－` / `‐` / `—` / `―`）、長音符號（`ー` / `ｰ`），半形/全形皆可
-    *   第二字元：任意一個平假名（ぁ–ゖ）或片假名（ァ–ヿ / 半形ｦ–ﾟ）
-    *   第三字元：句號（`。` / `.` / `．`）、問號（`?` / `？`）或空白（` ` / `　`），半形/全形皆可
+    *   第二字元：ア/あ、ハ/は、ン/ん、オ/お、で（共五種字元）
+    *   第三字元：句號（`。`）、問號（`?` / `？`）或驚嘆號，半形/全形皆可；**不含空白**
     *   提取結果為完整三字元序列（含前後邊界符號），而非只取中間假名。
     *   主程式在 `MainWindow.extract_text()` 中呼叫此函式，結果合併進主提取的 `extracted_set`（不重複加入），一同排版輸出。
 
@@ -97,7 +97,7 @@
 *   **術語與自動補全形空白演算法 (Auto-Padding)**:
     *   翻譯句套用術語表後，計算字元長度差：`len_diff = len(original) - len(final_translated)`。
     *   若原文大於翻譯文，在翻譯文後綴補足等量全形空白。
-*   **替換執行**: 利用 `re.escape(original)` 轉換為正則，依行逐條替換。遇到保留字（對話框線 `|`、`│`、`｜`、`┃`）時套用補空白後的字串，否則直接替換以維護排版。
+*   **替換執行（行號限定）**: 原文按 ID 嚴格限定在對應行號替換（`line_idx = int(id.split('-')[0]) - 1`，1-indexed 轉 0-indexed），只修改該行，不觸及其他行。ID 無法解析時退回全行掃描（保護性 fallback）。同一原文出現於不同行時，各行依各自的翻譯 ID 獨立替換，互不干擾。`source_lines` 在替換迴圈前預先切割一次，整個迴圈共用，避免重複 split/join。替換本身利用 `re.escape(original)` 轉換為正則；遇到保留字（對話框線 `|`、`│`、`｜`、`┃`）時套用補空白後的字串，否則直接替換以維護排版。
 *   **全域術語覆蓋**: 替換完成後，對全文中未被提取的原文部分，再跑一次術語表全域取代（同樣套用 Auto-Padding 與邊框判定）。
 
 ### 4.4 HTML 編輯器狀態與進階後處理 (`EditWindow` — `aa_edit_qt.py`)
@@ -134,7 +134,7 @@
     *   **💾 儲存（PyQt6 編輯器）**: 工具列的「💾 儲存」按鈕執行 `_save_as()`，**永遠彈出另存新檔對話框**；`Ctrl+S` 對應 `_save_overwrite()`，若有真實檔案路徑則直接覆寫、若為 `apply_translation` 產生的暫存檔（`_is_temp_file=True`）則仍走另存。儲存成功後透過 `on_save` callback 通知 `MainWindow._on_edit_saved()`，由主程式更新導覽列/視窗標題並將 `_original_text` 寫入 `aa_original_cache.json`。
     *   **📂 開啟（PyQt6 編輯器）**: 位於「儲存」與「返回」之間，呼叫 `MainWindow.import_html()`，與主畫面「打開已儲存的 HTML」按鈕相同；開啟時會自動查找 `aa_original_cache.json` 中的同名紀錄作為比對原文。
     *   **進入編輯器時自動回到最上層 (`_scroll_to_top()`)**: `MainWindow.show_edit_panel()` 重新載入既有 `EditWindow` 時，若沒有指定 `scroll_to_line`，會呼叫 `_scroll_to_top()` 將游標與 `verticalScrollBar`/`horizontalScrollBar` 都歸零；避免「按替換進入」或「開啟舊檔」時還停留在上一份檔案的捲動位置。
-    *   **檢視模式快捷鍵（Alt+1/2/3）**: `Alt+1 = _return_to_editor()` 回到編輯模式（若目前在比對/預覽則自動切回；已在編輯則僅 focus）；`Alt+2 = _toggle_compare()` 進/出原文比對；`Alt+3 = _toggle_preview()` 進/出上色預覽。三模式可直接互切：在比對模式按 Alt+3 會直接跳到預覽（沿用比對視圖的捲動位置），在預覽模式按 Alt+2 會直接跳到比對；同一模式的快捷鍵重複按下則退出回編輯（toggle）。
+    *   **檢視模式快捷鍵（Alt+1/2/3）**: `Alt+1 = _return_to_editor()` 回到編輯模式（若目前在比對/預覽則自動切回；已在編輯則僅 focus）；`Alt+2 = _toggle_compare()` 進/出原文比對；`Alt+3 = _toggle_preview()` 進/出上色預覽。三模式可直接互切：在比對模式按 Alt+3 會直接跳到預覽，在預覽模式按 Alt+2 會直接跳到比對。`_toggle_compare` 以 `_compare_from_preview: bool` 記錄進入前是否在 WYSIWYG 模式；若為 True，離開比對時（Alt+2 toggle / Alt+1）返回 WYSIWYG 而非編輯模式。模式切換時的位置同步採「行號 + 捲軸值」雙軌：先以 `_move_cursor_to_block(widget, block_num)`（內含 `setTextCursor`，會自動把游標捲入可視範圍）設定邏輯游標，**再** `verticalScrollBar().setValue(...)` 覆蓋 Qt 自動捲動造成的偏移，達到「同一行在同一螢幕位置」的視覺對齊。注意：`_move_cursor_to_block` 不主動呼叫 `ensureCursorVisible()`，否則會與外部捲軸恢復打架。同一模式的快捷鍵重複按下則退出回上一個模式（toggle）。
     *   **局部重套用面板 (`_toggle_translate_side()` — Hotkey: `Alt+4`)**: 在編輯器右側展開可同時編輯「提取結果」與「填入翻譯」的面板（兩個 `QTextEdit`），按下「重新套用」會用新內容重跑 `apply_translation`，但**只覆蓋目前可視行以下**的部分（可視行以上維持使用者已編輯的成果）。實作要點：
         1. **UI 結構**：把 `self.stack`（編輯/比對/預覽 `QStackedWidget`）與 `self._translate_side`（右側面板 `QWidget`）放進 `QSplitter(Horizontal)`，預設右側 hide；Alt+4 切換可見。
         2. **資料來源**：開啟時呼叫 `extracted_provider()` / `translation_provider()`（由主程式接到 `_translate_panel.get_extracted_text` / `get_ai_text`）拉最新內容；不會 cache 上次的編輯。
@@ -142,7 +142,7 @@
         4. **重新套用**：以 `self._original_text` 為 source 重跑 `apply_translation(source, side_extracted, side_ai, glossary)`；切割合併 `editor.lines[:top]` + `new_full.lines[top:]`；保留 `verticalScrollBar` 位置。
         5. **回寫主面板**：套用後呼叫 `extracted_setter` / `translation_setter` 把右側內容寫回主畫面的「提取結果」與「填入翻譯」，下次回主畫面看到的是修改過的版本。
         6. **限制**：必須有 `_original_text`（編輯器是從 `apply_translation` 進入時才會有）；比對/預覽模式中按下會提示先回編輯。
-    *   **原文比對模式 (`_toggle_compare()` — Hotkey: `Alt+2`)**: 切換至 `QStackedWidget` index 1（`self.orig_view`，唯讀 `QTextEdit`），內容為傳入的 `_original_text`（或從 `aa_original_cache.json` 載入）。進入時同步游標行號與 `verticalScrollBar`；比對中停用 `_edit_buttons`、工具列染棕 (`#8b6f47`)。`orig_view` 底色沿用編輯器 `_bg_color`。
+    *   **原文比對模式 (`_toggle_compare()` — Hotkey: `Alt+2`)**: 切換至 `QStackedWidget` index 1（`self.orig_view`，唯讀 `QTextEdit`），內容為傳入的 `_original_text`（或從 `aa_original_cache.json` 載入）。進入時以 `_move_cursor_to_block` 同步游標行號（從 editor 或 WYSIWYG preview_view 取 blockNumber）；比對中停用 `_edit_buttons`、工具列染棕 (`#8b6f47`)。`orig_view` 底色沿用編輯器 `_bg_color`。離開時以 `_compare_from_preview` 判斷返回目標：True → 返回 WYSIWYG（直接 render preview 並 setCurrentIndex(2)）；False → 返回編輯模式。
     *   **WYSIWYG 開檔自動重渲染**：`MainWindow.show_edit_panel()` 對既有 `EditWindow` `_replace_document()` 寫入新檔內容後，若 `_preview_active` 為 True 會立即呼叫 `_wysiwyg_rerender_after_editor_change()` 並**在捲動之前**執行，確保後續 `_scroll_to_line()` / `_scroll_to_top()` 能作用於最新的 preview 文件。`_scroll_to_line()` 與 `_scroll_to_top()` 在 `_preview_active=True` 時會同步把 `preview_view` 也捲到相同行（透過 `findBlockByLineNumber` 對 preview 文件取得對應 block）。批次搜尋從 WYSIWYG 預設開啟（`editor_default_wysiwyg=True`）切換到目標檔/目標行也走這條路徑：`_toggle_preview()` 之後額外補一次 `_scroll_to_line()` 才能正確捲到批次搜尋指定的行。先前需要手動 Alt+1 切回編輯再 Alt+3 切回預覽才會更新。
     *   **所見即所得編輯模式 (`_toggle_preview()` — Hotkey: `Alt+3`)**: 將編輯器文字中的 `<span style="color:...">...</span>` 標籤實際渲染為彩色（模擬瀏覽器輸出）並**直接在彩色檢視中編輯**，切換至 `QStackedWidget` 的 index 2（`self.preview_view`，WYSIWYG 模式下 `setReadOnly(False)`）。`_render_preview_doc()` 直接以 `QTextCursor` 逐段 `insertText`，依 `_COLOR_SPAN_RUN_RE` 解析出 (文字, 顏色) runs 並套用 `QTextCharFormat.setForeground`；**不使用 `setHtml`**，以避免 Qt 對 `<pre>` 區塊邊界產生的橫線與忽略 `line-height` 的問題。最後呼叫與編輯器相同的 `_apply_line_height_to(self.preview_view)` 取得一致的 FixedHeight 行高，使進入/離開預覽時的捲動位置可逐行對齊；同時套用與編輯器一致的底色/字型 stylesheet。預覽中停用 `_edit_buttons`（對話框/補空白/全文替換等需操作 plain text 的工具），但**保留 `_color_buttons`**（上色 / 🎨 取色器）可用，工具列染紫 (`#4a3470`)。
 
@@ -346,5 +346,8 @@ UI widget 屬於 `TranslatePanel`（除特別註明外）：
     - **重複偵測與 merge**：`` ` Trooper `=… `` 與 `Trooper=…` 因 decode 後 key 不同（前者含空白），會被當作**不同條目**保留而非互相覆蓋。
     - **編輯器全文替換輸入框**也支援同樣語法：在「原文」欄輸入 `` ` Trooper ` ``、「翻譯」欄輸入 `Trooper`，會精確比對含空白的字串。
     - **存入術語**會用 `encode_glossary_term()` 自動處理：若值有外圍空白會用 backtick 包好寫入術語表，下次解析可正確還原；無空白則原樣寫入避免雜訊。
+    - **拆分標記 `\X`**：術語行中若在某個分隔字元前加上反斜線 `\`，該條目會被展開成多條子條目。規則：偵測 key 中最前面的 `\X`（X 為任意字元），以 `\X` 為標記將 key 與 value 各自切割，切割數量須一致才展開，否則視為普通條目。對應 Function: `expand_glossary_entry(key, value)` in `aa_tool/translation_engine.py`。作用範圍：`parse_glossary`（術語表）、編輯器全文替換 `_replace_all`、批次搜尋快捷搜尋 `_parse_glossary_entries`。例：
+        - `ライザリン\・シュタウト=萊莎琳\・斯托特` → `ライザリン=萊莎琳`、`シュタウト=斯托特`
+        - 拆分後各部分執行 `strip()` 去除外圍空白。
 5.  **批次操作的行號偏移**: `batch_replace_all()` 和 `adjust_all_bubbles()` 都採用「由下而上」或「由行尾至行首」逐筆替換策略，以避免替換後行號/字元位置偏移。新增類似功能時請維持此慣例。
 6.  **URL 讀取功能**: `parse_page_html()`（於 `aa_tool/url_fetcher.py`）以 `_DOMAIN_PARSERS` 對應表分派到各網域專屬解析器 (`_parse_default` / `_parse_himanatokiniyaruo` / `_parse_fc2blog` / `_parse_yaruobook`)。新增網站支援時，需撰寫新的 `_parse_XXX` 函式並註冊至該對應表；若作者標頭格式不同，亦需擴充 `_is_author_post()` 的匹配規則。**未知網域**會自動依序嘗試所有解析器（預設優先），回傳第一個非空內文的結果；因此新網站若與既有格式類似，即使尚未註冊也可能直接可用。

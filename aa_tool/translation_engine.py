@@ -9,6 +9,10 @@ from .constants import BORDER_CHARS
 #   3) 與雙引號 `"` 比，內文中誤觸機率更低（少數作品會用半形 `"`）
 _GLOSSARY_QUOTE = '`'
 
+# 拆分標記：術語行中的 \X（X 為任意字元）表示「以 X 為分隔符拆成多條子條目」。
+# 例：ライザリン\・シュタウト=萊莎琳\・斯托特 → ライザリン=萊莎琳、シュタウト=斯托特
+_SPLIT_MARKER_RE = re.compile(r'\\(.)')
+
 
 def decode_glossary_term(s: str) -> str:
     """解析術語表的單一 key 或 value。
@@ -39,6 +43,24 @@ def encode_glossary_term(s: str) -> str:
     return s
 
 
+def expand_glossary_entry(key: str, value: str) -> list[tuple[str, str]]:
+    """若 key 含 \\X 標記，以 X 為分隔符將 key/value 各自切割並配對成多條子條目。
+
+    兩側切割數量必須相等，否則視為普通單條條目回傳。
+    例：('ライザリン\\・シュタウト', '萊莎琳\\・斯托特')
+        → [('ライザリン', '萊莎琳'), ('シュタウト', '斯托特')]
+    """
+    m = _SPLIT_MARKER_RE.search(key)
+    if not m:
+        return [(key, value)]
+    marker = '\\' + m.group(1)
+    key_parts = [p.strip() for p in key.split(marker)]
+    val_parts = [p.strip() for p in value.split(marker)]
+    if len(key_parts) != len(val_parts) or len(key_parts) < 2:
+        return [(key, value)]
+    return [(k, v) for k, v in zip(key_parts, val_parts) if k]
+
+
 def parse_glossary(glossary_str: str) -> dict[str, str]:
     """將 '日文=中文' 格式的術語表字串解析為 dict。
 
@@ -51,7 +73,10 @@ def parse_glossary(glossary_str: str) -> dict[str, str]:
         if len(parts) == 2:
             key = decode_glossary_term(parts[0])
             if key:
-                glossary[key] = decode_glossary_term(parts[1])
+                val = decode_glossary_term(parts[1])
+                for k, v in expand_glossary_entry(key, val):
+                    if k:
+                        glossary[k] = v
     return glossary
 
 
@@ -185,13 +210,16 @@ def apply_translation(
             parts = line.split('|', 1)
             trans_map[parts[0].strip()] = parts[1].strip()
 
-    # 長度優先排序（最長原文先替換）
+    # 長度優先排序（最長原文先替換，防止短字串先命中造成巢狀問題）
     valid_ids = [k for k in trans_map.keys() if k in orig_map]
     valid_ids.sort(key=lambda k: len(orig_map[k]), reverse=True)
 
     sorted_glossary = sorted(glossary.items(), key=lambda x: len(x[0]), reverse=True)
 
-    # 逐條替換
+    # 預先切割行（整個替換過程只切割一次）
+    source_lines = source.split('\n')
+
+    # 逐條替換，嚴格限定在 ID 指定的行號
     for _id in valid_ids:
         trans_text = trans_map[_id]
         original = orig_map[_id]
@@ -204,12 +232,24 @@ def apply_translation(
         len_diff = len(original) - len(final_translated)
         padded = final_translated + ('　' * len_diff if len_diff > 0 else '')
 
-        source_lines = source.split('\n')
-        for i in range(len(source_lines)):
-            source_lines[i] = _replace_with_padding(
-                source_lines[i], original, final_translated, padded
+        # 從 ID 解析行號（格式 NNN-S，NNN 為 1-indexed 行號）
+        try:
+            line_idx = int(_id.split('-')[0]) - 1
+        except (ValueError, IndexError):
+            line_idx = -1
+
+        if 0 <= line_idx < len(source_lines):
+            source_lines[line_idx] = _replace_with_padding(
+                source_lines[line_idx], original, final_translated, padded
             )
-        source = '\n'.join(source_lines)
+        else:
+            # ID 無法解析時退回全行掃描（保護性 fallback）
+            for i in range(len(source_lines)):
+                source_lines[i] = _replace_with_padding(
+                    source_lines[i], original, final_translated, padded
+                )
+
+    source = '\n'.join(source_lines)
 
     # 全域術語覆蓋：未被提取的原文部分也套用術語表
     source = apply_glossary_to_text(source, glossary)

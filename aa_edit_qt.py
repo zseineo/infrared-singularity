@@ -41,7 +41,7 @@ from aa_tool.qt_helpers import show_toast
 from aa_tool.text_extraction import extract_text as _extract_text
 from aa_tool.translation_engine import (
     apply_glossary_to_text, apply_reverse_glossary_to_text, apply_translation,
-    parse_glossary, decode_glossary_term,
+    parse_glossary, decode_glossary_term, expand_glossary_entry,
 )
 
 LINE_HEIGHT_PERCENT = 120  # 對應 CSS line-height: 1.2，與瀏覽器顯示一致
@@ -192,6 +192,8 @@ class EditWindow(QMainWindow):
                 self._original_text = None
         self._compare_active = False
         self._preview_active = False
+        # 記錄「進入比對模式前是否在 WYSIWYG」，供離開比對時決定返回目標
+        self._compare_from_preview = False
         # 進入 WYSIWYG 時透過 _render_preview_doc 重建文件會觸發 textChanged；
         # 為避免被當成「使用者編輯」標 dirty，期間以這個旗標暫時抑制。
         self._preview_suppress_dirty = False
@@ -664,35 +666,41 @@ class EditWindow(QMainWindow):
         # 與術語表同樣支援 backtick 包覆來保留外圍空白：
         # 例：輸入 `` ` Trooper ` `` → 實際比對的字串是 ` Trooper `（含空白）。
         # 不包 backtick 則照舊 strip，避免使用者不小心多打空白。
-        orig = decode_glossary_term(self.quick_orig.text())
-        trans = decode_glossary_term(self.quick_trans.text())
-        if not orig or not trans:
+        orig_raw = decode_glossary_term(self.quick_orig.text())
+        trans_raw = decode_glossary_term(self.quick_trans.text())
+        if not orig_raw or not trans_raw:
             self._set_status("⚠️ 原文與翻譯皆不可為空", "#ffc107")
             return
+        pairs = expand_glossary_entry(orig_raw, trans_raw)
         # WYSIWYG 模式：先把編輯結果序列化回 editor，再以 editor 為基準執行替換，
         # 套用後重建 preview，確保彩色標記不會在 preview/editor 之間漂移。
         if self._preview_active:
             self._sync_preview_to_editor()
-        text = self.editor.toPlainText()
-        if orig not in text:
-            self._set_status(f"🔍 找不到「{orig}」", "#ffc107")
+        new_text = self.editor.toPlainText()
+        total = 0
+        for orig, trans in pairs:
+            cnt = new_text.count(orig)
+            if cnt:
+                total += cnt
+                new_text = new_text.replace(orig, trans)
+        if total == 0:
+            self._set_status(f"🔍 找不到「{orig_raw}」", "#ffc107")
             return
-        count = text.count(orig)
-        new_text = text.replace(orig, trans)
         self._replace_document(new_text)
         self._wysiwyg_rerender_after_editor_change()
 
-        # 若勾選「存入術語」，通知主程式
+        # 若勾選「存入術語」，通知主程式（存入原始字串，含 \X 標記）
         if self.save_to_glossary_cb.isChecked():
             if self._glossary_saver is not None:
-                self._glossary_saver(orig, trans)
+                self._glossary_saver(orig_raw, trans_raw)
             elif self._cmd_file:
                 self._send_request(
-                    "save_to_glossary", original=orig, translation=trans)
+                    "save_to_glossary", original=orig_raw, translation=trans_raw)
 
         self.quick_orig.clear()
         self.quick_trans.clear()
-        self._set_status(f"✅ 已替換 {count} 處：{orig} → {trans}", "#0f0")
+        label = orig_raw if len(pairs) == 1 else f"{len(pairs)} 組"
+        self._set_status(f"✅ 已替換 {total} 處：{label}", "#0f0")
 
     def _reapply_glossary(self) -> None:
         """向主程式請求目前術語表，收到後套用到編輯內容。"""
@@ -1081,41 +1089,62 @@ class EditWindow(QMainWindow):
         if self._original_text is None:
             self._set_status("⚠️ 無原文可供比對", "#ffc107")
             return
-        # 若預覽模式開啟，先沿用其捲動位置切換過去（不必先回編輯模式）
+
         if self._preview_active:
-            # 先把 WYSIWYG 編輯成果序列化回 editor，再翻轉 flag；
-            # 否則 _sync_preview_to_editor 會被早期 return 擋住，WYSIWYG 中
-            # 的編輯會在後續切回時遺失（與 _toggle_preview 同樣的順序陷阱）。
+            # ── WYSIWYG → 比對模式 ──
+            # 先記錄游標行 + 捲軸值（_replace_document 後游標會到末端，必須在 sync 前取）；
+            # 再序列化（flag 仍 True 以通過 _sync_preview_to_editor 的 guard）。
+            enter_line = self.preview_view.textCursor().blockNumber()
+            enter_scroll = self.preview_view.verticalScrollBar().value()
             self._sync_preview_to_editor()
-            scroll_val = self.preview_view.verticalScrollBar().value()
             self._preview_active = False
             self._set_preview_ui(False)
             self._compare_active = True
+            self._compare_from_preview = True
         else:
+            # ── 編輯模式 ↔ 比對模式 ──
+            if not self._compare_active:
+                enter_line = self.editor.textCursor().blockNumber()
+                enter_scroll = self.editor.verticalScrollBar().value()
+            else:
+                enter_line = 0
+                enter_scroll = 0
             self._compare_active = not self._compare_active
-            scroll_val = None
+            self._compare_from_preview = False
+
         if self._compare_active:
-            cursor = self.editor.textCursor()
-            line = cursor.blockNumber()
-            if scroll_val is None:
-                scroll_val = self.editor.verticalScrollBar().value()
+            # ── 進入比對模式：游標 + 捲軸同步到 orig_view ──
             self.stack.setCurrentIndex(1)
-            # 同步游標到相同行
-            block = self.orig_view.document().findBlockByLineNumber(line)
-            if block.isValid():
-                oc = self.orig_view.textCursor()
-                oc.setPosition(block.position())
-                self.orig_view.setTextCursor(oc)
-            self.orig_view.verticalScrollBar().setValue(scroll_val)
+            self._move_cursor_to_block(self.orig_view, enter_line)
+            self.orig_view.verticalScrollBar().setValue(enter_scroll)
             self._set_compare_ui(True)
             self._set_status("🔍 比對模式：顯示原文（Alt+1 編輯／Alt+3 預覽）", "#0f0")
         else:
-            scroll_val = self.orig_view.verticalScrollBar().value()
-            self.stack.setCurrentIndex(0)
-            self.editor.verticalScrollBar().setValue(scroll_val)
+            # ── 離開比對模式：先記錄 orig_view 游標 + 捲軸 ──
+            leave_line = self.orig_view.textCursor().blockNumber()
+            leave_scroll = self.orig_view.verticalScrollBar().value()
             self._set_compare_ui(False)
-            self.editor.setFocus()
-            self._set_status("✏️ 編輯模式", "#0f0")
+            if self._compare_from_preview:
+                # 從 WYSIWYG 進來 → 返回 WYSIWYG
+                self._compare_from_preview = False
+                self._preview_suppress_dirty = True
+                self._render_preview_doc()
+                self._preview_active = True
+                self.preview_view.setReadOnly(False)
+                self.stack.setCurrentIndex(2)
+                self._move_cursor_to_block(self.preview_view, leave_line)
+                self.preview_view.verticalScrollBar().setValue(leave_scroll)
+                self._set_preview_ui(True)
+                self._preview_suppress_dirty = False
+                self._set_status(
+                    "🎨 所見即所得編輯（Alt+1 回編輯／Alt+2 比對）", "#0f0")
+            else:
+                # 從編輯模式進來 → 返回編輯模式
+                self.stack.setCurrentIndex(0)
+                self._move_cursor_to_block(self.editor, leave_line)
+                self.editor.verticalScrollBar().setValue(leave_scroll)
+                self.editor.setFocus()
+                self._set_status("✏️ 編輯模式", "#0f0")
 
     def _set_compare_ui(self, compare: bool) -> None:
         for w in self._edit_buttons:
@@ -1166,40 +1195,56 @@ class EditWindow(QMainWindow):
         )
 
     def _toggle_preview(self) -> None:
-        # 即將「離開」WYSIWYG：先把編輯成果序列化回 editor，再翻轉 flag。
-        # （否則 _sync_preview_to_editor 開頭的 `if not self._preview_active: return`
-        # 會把同步擋掉，造成 Alt+1 切回編輯模式時 WYSIWYG 中的編輯被還原。）
+        # ── 即將「離開」WYSIWYG ──
+        # 先記錄游標行 + 捲軸值（_replace_document 會把游標移到末端，必須在 sync 前取）；
+        # 再序列化（flag 必須仍為 True，否則 _sync_preview_to_editor 被早期 return 擋掉）。
+        leave_line: int = 0
+        leave_scroll: int = 0
         if self._preview_active and not self._compare_active:
+            leave_line = self.preview_view.textCursor().blockNumber()
+            leave_scroll = self.preview_view.verticalScrollBar().value()
             self._sync_preview_to_editor()
-        # 若比對模式開啟，先沿用其捲動位置切換過去（不必先回編輯模式）
+
+        # ── 決定進入目標的游標行與捲軸值 ──
+        enter_line: int = 0
+        enter_scroll: int = 0
         if self._compare_active:
-            scroll_val = self.orig_view.verticalScrollBar().value()
+            # 從比對模式進入 WYSIWYG：沿用 orig_view 游標位置與捲軸
+            enter_line = self.orig_view.textCursor().blockNumber()
+            enter_scroll = self.orig_view.verticalScrollBar().value()
             self._compare_active = False
             self._set_compare_ui(False)
             self._preview_active = True
         else:
+            if not self._preview_active:
+                # 從編輯模式進入 WYSIWYG：沿用 editor 游標位置與捲軸
+                enter_line = self.editor.textCursor().blockNumber()
+                enter_scroll = self.editor.verticalScrollBar().value()
             self._preview_active = not self._preview_active
-            scroll_val = None
+
         if self._preview_active:
-            if scroll_val is None:
-                scroll_val = self.editor.verticalScrollBar().value()
+            # ── 進入 WYSIWYG ──
             # _render_preview_doc 重建 document 會觸發 textChanged → _on_preview_changed；
             # 進入 WYSIWYG 不算「使用者編輯」，先把 flag 拉起阻擋 dirty 標記。
             self._preview_suppress_dirty = True
             self._render_preview_doc()
             self.preview_view.setReadOnly(False)
             self.stack.setCurrentIndex(2)
-            self.preview_view.verticalScrollBar().setValue(scroll_val)
+            # 順序：先 setTextCursor（會自動捲動）→ 再 setValue 覆蓋為原捲軸值，
+            # 確保視覺上「同一行在同一螢幕位置」對齊。
+            self._move_cursor_to_block(self.preview_view, enter_line)
+            self.preview_view.verticalScrollBar().setValue(enter_scroll)
             self._set_preview_ui(True)
             self._preview_suppress_dirty = False
             self._set_status(
                 "🎨 所見即所得編輯（Alt+1 回編輯／Alt+2 比對）", "#0f0")
         else:
-            # 離開：sync 已在進入本函式時完成（見開頭註解），這裡只處理捲動與 UI
-            scroll_val = self.preview_view.verticalScrollBar().value()
+            # ── 離開 WYSIWYG（回編輯模式）──
+            # sync 已在進入本函式開頭完成，這裡只恢復游標與 UI
             self.preview_view.setReadOnly(True)
             self.stack.setCurrentIndex(0)
-            self.editor.verticalScrollBar().setValue(scroll_val)
+            self._move_cursor_to_block(self.editor, leave_line)
+            self.editor.verticalScrollBar().setValue(leave_scroll)
             self._set_preview_ui(False)
             self.editor.setFocus()
             self._set_status("✏️ 編輯模式", "#0f0")
@@ -1655,6 +1700,19 @@ class EditWindow(QMainWindow):
                 pcur.setPosition(pblock.position())
                 self.preview_view.setTextCursor(pcur)
                 self.preview_view.ensureCursorVisible()
+
+    def _move_cursor_to_block(self, widget: QTextEdit, block_num: int) -> None:
+        """將 widget 游標移到指定 block（行）。不主動捲動 — `setTextCursor` 會自動
+        捲到游標位置，呼叫端若要保留原始捲軸位置，需於本函式之後再 `setValue`
+        覆蓋。block_num 越界時移到末行。"""
+        doc = widget.document()
+        block = doc.findBlockByLineNumber(block_num)
+        if not block.isValid():
+            block = doc.lastBlock()
+        if block.isValid():
+            cur = widget.textCursor()
+            cur.setPosition(block.position())
+            widget.setTextCursor(cur)
 
     # 將常見「亮綠」對應到 toast 風格的深綠底（與 MainWindow.show_status 對齊）
     _STATUS_COLOR_MAP = {

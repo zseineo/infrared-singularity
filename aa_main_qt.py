@@ -62,6 +62,8 @@ from aa_tool.url_fetcher import fetch_url as _fetch_url, parse_page_html as _par
 from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 
+APP_VERSION = "1.1"
+APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
 def _apply_dark_title_bar(win: QWidget) -> None:
@@ -592,7 +594,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self._invoke_on_main.connect(lambda fn: fn())
-        self.setWindowTitle("AA 創作翻譯輔助小工具")
+        self.setWindowTitle(APP_TITLE)
         self.resize(1400, 900)
         self._dark_title_applied = False
 
@@ -939,7 +941,7 @@ class MainWindow(QMainWindow):
             return
         self.save_cache()
         filter_text = self._translate_panel.get_filter_text().strip()
-        extracted_set = _extract_text(
+        extracted_list = _extract_text(
             source,
             self.current_base_regex,
             self.current_invalid_regex,
@@ -948,17 +950,19 @@ class MainWindow(QMainWindow):
             skip_title=self._last_fetched_title,
             author_name=self._author_name,
         )
-        single_kana_set = _extract_single_kana(source, filter_text)
-        for text, ln in single_kana_set.items():
-            if text not in extracted_set:
-                extracted_set[text] = ln
-        output = format_extraction_output(extracted_set)
+        single_kana_list = _extract_single_kana(source, filter_text)
+        seen = set(extracted_list)
+        for item in single_kana_list:
+            if item not in seen:
+                extracted_list.append(item)
+                seen.add(item)
+        output = format_extraction_output(extracted_list)
         self._translate_panel.extracted_text.setPlainText(output)
         self._translate_panel.ext_count_label.setText(
-            f"(共提取 {len(extracted_set)} 行)")
+            f"(共提取 {len(extracted_list)} 行)")
         if self._auto_copy:
             QApplication.clipboard().setText(output.strip())
-            self.show_status(f"✅ 已提取 {len(extracted_set)} 行並複製到剪貼簿", "#0f0")
+            self.show_status(f"✅ 已提取 {len(extracted_list)} 行並複製到剪貼簿", "#0f0")
 
     def copy_split(self, half: str) -> None:
         ext_text = self._translate_panel.get_extracted_text().strip()
@@ -989,7 +993,7 @@ class MainWindow(QMainWindow):
             self.show_status("⚠️ 請先選取要加入過濾器的文字", "#f39c12")
             return
         selected = selected.replace('\u2029', '\n')
-        id_prefix_re = _re_mod.compile(r'^\s*\d{2,4}-\d+\|')
+        id_prefix_re = _re_mod.compile(r'^\s*\d{2,5}-\d+\|')
         new_lines: list[str] = []
         for raw in selected.split('\n'):
             stripped = id_prefix_re.sub('', raw).strip()
@@ -1205,8 +1209,7 @@ class MainWindow(QMainWindow):
             self.show_status("⚠️ 尚未讀取過網址！", "#f39c12")
 
     def _update_work_title(self, work_title: str = "") -> None:
-        base = "AA 創作翻譯輔助小工具"
-        self.setWindowTitle(f"{base} — {work_title}" if work_title else base)
+        self.setWindowTitle(f"{APP_TITLE} — {work_title}" if work_title else APP_TITLE)
 
     # ════════════════════════════════════════════════════════════
     #  Toast / Status

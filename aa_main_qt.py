@@ -294,6 +294,9 @@ class TranslatePanel(QWidget):
         self.source_text = QTextEdit()
         self.source_text.setFont(_aa_font(14))
         self.source_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        # 強制只接受純文字：避免從網頁／Word 等來源貼上時帶入 font-family、
+        # color 等 inline 格式，導致後續傳到編輯器時無法被字型切換功能覆蓋。
+        self.source_text.setAcceptRichText(False)
         self.source_text.setStyleSheet("background:#1e1e1e; color:#ddd;")
         self.source_text.textChanged.connect(self._main.schedule_save)
         self.source_text.textChanged.connect(
@@ -1270,12 +1273,19 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
 
-        script = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "aa_url_fetch_qt.py")
-        args = [sys.executable, script,
-                "--cmd-file", cmd_file,
-                "--reverse-cmd-file", reverse_cmd_file,
-                "--init-file", init_file]
+        # frozen（PyInstaller）：呼叫 exe 旁的 aa_url_fetch_qt.exe
+        # 否則以目前 Python 直譯器執行 .py 來源
+        if getattr(sys, 'frozen', False):
+            exe_dir = os.path.dirname(sys.executable)
+            launcher = os.path.join(exe_dir, "aa_url_fetch_qt.exe")
+            args = [launcher]
+        else:
+            script = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "aa_url_fetch_qt.py")
+            args = [sys.executable, script]
+        args += ["--cmd-file", cmd_file,
+                 "--reverse-cmd-file", reverse_cmd_file,
+                 "--init-file", init_file]
         self._url_fetch_qt_process = subprocess.Popen(args)
         self._url_fetch_cmd_file = cmd_file
         self._url_fetch_reverse_cmd_file = reverse_cmd_file

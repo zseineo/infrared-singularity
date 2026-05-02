@@ -21,6 +21,7 @@
     *   `Ctrl+F` 延伸出的搜尋列提供字體下拉（可編輯，預設清單為 **MS PGothic / Monapo / TEXTAR / Saitamaar**，定義於 `aa_edit_qt.py:EDITOR_FONT_CHOICES`）與 6–48pt `QSpinBox`，**僅供使用者臨時切換預覽效果**，不應修改預設值。變更後同步更新 `editor`、`orig_view`、`_measurer`、CSS 與行高；使用者個人選擇持久化於 `aa_settings_cache.json` 的 `editor_font_family` / `editor_font_size`
     *   **內建字體載入** (`load_bundled_fonts()`)：`aa_main_qt.main()` 與 `aa_edit_qt.main()` 在 QApplication 建立後各呼叫一次，掃描 `fonts/` 資料夾中的 `.ttf` / `.otf` 並以 `QFontDatabase.addApplicationFont()` 載入；目前含 `fonts/monapo.ttf`（家族名 `Monapo`）、`fonts/textar.ttf`（家族名 `TEXTAR`）、`fonts/Saitamaar.ttf`（家族名 `Saitamaar`）。要新增字型只需放入 `fonts/`，並把家族名加進 `EDITOR_FONT_CHOICES`。**診斷日誌**：`load_bundled_fonts()` 會透過 `log_info()` 記錄每個字型檔載入結果（成功時附 family 名稱，失敗時 `addApplicationFont` 回傳 -1）；`fonts/` 目錄不存在時也會記錄。`_apply_editor_font()` 使用 `QFontInfo` 比對要求字型與 Qt 實際解析字型，若 fallback 發生則寫入警告，方便排查打包後字型失效問題。
     *   主視窗 UI 字體以 Qt 預設 Style Sheet（`aa_tool/dark_theme.qss`）控制；主面板各輸入區共用 `MS PGothic` 作為顯示字體以利 AA 對齊預覽。
+    *   **純文字輸入強制**：`source_text`（原始文本）與 `ai_text`（填入翻譯）兩個 `QTextEdit` 都呼叫 `setAcceptRichText(False)`。若不設定，使用者從網頁 / Word 等來源貼上時，Qt 會保留 inline `font-family` / `color` 等樣式，造成後續 `Ctrl+F` 切換編輯器字體時部分內容因為 inline span 而無法被覆蓋，呈現「換字型無效」的現象（特別是其他環境缺少預設字型時更明顯）。
 
 ## 2. 核心目標與工作流程 (Core Workflow)
 主要目標為協助使用者翻譯帶有 ASCII Art (AA) 圖像的漫畫文本，並**在替換成中文翻譯時，自動計算字元差異並補上全形空白**，以避免 AA 圖案因語系字元長度差異而引發的排版崩壞。

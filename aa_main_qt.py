@@ -454,6 +454,11 @@ class TranslatePanel(QWidget):
         self._ai_warn_label.setStyleSheet("color:#ff4444;")
         top.addWidget(self._ai_warn_label)
         top.addStretch()
+        # 翻譯 ↔ 提取 對應率：低於 50% 時以橘色提示，避免漏譯／錯行
+        # 沒被察覺。改在這裡即時顯示，不再用 Toast 中斷流程。
+        self._ai_match_label = QLabel("")
+        self._ai_match_label.setFont(_ui_font(11))
+        top.addWidget(self._ai_match_label)
         vl.addLayout(top)
 
         self.ai_text = QTextEdit()
@@ -635,6 +640,9 @@ class MainWindow(QMainWindow):
         self._embed_font_in_html: bool = False
         self._embed_font_name: str = "monapo"
         self._editor_default_wysiwyg: bool = False
+        # 編輯器右側「局部重套用」面板（Alt+4）的持久化狀態
+        self._side_panel_width: int = 0
+        self._side_auto_scroll: bool = False
         self._save_timer: QTimer | None = None
         self._saved_glossary_lines = 0
         self._saved_glossary_temp_lines = 0
@@ -807,6 +815,9 @@ class MainWindow(QMainWindow):
                 on_dir_change=self._on_last_dir_changed,
                 on_bg_change=self._on_editor_bg_changed,
                 init_bg=self._editor_bg_color,
+                init_side_panel_width=self._side_panel_width,
+                init_side_auto_scroll=self._side_auto_scroll,
+                on_side_state_change=self._on_side_state_changed,
             )
             # 替換 placeholder
             self.stack.removeWidget(self._edit_placeholder)
@@ -902,7 +913,15 @@ class MainWindow(QMainWindow):
 
     def _on_batch_open_file(self, file_path: str, line: int, folder: str) -> None:
         self._batch_folder = folder
-        cached_original = self.load_original_for_file(file_path)
+        entry = self._load_cache_entry_for_file(file_path)
+        cached_original = entry['text'] if entry else None
+        if entry:
+            cached_ext = entry.get('extracted', '')
+            if cached_ext:
+                self._translate_panel.extracted_text.setPlainText(cached_ext)
+            cached_tl = entry.get('translation', '')
+            if cached_tl:
+                self._translate_panel.ai_text.setPlainText(cached_tl)
         display_title = os.path.splitext(os.path.basename(file_path))[0]
         self.show_edit_panel(file_path, scroll_to_line=line,
                              original_text=cached_original,
@@ -1020,15 +1039,42 @@ class MainWindow(QMainWindow):
         lbl = self._translate_panel._ai_warn_label
         if not ai_content:
             lbl.setText("")
-            return
-        warnings = _validate_ai_text(ai_content)
-        if warnings:
-            lbl.setText("  ".join(warnings))
-            lbl.setStyleSheet("color:#ff4444;")
         else:
-            lbl.setText("✅ 格式正確")
-            lbl.setStyleSheet("color:#28a745;")
-            QTimer.singleShot(3000, lambda: lbl.setText(""))
+            warnings = _validate_ai_text(ai_content)
+            if warnings:
+                lbl.setText("  ".join(warnings))
+                lbl.setStyleSheet("color:#ff4444;")
+            else:
+                lbl.setText("✅ 格式正確")
+                lbl.setStyleSheet("color:#28a745;")
+                QTimer.singleShot(3000, lambda: lbl.setText(""))
+        self._update_ai_match_label()
+
+    def _update_ai_match_label(self) -> None:
+        """以提取結果與貼入翻譯的 ID 交集計算對應率，低於 50% 時在
+        填入翻譯區塊右側以橘色提示。≥50% 或任一邊為空時清空標籤。
+        """
+        match_lbl = self._translate_panel._ai_match_label
+        extracted = self._translate_panel.get_extracted_text()
+        translated = self._translate_panel.get_ai_text()
+        extracted_ids = {
+            line.split('|', 1)[0].strip()
+            for line in extracted.split('\n') if '|' in line
+        }
+        translated_ids = {
+            line.split('|', 1)[0].strip()
+            for line in translated.split('\n') if '|' in line
+        }
+        if not extracted_ids or not translated_ids:
+            match_lbl.setText("")
+            return
+        ratio = len(extracted_ids & translated_ids) / len(extracted_ids)
+        if ratio < 0.50:
+            match_lbl.setText(
+                f"⚠️ 原文跟翻譯可能不對應（對應率 {ratio:.0%}）")
+            match_lbl.setStyleSheet("color:#f39c12;")
+        else:
+            match_lbl.setText("")
 
     def check_chapter_number(self) -> None:
         text = self._translate_panel.source_text.toPlainText()[:200]
@@ -1050,22 +1096,8 @@ class MainWindow(QMainWindow):
             return None
         self.save_cache()
         self._record_work_history()
-        # 覆蓋率檢查：提取出的 ID 中有幾條能對應到翻譯 ID；低於 50% 代表
-        # AI 翻譯可能漏譯或錯行，跳 Toast 提示（不中斷流程）。
-        extracted_ids = {
-            line.split('|', 1)[0].strip()
-            for line in extracted.split('\n') if '|' in line
-        }
-        translated_ids = {
-            line.split('|', 1)[0].strip()
-            for line in translated.split('\n') if '|' in line
-        }
-        if extracted_ids:
-            matched = len(extracted_ids & translated_ids)
-            ratio = matched / len(extracted_ids)
-            if ratio < 0.50:
-                self.show_status(
-                    f"⚠️ 原文跟翻譯可能不對應（對應率 {ratio:.0%}）", "#f39c12")
+        # 覆蓋率檢查改為「貼入翻譯」即時顯示於填入翻譯區塊右側
+        # （見 _update_ai_match_label），這裡不再跳 Toast。
         glossary = parse_glossary(self._translate_panel.get_combined_glossary())
         result_text = _apply_translation(source, extracted, translated, glossary)
         title = self._translate_panel.get_doc_title().strip() or "未命名"
@@ -1088,13 +1120,41 @@ class MainWindow(QMainWindow):
             self.show_status(f"❌ 寫入暫存失敗: {e}", "#dc3545")
             return
         # 立即暫存原文，避免使用者之後不經編輯器儲存流程時 cache 缺漏
-        self.save_original_for_file(tmp, source.rstrip('\n'))
+        self.save_original_for_file(
+            tmp, source.rstrip('\n'),
+            extracted=self._translate_panel.get_extracted_text(),
+            translation=self._translate_panel.get_ai_text(),
+        )
         self.show_edit_panel(
             tmp,
             original_text=source.rstrip('\n'),
             display_title=display_title,
             is_temp_file=True,
         )
+
+    # ── 內嵌字型 (settings) → write_html_file 參數的共用解析 ──
+    _EMBED_FONT_MAP: dict[str, tuple[str, str]] = {
+        "monapo":    ("monapo.ttf",    "Monapo"),
+        "Saitamaar": ("Saitamaar.ttf", "Saitamaar"),
+        "textar":    ("textar.ttf",    "textar"),
+    }
+
+    def _resolved_embed_font(self) -> tuple[str | None, str | None]:
+        """依設定回傳 (font_path, font_family)；未啟用或字型檔不存在時回 (None, None)。
+
+        ⚠️ 僅供「另存新檔」流程使用（翻譯並直接儲存）。
+        覆蓋舊檔的路徑（Ctrl+S、批次搜尋）**不該**呼叫此方法。
+        """
+        if not self._embed_font_in_html:
+            return None, None
+        fn, fam = self._EMBED_FONT_MAP.get(
+            self._embed_font_name, ("monapo.ttf", "Monapo"))
+        fonts_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "fonts")
+        cand = os.path.join(fonts_dir, fn)
+        if not os.path.exists(cand):
+            return None, None
+        return cand, fam
 
     def apply_translation_and_save(self) -> None:
         """執行翻譯替換後，直接透過 QFileDialog 詢問路徑並存檔，
@@ -1113,16 +1173,27 @@ class MainWindow(QMainWindow):
             return
         if not file_path.lower().endswith('.html'):
             file_path += '.html'
+        # 直接存檔路徑也要遵循「設定 → 內嵌字型」（與編輯器存檔對齊）
+        embed_font_path, embed_font_family = self._resolved_embed_font()
         try:
-            write_html_file(file_path, result_text)
+            write_html_file(
+                file_path, result_text,
+                embed_font_path=embed_font_path,
+                embed_font_family=embed_font_family,
+            )
         except OSError as e:
             self.show_status(f"❌ 寫入失敗: {e}", "#dc3545")
             return
         # 直接儲存路徑不進編輯器，必須立刻把原文寫入 cache，
         # 否則之後從批次搜尋開啟時 Alt+2 比對原文會是空的。
-        self.save_original_for_file(file_path, source.rstrip('\n'))
+        self.save_original_for_file(
+            file_path, source.rstrip('\n'),
+            extracted=self._translate_panel.get_extracted_text(),
+            translation=self._translate_panel.get_ai_text(),
+        )
         self._last_dir = os.path.dirname(file_path)
         self.schedule_save()
+        self._stamp_current_url_history()
         self.show_status(
             f"✅ 已儲存至 {os.path.basename(file_path)}", "#28a745")
 
@@ -1146,7 +1217,15 @@ class MainWindow(QMainWindow):
         # 若暫存原文中有此檔名，載入作為比對原文
         self._last_dir = os.path.dirname(file_path)
         self.schedule_save()
-        cached_original = self.load_original_for_file(file_path)
+        entry = self._load_cache_entry_for_file(file_path)
+        cached_original = entry['text'] if entry else None
+        if entry:
+            cached_ext = entry.get('extracted', '')
+            if cached_ext:
+                self._translate_panel.extracted_text.setPlainText(cached_ext)
+            cached_tl = entry.get('translation', '')
+            if cached_tl:
+                self._translate_panel.ai_text.setPlainText(cached_tl)
         self.show_edit_panel(
             file_path,
             original_text=cached_original,
@@ -1457,6 +1536,8 @@ class MainWindow(QMainWindow):
                                     if h.get('url') != raw_url]
                 self.url_history.append(hist)
                 self.url_history = self.url_history[-self._fetch_history_limit:]
+                # 套用戳印 meta（若有）：work_title → doc_title、author → 作者欄
+                self._apply_url_history_meta(raw_url)
                 self.schedule_save()
                 line_count = text_content.count('\n') + 1
                 self.show_status(f"✅ 網址讀取成功！共 {line_count} 行", "#0f0")
@@ -1552,6 +1633,8 @@ class MainWindow(QMainWindow):
                                         if h.get('url') != next_url]
                     self.url_history.append(hist)
                     self.url_history = self.url_history[-self._fetch_history_limit:]
+                    # 套用戳印 meta（若有）：work_title → doc_title、author → 作者欄
+                    self._apply_url_history_meta(next_url)
                     self.schedule_save()
                     self.show_status(
                         f"✅ 讀取成功！共 {text_content.count(chr(10)) + 1} 行",
@@ -1609,6 +1692,8 @@ class MainWindow(QMainWindow):
             embed_font_in_html=self._embed_font_in_html,
             embed_font_name=self._embed_font_name,
             editor_default_wysiwyg=self._editor_default_wysiwyg,
+            side_panel_width=self._side_panel_width,
+            side_auto_scroll=self._side_auto_scroll,
         )
 
     def _apply_cache(self, cache: AppCache) -> None:
@@ -1656,6 +1741,11 @@ class MainWindow(QMainWindow):
         self._embed_font_in_html = bool(cache.embed_font_in_html)
         self._embed_font_name = str(cache.embed_font_name or "monapo")
         self._editor_default_wysiwyg = bool(cache.editor_default_wysiwyg)
+        try:
+            self._side_panel_width = int(cache.side_panel_width or 0)
+        except (TypeError, ValueError):
+            self._side_panel_width = 0
+        self._side_auto_scroll = bool(cache.side_auto_scroll)
 
     def save_cache(self) -> None:
         self.settings_mgr.save_cache(self._gather_cache())
@@ -1840,8 +1930,9 @@ class MainWindow(QMainWindow):
             return None
         return _re_mod.sub(r'\s+', ' ', m.group(0)).strip()
 
-    def save_original_for_file(self, file_path: str,
-                               original_text: str) -> None:
+    def save_original_for_file(self, file_path: str, original_text: str,
+                               extracted: str = "",
+                               translation: str = "") -> None:
         if not file_path or not original_text:
             return
         # 讀回現有資料再合併（保留其他執行緒/進程已寫入的條目）
@@ -1851,6 +1942,10 @@ class MainWindow(QMainWindow):
         fp = self._compute_author_fingerprint(original_text)
         if fp:
             entry['author_key'] = fp
+        if extracted:
+            entry['extracted'] = extracted
+        if translation:
+            entry['translation'] = translation
         data[key] = entry
         # 上限裁切（依時間戳保留最新的 N 筆）
         if len(data) > self._original_cache_limit:
@@ -1860,16 +1955,15 @@ class MainWindow(QMainWindow):
             data = dict(ordered[:self._original_cache_limit])
         self._save_orig_cache_data(data)
 
-    def load_original_for_file(self, file_path: str) -> str | None:
+    def _load_cache_entry_for_file(self, file_path: str) -> dict | None:
+        """回傳完整 cache entry（含 text / extracted / translation），找不到回傳 None。"""
         if not file_path:
             return None
         data = self._load_orig_cache_data()
         # 第一層：依檔名 basename 查
         entry = data.get(os.path.basename(file_path))
-        if isinstance(entry, dict):
-            text = entry.get('text')
-            if isinstance(text, str) and text:
-                return text
+        if isinstance(entry, dict) and isinstance(entry.get('text'), str) and entry['text']:
+            return entry
         # 第二層：以「投稿標頭指紋」作備援索引（檔名被改過時仍能命中）
         try:
             pre = read_html_pre_content(file_path)
@@ -1883,14 +1977,17 @@ class MainWindow(QMainWindow):
         for cached_entry in data.values():
             if not isinstance(cached_entry, dict):
                 continue
-            cached_text = cached_entry.get('text')
-            if not isinstance(cached_text, str) or not cached_text:
+            if not isinstance(cached_entry.get('text'), str) or not cached_entry['text']:
                 continue
             entry_fp = (cached_entry.get('author_key')
-                        or self._compute_author_fingerprint(cached_text))
+                        or self._compute_author_fingerprint(cached_entry['text']))
             if entry_fp == target_fp:
-                return cached_text
+                return cached_entry
         return None
+
+    def load_original_for_file(self, file_path: str) -> str | None:
+        entry = self._load_cache_entry_for_file(file_path)
+        return entry['text'] if entry else None
 
     def _on_editor_bg_changed(self, color: str) -> None:
         self._editor_bg_color = color
@@ -1906,8 +2003,28 @@ class MainWindow(QMainWindow):
         self._editor_font_size = int(size)
         self.schedule_save()
 
-    def _on_edit_saved(self, file_path: str) -> None:
-        """EditWindow 儲存成功後的 callback。"""
+    def _on_side_state_changed(
+        self, width: int | None, auto_scroll: bool | None
+    ) -> None:
+        """編輯器右側「局部重套用」面板狀態變更：寬度（splitterMoved）或
+        勾選框（toggled）。任一參數為 None 表示這次只更新另一個欄位。"""
+        if width is not None:
+            try:
+                self._side_panel_width = int(width)
+            except (TypeError, ValueError):
+                pass
+        if auto_scroll is not None:
+            self._side_auto_scroll = bool(auto_scroll)
+        self.schedule_save()
+
+    def _on_edit_saved(self, file_path: str,
+                       is_save_as: bool = False) -> None:
+        """EditWindow 儲存成功後的 callback。
+
+        `is_save_as=True` 表示走另存新檔路徑（含暫存檔首次落地），
+        此時會把當前 (doc_title, author) 戳印到對應 URL 歷史條目；
+        Ctrl+S 覆寫既有檔案不觸發戳印。
+        """
         # 更新導覽列與標題
         base = os.path.basename(file_path)
         title = self._edit_window._display_title if self._edit_window else ""
@@ -1917,7 +2034,12 @@ class MainWindow(QMainWindow):
         # 暫存原文
         if self._edit_window is not None and self._edit_window._original_text:
             self.save_original_for_file(
-                file_path, self._edit_window._original_text)
+                file_path, self._edit_window._original_text,
+                extracted=self._translate_panel.get_extracted_text(),
+                translation=self._translate_panel.get_ai_text(),
+            )
+        if is_save_as:
+            self._stamp_current_url_history()
 
     # ════════════════════════════════════════════════════════════
     #  作品 + 作者 歷史記錄 (上限由 self._work_history_limit 控制)
@@ -1989,6 +2111,53 @@ class MainWindow(QMainWindow):
                 'url_related_links': self.url_related_links,
                 'current_url': self.current_url,
             })
+
+    def _apply_url_history_meta(self, url: str) -> None:
+        """抓取完成後若 url_history 該條目帶有戳印 meta，套用至 doc_title/author。
+
+        - work_title → doc_title 欄位（覆蓋頁面解析得到的標題）
+        - author → self._author_name，並推送至 URL 抓取子視窗的作者欄位
+        - 任一欄為空則跳過該欄套用
+        """
+        if not url:
+            return
+        entry = next((h for h in self.url_history
+                      if isinstance(h, dict) and h.get('url') == url), None)
+        if not entry:
+            return
+        work_title = (entry.get('work_title') or '').strip()
+        author = (entry.get('author') or '').strip()
+        if work_title:
+            self._translate_panel.doc_title.setText(work_title)
+        if author:
+            self._author_name = author
+            if getattr(self, '_url_fetch_qt_process', None):
+                self._write_url_fetch_reverse({
+                    'action': 'author_updated',
+                    'author_name': author,
+                })
+
+    def _stamp_current_url_history(self) -> None:
+        """把當前 doc_title + author 戳印到 url_history 中對應 self.current_url 的條目。
+
+        觸發點：EditWindow 另存新檔成功、apply_translation_and_save 成功儲存後。
+        覆寫策略：直接覆蓋既有戳印值（最新一次儲存即最新的對應作品/作者）。
+        """
+        url = (getattr(self, 'current_url', '') or '').strip()
+        if not url:
+            return
+        title = self._translate_panel.get_doc_title().strip()
+        author = (self._author_name or '').strip()
+        try:
+            self.settings_mgr.stamp_url_history_meta(url, title, author)
+        except Exception:
+            return
+        # 同步 in-memory（避免 _refresh_shared_history 比對時漏看新值）
+        for h in self.url_history:
+            if isinstance(h, dict) and h.get('url') == url:
+                h['work_title'] = title
+                h['author'] = author
+                break
 
     def _apply_work_history(self, entry: dict) -> None:
         p = self._translate_panel

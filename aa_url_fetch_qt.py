@@ -10,6 +10,8 @@
     {action: "fetch_done", success, status_message, status_color,
       [url_history, url_related_links, current_url, auto_close]}
     {action: "history_cleared", url_history}
+    {action: "history_updated", url_history, [url_related_links, current_url]}
+    {action: "author_updated", author_name}  # 戳印 meta 套用後同步至作者欄位
 
 用法：
     python aa_url_fetch_qt.py --cmd-file <path> --reverse-cmd-file <path> --init-file <path>
@@ -185,7 +187,7 @@ class UrlFetchWindow(QMainWindow):
         search_row.setContentsMargins(0, 0, 0, 0)
         self.hist_search = QLineEdit()
         self.hist_search.setFont(self.ui_small_font)
-        self.hist_search.setPlaceholderText("🔍 搜尋紀錄（標題或網址）")
+        self.hist_search.setPlaceholderText("🔍 搜尋紀錄（標題）")
         self.hist_search.setClearButtonEnabled(True)
         self.hist_search.textChanged.connect(self._on_history_search_changed)
         search_row.addWidget(self.hist_search, 1)
@@ -303,7 +305,6 @@ class UrlFetchWindow(QMainWindow):
             entries = [
                 e for e in entries
                 if kw in (e.get("title") or "").lower()
-                or kw in (e.get("url") or "").lower()
             ]
             if not entries:
                 lbl = QLabel(f"（無符合「{self.hist_search.text()}」的紀錄）")
@@ -441,6 +442,14 @@ class UrlFetchWindow(QMainWindow):
         elif action == "history_cleared":
             self._url_history = cmd.get("url_history") or []
             self._refresh_history()
+        elif action == "author_updated":
+            # 主程式套用 url_history 戳印的 author 後推送，同步顯示於作者欄位
+            author = cmd.get("author_name") or ""
+            self._author_name = author
+            try:
+                self.author_name_entry.setText(author)
+            except Exception:
+                pass
         elif action == "history_updated":
             # 主程式偵測到 cache 變動（例如另一個 aa_main_qt.py 寫入新紀錄）後推送
             self._url_history = cmd.get("url_history") or []

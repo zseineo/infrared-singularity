@@ -125,10 +125,15 @@ class AppCache:
     glossary_auto_search: bool = True
     diff_save_mode: bool = False
     editor_default_wysiwyg: bool = False
-    # 儲存 HTML 時是否把字型 Base64 內嵌到 <head>（離線手機可正確顯示，
-    # 代價是檔案會增大約 1MB+）；先固定嵌入 fonts/monapo.ttf。
+    # 另存新檔時是否把字型 Base64 內嵌到 <head>（離線手機可正確顯示，
+    # 代價是檔案會增大約 1MB+）；覆蓋舊檔（Ctrl+S、批次搜尋）時不寫入。
     embed_font_in_html: bool = False
     embed_font_name: str = "monapo"
+    # 編輯器右側「局部重套用」面板（Alt+4）的持久化狀態：
+    # - side_panel_width：面板寬度（px）；0 表示沿用預設 splitter 比例
+    # - side_auto_scroll：「自動捲動」勾選框狀態
+    side_panel_width: int = 0
+    side_auto_scroll: bool = False
 
 
 class SettingsManager:
@@ -285,6 +290,13 @@ class SettingsManager:
                 'editor_default_wysiwyg', cache.editor_default_wysiwyg))
             cache.embed_font_name = str(data.get(
                 'embed_font_name', cache.embed_font_name))
+            try:
+                cache.side_panel_width = int(data.get(
+                    'side_panel_width', cache.side_panel_width) or 0)
+            except (TypeError, ValueError):
+                pass
+            cache.side_auto_scroll = bool(data.get(
+                'side_auto_scroll', cache.side_auto_scroll))
         except Exception as e:
             print("Cache load failed:", e)
         return cache
@@ -348,6 +360,8 @@ class SettingsManager:
                 'embed_font_in_html': cache.embed_font_in_html,
                 'editor_default_wysiwyg': cache.editor_default_wysiwyg,
                 'embed_font_name': cache.embed_font_name,
+                'side_panel_width': cache.side_panel_width,
+                'side_auto_scroll': cache.side_auto_scroll,
             }
             self._atomic_write_json(cache_file, data)
 
@@ -391,11 +405,46 @@ class SettingsManager:
         with locked_file(cache_file + '.lock'):
             data = self._read_cache_raw()
             hist = data.get('url_history', []) or []
+            # 保留舊條目戳印的 work_title / author（由另存新檔/翻譯並儲存時寫入），
+            # 若新 entry 未提供則沿用，避免重抓同一 URL 把戳印洗掉。
+            new_entry = dict(entry)
+            for h in hist:
+                if isinstance(h, dict) and h.get('url') == url:
+                    if 'work_title' not in new_entry and h.get('work_title'):
+                        new_entry['work_title'] = h['work_title']
+                    if 'author' not in new_entry and h.get('author'):
+                        new_entry['author'] = h['author']
+                    break
             hist = [h for h in hist
                     if isinstance(h, dict) and h.get('url') != url]
-            hist.append(dict(entry))
+            hist.append(new_entry)
             data['url_history'] = hist[-max_items:]
             self._atomic_write_json(cache_file, data)
+
+    def stamp_url_history_meta(self, url: str, work_title: str,
+                               author: str) -> None:
+        """就地更新 url_history 中對應 url 條目的 work_title / author 欄位。
+
+        - 不改順序、不新增、不去重；找不到對應 url 則略過。
+        - 觸發點：EditWindow 另存新檔成功、apply_translation_and_save 成功時。
+        - 覆寫策略：直接覆蓋既有戳印值。
+        """
+        if not url:
+            return
+        cache_file = self.get_cache_file()
+        with locked_file(cache_file + '.lock'):
+            data = self._read_cache_raw()
+            hist = data.get('url_history', []) or []
+            changed = False
+            for h in hist:
+                if isinstance(h, dict) and h.get('url') == url:
+                    h['work_title'] = work_title or ''
+                    h['author'] = author or ''
+                    changed = True
+                    break
+            if changed:
+                data['url_history'] = hist
+                self._atomic_write_json(cache_file, data)
 
     def append_work_history(self, entry: dict, max_items: int = 10) -> None:
         """新增一筆作品/作者歷史（以 (title, author) 去重 prepend）。"""

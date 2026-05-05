@@ -49,7 +49,7 @@ DEFAULT_BG = "#ffffff"
 DEFAULT_COLOR = "#ff0000"
 DEFAULT_EDITOR_FONT = "MS PGothic"  # ⚠️ 請勿改動：AA 對齊計算依賴此字體的 metrics
 DEFAULT_EDITOR_FONT_SIZE = 12
-EDITOR_FONT_CHOICES = ["MS PGothic", "Monapo", "TEXTAR", "Saitamaar"]
+EDITOR_FONT_CHOICES = ["MS PGothic", "Monapo", "Textar", "Saitamaar"]
 
 # 專案內建字體（fonts/ 資料夾），Qt 啟動後呼叫一次
 _BUNDLED_FONTS_LOADED = False
@@ -168,6 +168,9 @@ class EditWindow(QMainWindow):
         on_dir_change=None,       # (dir: str) -> None; 目錄變更通知
         on_bg_change=None,        # (color: str) -> None; 底色變更即時持久化
         init_bg: str = "",        # 上次記住的編輯器底色
+        init_side_panel_width: int = 0,   # Alt+4 面板寬度（px，0=預設）
+        init_side_auto_scroll: bool = False,  # Alt+4 面板「自動捲動」初始狀態
+        on_side_state_change=None,  # (width: int|None, auto_scroll: bool|None) -> None
     ) -> None:
         super().__init__()
         self._html_file = html_file
@@ -195,6 +198,9 @@ class EditWindow(QMainWindow):
         self._get_last_dir = get_last_dir
         self._on_dir_change = on_dir_change
         self._on_bg_change = on_bg_change
+        self._init_side_panel_width = int(init_side_panel_width or 0)
+        self._init_side_auto_scroll = bool(init_side_auto_scroll)
+        self._on_side_state_change = on_side_state_change
 
         # ── IPC 狀態 ──
         self._cmd_file = cmd_file
@@ -300,6 +306,14 @@ class EditWindow(QMainWindow):
         # 行以下的部分**，可視行以上的編輯成果保留不動。
         self._translate_side = self._build_translate_side_panel()
         self._translate_side.hide()
+        # 自動捲動：依使用者在 editor / preview_view 的選取與捲軸事件觸發
+        self.editor.selectionChanged.connect(self._on_editor_selection_changed)
+        self.preview_view.selectionChanged.connect(
+            self._on_editor_selection_changed)
+        self.editor.verticalScrollBar().valueChanged.connect(
+            self._on_editor_scrolled)
+        self.preview_view.verticalScrollBar().valueChanged.connect(
+            self._on_editor_scrolled)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.stack)
@@ -307,6 +321,9 @@ class EditWindow(QMainWindow):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
         splitter.setChildrenCollapsible(False)
+        # 持久化：使用者拖動分隔線時通知主程式存檔（只在面板可見時記錄寬度，
+        # 避免面板關閉時 sizes()[1]=0 把預設寬度蓋掉）
+        splitter.splitterMoved.connect(self._on_splitter_moved)
         self._main_splitter = splitter
         root.addWidget(splitter, 1)
 
@@ -683,8 +700,19 @@ class EditWindow(QMainWindow):
         except Exception:
             pass
 
-        self.editor.setFont(new_font)
-        self.orig_view.setFont(new_font)
+        # editor / orig_view 的內容都是「plain text + 字面 <span> markup」，
+        # 用 setPlainText 重建 document 不會丟任何資料；這是唯一能保證
+        # 切字型後**視覺真的更新**的做法（mergeCharFormat / setDefaultFont
+        # 在不同 PyQt6 版本下都有殘留 explicit FontFamily 蓋過 defaultFont
+        # 的情況，導致切字型「Log 顯示成功但視覺沒變」）。
+        self._reset_widget_font_via_replain(self.editor, new_font)
+        self._reset_widget_font_via_replain(self.orig_view, new_font)
+        # WYSIWYG 預覽：因為它用 QTextCharFormat 存顏色，不能直接 setPlainText
+        # 重建（會丟顏色），用既有的 mergeCharFormat 路徑覆寫字型。
+        if self._preview_active:
+            self.preview_view.setFont(new_font)
+            self.preview_view.document().setDefaultFont(new_font)
+            self._force_font_on_document(self.preview_view, new_font)
         self._measurer = QtFontMeasurer(new_font)
         self._apply_editor_colors()
         self._apply_line_height()
@@ -694,6 +722,56 @@ class EditWindow(QMainWindow):
                 self._on_font_change(self._font_family, self._font_size)
             except Exception:
                 pass
+
+    def _reset_widget_font_via_replain(
+        self, widget: QTextEdit, font: QFont
+    ) -> None:
+        """重新用 setPlainText 重建 document 以強制套用新字型。
+
+        必要性：QTextEdit.setFont / document.setDefaultFont / mergeCharFormat
+        在某些 PyQt6 版本下，無法蓋掉 setPlainText 與 cursor.insertText 留在
+        每個字元上的 explicit FontFamily charFormat — 結果切字型 Log 顯示成功
+        但畫面完全不變。setPlainText 會以「當前的 documentDefaultFont」重建
+        所有字元的 charFormat，視覺保證更新。
+
+        ⚠️ 限制：caller 必須確保 widget 內容是「純文字 + 字面 markup」（即
+        editor / orig_view，顏色用字面 `<span>` 表達）。WYSIWYG 的 preview_view
+        用 QTextCharFormat 存顏色，**不能**走這條路徑。
+        """
+        text = widget.toPlainText()
+        cursor_pos = widget.textCursor().position()
+        scroll = widget.verticalScrollBar().value()
+        # 1) 先把字型寫到 widget 與 document 兩層
+        widget.setFont(font)
+        widget.document().setDefaultFont(font)
+        # 2) 重新載入：每個字元的 charFormat 會以新 defaultFont 為基準重建。
+        #    用 blockSignals 抑制 setPlainText 觸發 textChanged → _on_changed
+        #    把 _dirty 標起來（換字型不該被當成編輯）。
+        widget.blockSignals(True)
+        try:
+            widget.setPlainText(text)
+        finally:
+            widget.blockSignals(False)
+        # 3) 還原游標位置與捲動
+        cursor = widget.textCursor()
+        cursor.setPosition(min(cursor_pos, len(text)))
+        widget.setTextCursor(cursor)
+        widget.verticalScrollBar().setValue(scroll)
+
+    def _force_font_on_document(self, widget: QTextEdit, font: QFont) -> None:
+        """以 mergeCharFormat 強制把整份 document 的字元字型改為 font。
+
+        只覆寫 family / pointSize / styleHint，不影響顏色、粗體等其他屬性。
+        """
+        cursor = QTextCursor(widget.document())
+        cursor.select(QTextCursor.SelectionType.Document)
+        fmt = QTextCharFormat()
+        # 用 QTextCharFormat.setFont(QFont) 一次設好所有字型子屬性
+        # （family / pointSize / weight / italic / styleHint…）。
+        # 用單一的 setFontFamily 會留下 family 與其他子屬性不一致的狀態，
+        # 部分 PyQt6 版本下會造成 mergeCharFormat 後渲染依然走舊字型。
+        fmt.setFont(font)
+        cursor.mergeCharFormat(fmt)
 
     # ════════════════════════════════════════════════════════════
     #  全文替換
@@ -1387,13 +1465,24 @@ class EditWindow(QMainWindow):
         vl.setContentsMargins(6, 6, 6, 6)
         vl.setSpacing(4)
 
-        # 標題列 + 重新套用按鈕
+        # 標題列 + 自動捲動 + 重新套用按鈕
         head = QHBoxLayout()
         title = QLabel("局部重套用（Alt+4）")
         title.setFont(QFont("MS PGothic", 11))
         title.setStyleSheet("color:#ddd; font-weight:bold;")
         head.addWidget(title)
         head.addStretch()
+        self.side_auto_scroll_cb = QCheckBox("自動捲動")
+        self.side_auto_scroll_cb.setStyleSheet("color:#ddd;")
+        self.side_auto_scroll_cb.setToolTip(
+            "勾選後：\n"
+            "・在編輯器中重新「選取」一段文字 → 面板自動選取對應行\n"
+            "・編輯器捲動且當前無選取 → 面板隨可視中心行同步捲動\n"
+            "・編輯器有選取時捲動 → 面板不跟動（避免干擾選取對齊）")
+        # 持久化：載入上次的勾選狀態，並在 toggle 時通知主程式存檔
+        self.side_auto_scroll_cb.setChecked(self._init_side_auto_scroll)
+        self.side_auto_scroll_cb.toggled.connect(self._on_side_auto_toggled)
+        head.addWidget(self.side_auto_scroll_cb)
         btn_reapply = _make_button("重新套用", "#28a745", "#218838", width=85)
         btn_reapply.setToolTip(
             "用右側「提取結果」與「填入翻譯」重新跑替換；\n"
@@ -1436,11 +1525,62 @@ class EditWindow(QMainWindow):
 
         return w
 
+    def _on_side_auto_toggled(self, checked: bool) -> None:
+        if self._on_side_state_change is not None:
+            try:
+                self._on_side_state_change(None, bool(checked))
+            except Exception:
+                pass
+
+    def _restore_side_panel_width(self) -> None:
+        """把 splitter 第二欄寬度設為使用者上次記住的值。
+
+        只在 _init_side_panel_width > 0 且 splitter 已有合理寬度時套用，
+        避免在視窗尚未 layout 時把寬度設成負值。
+        """
+        target = self._init_side_panel_width
+        if target <= 0:
+            return
+        sp = getattr(self, "_main_splitter", None)
+        if sp is None:
+            return
+        total = sp.width()
+        if total <= 0:
+            return
+        # 第一欄至少留 200px 給編輯器，避免 setSizes 把右側塞滿
+        right = max(120, min(target, total - 200))
+        left = max(200, total - right)
+        sp.setSizes([left, right])
+
+    def _on_splitter_moved(self, pos: int, index: int) -> None:
+        """splitter 拖動 → 把右側面板寬度告訴主程式存檔。
+
+        只在面板實際可見時記錄，避免關閉狀態下 sizes()[1]=0 把上次的寬度
+        蓋成 0（下次開啟會回退到 setStretchFactor 預設）。
+        """
+        if not self._translate_side.isVisible():
+            return
+        if self._on_side_state_change is None:
+            return
+        sizes = self._main_splitter.sizes()
+        if len(sizes) < 2:
+            return
+        width = int(sizes[1])
+        if width <= 0:
+            return
+        try:
+            self._on_side_state_change(width, None)
+        except Exception:
+            pass
+
     def _toggle_translate_side(self) -> None:
-        """Alt+4：切換右側翻譯面板顯示／隱藏（編輯與 WYSIWYG 模式都支援）。"""
+        """Alt+4：開關右側翻譯面板。開啟時若目前在編輯器有選取文字，
+        對應行會在面板中整列選取＋置中；無選取則只開啟面板，不跳行。
+        """
         if self._compare_active:
             self._set_status("⚠️ 請先回到編輯模式（Alt+1）", "#ffc107")
             return
+
         if self._translate_side.isVisible():
             self._translate_side.hide()
             self._active_edit_widget().setFocus()
@@ -1454,10 +1594,27 @@ class EditWindow(QMainWindow):
             self.side_ai.setPlainText(self._translation_provider() or "")
 
         self._translate_side.show()
-        # 兩欄捲動位置對齊到當前可視行對應的 ID
-        self._jump_side_panels_to_current_line()
-        self._set_status(
-            "📝 Alt+4：編輯後按「重新套用」；只會覆蓋當前可視行以下", "#17a2b8")
+        # 還原使用者上次調整的面板寬度（只在 init 寬度 > 0 時套用，
+        # 否則沿用 setStretchFactor 預設）。每次開啟都套，保險起見。
+        self._restore_side_panel_width()
+        sel_block = self._get_selection_block_number()
+        if sel_block is not None:
+            self._sync_side_panels_to_line(sel_block + 1, select=True)
+            self._set_status(
+                f"📝 已對齊到第 {sel_block + 1} 行", "#17a2b8")
+        else:
+            self._set_status(
+                "📝 Alt+4：在編輯器選取文字後再按 Alt+4 可對齊到該行", "#17a2b8")
+
+    def _get_selection_block_number(self) -> int | None:
+        """回傳目前可編輯 widget 中**選取起點**所在的 0-based 行索引；
+        無選取時回傳 None。"""
+        target = self._active_edit_widget()
+        cursor = target.textCursor()
+        if not cursor.hasSelection():
+            return None
+        return target.document().findBlock(
+            cursor.selectionStart()).blockNumber()
 
     def _get_visible_top_line(self) -> int:
         """回傳目前可編輯 widget 的可視範圍最上方那行的 0-based 行索引。
@@ -1469,16 +1626,21 @@ class EditWindow(QMainWindow):
         cursor = target.cursorForPosition(QPoint(0, 0))
         return cursor.blockNumber()
 
-    def _jump_side_panels_to_current_line(self) -> None:
-        """把 side_extracted / side_ai 捲動到對應「目前編輯器可視行」的位置。
+    def _sync_side_panels_to_line(
+        self, line_1based: int, *, select: bool
+    ) -> None:
+        """把 side_extracted / side_ai 對應到 source 行 = line_1based 的列。
 
-        提取結果格式為 `NNN-N|text`（NNN 是 1-based source 行號）。
-        找出第一條 source_line ≥ 目前可視行的 ID，把兩個面板都捲到該行。
+        - select=True：整列選取＋置中（用於使用者主動選取的觸發）。
+        - select=False：只把該列置中於 viewport，不動選取（用於跟隨編輯器捲動）。
+
+        提取結果格式為 `NNN-N|text`（NNN 是 1-based source 行號）。優先精確匹配
+        `id_line == line_1based`；找不到時退而求其次取第一條 `id_line ≥ line_1based`。
         """
-        top_line_1based = self._get_visible_top_line() + 1
-
         target_id = None
         target_extracted_idx = -1
+        fallback_id = None
+        fallback_idx = -1
         for i, ln in enumerate(self.side_extracted.toPlainText().split('\n')):
             if '|' not in ln:
                 continue
@@ -1489,31 +1651,95 @@ class EditWindow(QMainWindow):
                 id_line = int(id_part.split('-')[0])
             except ValueError:
                 continue
-            if id_line >= top_line_1based:
+            if id_line == line_1based and target_id is None:
                 target_id = id_part
                 target_extracted_idx = i
                 break
+            if id_line >= line_1based and fallback_id is None:
+                fallback_id = id_part
+                fallback_idx = i
 
+        if target_id is None:
+            target_id = fallback_id
+            target_extracted_idx = fallback_idx
         if target_id is None:
             return
 
-        self._scroll_text_to_line(self.side_extracted, target_extracted_idx)
+        self._place_line_centered(
+            self.side_extracted, target_extracted_idx, select=select)
 
         for i, ln in enumerate(self.side_ai.toPlainText().split('\n')):
             if '|' not in ln:
                 continue
             if ln.split('|', 1)[0].strip() == target_id:
-                self._scroll_text_to_line(self.side_ai, i)
+                self._place_line_centered(self.side_ai, i, select=select)
                 break
 
-    def _scroll_text_to_line(self, widget: QTextEdit, line_idx: int) -> None:
+    def _place_line_centered(
+        self, widget: QTextEdit, line_idx: int, *, select: bool
+    ) -> None:
+        """把指定行垂直置中於 viewport；select=True 時整列選取。"""
         block = widget.document().findBlockByLineNumber(max(0, line_idx))
         if not block.isValid():
             return
-        cursor = widget.textCursor()
-        cursor.setPosition(block.position())
-        widget.setTextCursor(cursor)
-        widget.ensureCursorVisible()
+        if select:
+            cursor = QTextCursor(block)
+            cursor.movePosition(
+                QTextCursor.MoveOperation.EndOfBlock,
+                QTextCursor.MoveMode.KeepAnchor,
+            )
+            widget.setTextCursor(cursor)
+        layout = widget.document().documentLayout()
+        try:
+            block_rect = layout.blockBoundingRect(block)
+        except Exception:
+            if select:
+                widget.ensureCursorVisible()
+            return
+        sb = widget.verticalScrollBar()
+        target_y = int(block_rect.top())
+        center_offset = max(
+            0,
+            target_y + int(block_rect.height() // 2)
+            - widget.viewport().height() // 2,
+        )
+        sb.setValue(min(center_offset, sb.maximum()))
+
+    # ── 自動捲動：editor / preview_view 的選取與捲軸事件 ──
+
+    def _on_editor_selection_changed(self) -> None:
+        """編輯器中選取改變：若勾選自動捲動且面板開啟且確實有選取，
+        則把面板對應行整列選取＋置中。"""
+        if not self._translate_side.isVisible():
+            return
+        if not getattr(self, "side_auto_scroll_cb", None):
+            return
+        if not self.side_auto_scroll_cb.isChecked():
+            return
+        sel_block = self._get_selection_block_number()
+        if sel_block is None:
+            return
+        self._sync_side_panels_to_line(sel_block + 1, select=True)
+
+    def _on_editor_scrolled(self) -> None:
+        """編輯器捲動：若勾選自動捲動、面板開啟、且**目前無選取**，
+        把面板捲到可視中心行對應的列（不改選取，避免覆蓋使用者選取）。
+        """
+        if not self._translate_side.isVisible():
+            return
+        if not getattr(self, "side_auto_scroll_cb", None):
+            return
+        if not self.side_auto_scroll_cb.isChecked():
+            return
+        target = self._active_edit_widget()
+        if target.textCursor().hasSelection():
+            return  # 有選取時不跟動，讓選取對齊行保持在視野中
+        vp_h = target.viewport().height()
+        if vp_h <= 0:
+            return
+        center_cursor = target.cursorForPosition(QPoint(0, vp_h // 2))
+        line_1based = center_cursor.blockNumber() + 1
+        self._sync_side_panels_to_line(line_1based, select=False)
 
     def _reapply_below_visible(self) -> None:
         """以目前 side_extracted / side_ai 內容重跑 apply_translation，
@@ -1786,16 +2012,16 @@ class EditWindow(QMainWindow):
             self._dirty = True
             self.setWindowTitle("* " + self.windowTitle().lstrip("* "))
 
-    def _write_current(self, file_path: str) -> bool:
+    def _write_current(self, file_path: str, *, embed: bool = True) -> bool:
         # 若目前在 WYSIWYG（Alt+3 編輯預覽）模式，先把編輯成果序列化回 editor，
         # 再從 editor 取 plain text 寫檔，避免 WYSIWYG 中的編輯遺漏。
         if self._preview_active:
             self._sync_preview_to_editor()
         text = self.editor.toPlainText()
-        # 是否要把字型 Base64 內嵌到 <head>（離線手機可正確顯示）
+        # 內嵌字型僅在「另存新檔」時寫入；覆蓋現有檔案時跳過（embed=False）
         embed_font_path = None
         embed_font_family = None
-        if self._embed_font_provider is not None:
+        if embed and self._embed_font_provider is not None:
             try:
                 font_key = self._embed_font_provider()
                 if font_key:
@@ -1832,9 +2058,9 @@ class EditWindow(QMainWindow):
         if not self._html_file or self._is_temp_file:
             self._save_as()
             return
-        if not self._write_current(self._html_file):
+        if not self._write_current(self._html_file, embed=False):
             return
-        self._after_save_success(self._html_file)
+        self._after_save_success(self._html_file, is_save_as=False)
 
     def _save_as(self) -> None:
         """儲存按鈕：跳出檔案選擇對話框。"""
@@ -1865,9 +2091,10 @@ class EditWindow(QMainWindow):
                 self._on_dir_change(new_dir)
             except Exception:
                 pass
-        self._after_save_success(file_path)
+        self._after_save_success(file_path, is_save_as=True)
 
-    def _after_save_success(self, file_path: str) -> None:
+    def _after_save_success(self, file_path: str,
+                            is_save_as: bool = False) -> None:
         self._dirty = False
         base = os.path.basename(file_path)
         title = self._display_title or base
@@ -1875,7 +2102,10 @@ class EditWindow(QMainWindow):
         self._set_status(f"✅ 已儲存：{base}")
         if self._on_save is not None:
             try:
-                self._on_save(file_path)
+                try:
+                    self._on_save(file_path, is_save_as=is_save_as)
+                except TypeError:
+                    self._on_save(file_path)
             except Exception:
                 pass
 

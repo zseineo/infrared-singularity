@@ -112,14 +112,15 @@ class SettingsDialog(QDialog):
         root.addWidget(self.editor_default_wysiwyg_cb)
 
         font_row = QHBoxLayout()
-        self.embed_font_in_html_cb = QCheckBox("儲存 HTML 時內嵌字型：")
+        self.embed_font_in_html_cb = QCheckBox("另存新檔時內嵌字型：")
         self.embed_font_in_html_cb.setFont(_ui_font(12))
         self.embed_font_in_html_cb.setChecked(embed_font_in_html)
         self.embed_font_in_html_cb.setToolTip(
-            "開啟後，儲存 HTML 時會把選定字型以 Base64 內嵌到 <head> 的 @font-face；\n"
+            "開啟後，另存新檔時會把選定字型以 Base64 內嵌到 <head> 的 @font-face；\n"
             "產出的單一檔案不需任何外部依賴，下載到手機本地直接打開亦能正確顯示 AA。\n"
             "代價：每個 HTML 檔會依字型大小增大（詳見右側下拉選單的說明）。\n"
-            "啟用此選項時會覆寫檔案原有的自訂 <head>。")
+            "啟用此選項時另存的檔案會覆寫原有的自訂 <head>。\n"
+            "注意：Ctrl+S 覆蓋現有檔案時不寫入內嵌字型，Head 設定維持原狀。")
         font_row.addWidget(self.embed_font_in_html_cb)
         _FONT_CHOICES = [
             ("Monapo",    "monapo",    "+3.5 MB"),

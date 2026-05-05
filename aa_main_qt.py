@@ -19,7 +19,6 @@ import json
 import math
 import os
 import re as _re_mod
-import subprocess
 import sys
 import tempfile
 import threading
@@ -644,6 +643,7 @@ class MainWindow(QMainWindow):
         self._side_panel_width: int = 0
         self._side_auto_scroll: bool = False
         self._save_timer: QTimer | None = None
+        self._url_fetch_win = None  # UrlFetchWindow lazy-init（in-process）
         self._saved_glossary_lines = 0
         self._saved_glossary_temp_lines = 0
         self._saved_filter_lines = 0
@@ -1323,108 +1323,27 @@ class MainWindow(QMainWindow):
         self._wiki_dialog.activateWindow()
 
     # ════════════════════════════════════════════════════════════
-    #  URL 抓取（subprocess 啟動 aa_url_fetch_qt.py + JSON IPC）
+    #  URL 抓取（in-process UrlFetchWindow，lazy-init）
     # ════════════════════════════════════════════════════════════
 
     def open_url_fetch_qt(self) -> None:
-        cmd_file = os.path.join(tempfile.gettempdir(), "aa_url_fetch_cmd.json")
-        reverse_cmd_file = os.path.join(
-            tempfile.gettempdir(), "aa_url_fetch_reverse_cmd.json")
-        init_file = os.path.join(
-            tempfile.gettempdir(), "aa_url_fetch_init.json")
-        for f in (cmd_file, reverse_cmd_file, init_file):
-            if os.path.exists(f):
-                try:
-                    os.remove(f)
-                except OSError:
-                    pass
-        init_data = {
-            "url_history": self.url_history,
-            "url_related_links": self.url_related_links,
-            "current_url": self.current_url,
-            "author_only": self._author_only,
-            "author_name": self._author_name,
-            "initial_url": self.current_url,
-        }
-        try:
-            with open(init_file, "w", encoding="utf-8") as f:
-                json.dump(init_data, f, ensure_ascii=False)
-        except OSError:
-            pass
+        from aa_url_fetch_qt import UrlFetchWindow
+        if self._url_fetch_win is None:
+            self._url_fetch_win = UrlFetchWindow(self)
+        self._url_fetch_win.sync_state(
+            url_history=self.url_history,
+            url_related_links=self.url_related_links,
+            current_url=self.current_url,
+            author_only=self._author_only,
+            author_name=self._author_name,
+            initial_url=self.current_url,
+        )
+        self._url_fetch_win.show()
+        self._url_fetch_win.raise_()
+        self._url_fetch_win.activateWindow()
 
-        # frozen（PyInstaller）：呼叫 exe 旁的 aa_url_fetch_qt.exe
-        # 否則以目前 Python 直譯器執行 .py 來源
-        if getattr(sys, 'frozen', False):
-            exe_dir = os.path.dirname(sys.executable)
-            launcher = os.path.join(exe_dir, "aa_url_fetch_qt.exe")
-            args = [launcher]
-        else:
-            script = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "aa_url_fetch_qt.py")
-            args = [sys.executable, script]
-        args += ["--cmd-file", cmd_file,
-                 "--reverse-cmd-file", reverse_cmd_file,
-                 "--init-file", init_file]
-        self._url_fetch_qt_process = subprocess.Popen(args)
-        self._url_fetch_cmd_file = cmd_file
-        self._url_fetch_reverse_cmd_file = reverse_cmd_file
-
-        self._url_poll_timer = QTimer(self)
-        self._url_poll_timer.setInterval(500)
-        self._url_poll_timer.timeout.connect(self._poll_url_fetch_commands)
-        self._url_poll_timer.start()
-
-    def _poll_url_fetch_commands(self) -> None:
-        proc = getattr(self, '_url_fetch_qt_process', None)
-        if proc and proc.poll() is not None:
-            self._url_fetch_qt_process = None
-            self._url_poll_timer.stop()
-            return
-        cmd_file = getattr(self, '_url_fetch_cmd_file', '')
-        if not cmd_file or not os.path.exists(cmd_file):
-            return
-        try:
-            with open(cmd_file, 'r', encoding='utf-8') as f:
-                cmd = json.load(f)
-            os.remove(cmd_file)
-        except (json.JSONDecodeError, OSError):
-            return
-        action = cmd.get('action')
-        if action == 'fetch_request':
-            # author_name 由 Qt 視窗直接傳入，同步到 MainWindow 狀態
-            new_author = cmd.get('author_name')
-            if new_author is not None:
-                self._author_name = str(new_author)
-            self._handle_url_fetch_request(
-                cmd.get('url', ''),
-                bool(cmd.get('author_only', False)),
-                skip_cache=bool(cmd.get('skip_cache', False)),
-            )
-        elif action == 'clear_history':
-            self.url_history = []
-            self.settings_mgr.clear_url_history()
-            self._write_url_fetch_reverse({'action': 'history_cleared',
-                                           'url_history': []})
-        elif action == 'close_sync':
-            self._author_only = bool(cmd.get('author_only', False))
-            if 'author_name' in cmd:
-                self._author_name = str(cmd['author_name'])
-            self.schedule_save()
-
-    def _write_url_fetch_reverse(self, cmd: dict, retries: int = 20) -> None:
-        rev = getattr(self, '_url_fetch_reverse_cmd_file', '')
-        if not rev:
-            return
-        if os.path.exists(rev):
-            if retries > 0:
-                QTimer.singleShot(
-                    100, lambda: self._write_url_fetch_reverse(cmd, retries - 1))
-            return
-        try:
-            with open(rev, 'w', encoding='utf-8') as f:
-                json.dump(cmd, f, ensure_ascii=False)
-        except OSError:
-            pass
+    def _url_fetch_win_visible(self) -> bool:
+        return self._url_fetch_win is not None and self._url_fetch_win.isVisible()
 
     def _url_cache_dir(self) -> str:
         d = os.path.join(tempfile.gettempdir(), "aa_url_cache")
@@ -1485,11 +1404,11 @@ class MainWindow(QMainWindow):
             except Exception as ex:
                 err = str(ex)
                 self._invoke_on_main.emit(
-                    lambda: self._write_url_fetch_reverse({
-                        'action': 'fetch_done', 'success': False,
-                        'status_message': f"❌ 讀取失敗: {err}",
-                        'status_color': '#dc3545',
-                    }))
+                    lambda: self._url_fetch_win.on_fetch_done(
+                        success=False,
+                        status_message=f"❌ 讀取失敗: {err}",
+                        status_color='#dc3545',
+                    ) if self._url_fetch_win_visible() else None)
                 return
 
             if text_content is None:
@@ -1511,10 +1430,9 @@ class MainWindow(QMainWindow):
                     msg = "❌ 找不到 article 區塊！"
                     c = '#dc3545'
                 self._invoke_on_main.emit(
-                    lambda m=msg, cc=c: self._write_url_fetch_reverse({
-                        'action': 'fetch_done', 'success': False,
-                        'status_message': m, 'status_color': cc,
-                    }))
+                    lambda m=msg, cc=c: self._url_fetch_win.on_fetch_done(
+                        success=False, status_message=m, status_color=cc,
+                    ) if self._url_fetch_win_visible() else None)
                 return
 
             def _apply() -> None:
@@ -1541,15 +1459,16 @@ class MainWindow(QMainWindow):
                 self.schedule_save()
                 line_count = text_content.count('\n') + 1
                 self.show_status(f"✅ 網址讀取成功！共 {line_count} 行", "#0f0")
-                self._write_url_fetch_reverse({
-                    'action': 'fetch_done', 'success': True,
-                    'status_message': f"✅ 讀取成功！共 {line_count} 行",
-                    'status_color': '#28a745',
-                    'url_history': self.url_history,
-                    'url_related_links': self.url_related_links,
-                    'current_url': self.current_url,
-                    'auto_close': True,
-                })
+                if self._url_fetch_win_visible():
+                    self._url_fetch_win.on_fetch_done(
+                        success=True,
+                        status_message=f"✅ 讀取成功！共 {line_count} 行",
+                        status_color='#28a745',
+                        url_history=self.url_history,
+                        url_related_links=self.url_related_links,
+                        current_url=self.current_url,
+                        auto_close=True,
+                    )
             self._invoke_on_main.emit(_apply)
 
         threading.Thread(target=_bg, daemon=True).start()
@@ -2102,15 +2021,13 @@ class MainWindow(QMainWindow):
         self.work_history = new_work_hist
         if rel_changed:
             self.url_related_links = list(rel)
-        # 若有 URL 抓取子程序在跑，將最新 url_history 推送過去即時刷新
-        if (url_changed or rel_changed) and getattr(
-                self, '_url_fetch_qt_process', None):
-            self._write_url_fetch_reverse({
-                'action': 'history_updated',
-                'url_history': self.url_history,
-                'url_related_links': self.url_related_links,
-                'current_url': self.current_url,
-            })
+        # 若 URL 讀取視窗開著，將最新狀態推送過去即時刷新
+        if (url_changed or rel_changed) and self._url_fetch_win_visible():
+            self._url_fetch_win.on_history_updated(
+                self.url_history,
+                self.url_related_links,
+                self.current_url,
+            )
 
     def _apply_url_history_meta(self, url: str) -> None:
         """抓取完成後若 url_history 該條目帶有戳印 meta，套用至 doc_title/author。
@@ -2131,11 +2048,8 @@ class MainWindow(QMainWindow):
             self._translate_panel.doc_title.setText(work_title)
         if author:
             self._author_name = author
-            if getattr(self, '_url_fetch_qt_process', None):
-                self._write_url_fetch_reverse({
-                    'action': 'author_updated',
-                    'author_name': author,
-                })
+            if self._url_fetch_win_visible():
+                self._url_fetch_win.on_author_updated(author)
 
     def _stamp_current_url_history(self) -> None:
         """把當前 doc_title + author 戳印到 url_history 中對應 self.current_url 的條目。

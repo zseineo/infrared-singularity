@@ -1,27 +1,23 @@
-"""AA 創作翻譯輔助小工具 — 獨立 PyQt6 網址讀取視窗。
+"""AA 創作翻譯輔助小工具 — URL 讀取視窗（in-process）。
 
-以 subprocess 從 PyQt6 主程式 (`aa_main_qt.py`) 啟動，透過 JSON 命令檔 (IPC) 雙向溝通。
-作者名稱取自主程式最新狀態，因此抓取動作由主程式執行：
-- Qt → 主程式 (cmd_file)：
-    {action: "fetch_request", url, author_only}
-    {action: "clear_history"}
-    {action: "close_sync", author_only}
-- 主程式 → Qt (reverse_cmd_file)：
-    {action: "fetch_done", success, status_message, status_color,
-      [url_history, url_related_links, current_url, auto_close]}
-    {action: "history_cleared", url_history}
-    {action: "history_updated", url_history, [url_related_links, current_url]}
-    {action: "author_updated", author_name}  # 戳印 meta 套用後同步至作者欄位
+由主程式 (aa_main_qt.py) 直接實例化，不再作為獨立 subprocess 啟動，
+省去 Python 行程啟動時間與 JSON IPC 開銷。
 
-用法：
-    python aa_url_fetch_qt.py --cmd-file <path> --reverse-cmd-file <path> --init-file <path>
+主程式 → 視窗（公開方法）：
+    win.sync_state(...)           # show() 前同步狀態
+    win.on_fetch_done(...)        # 抓取完成回報
+    win.on_history_cleared(...)   # 清除歷史後更新
+    win.on_history_updated(...)   # 其他程序寫入後推播
+    win.on_author_updated(...)    # 戳印 meta 套用後同步作者
+
+視窗 → 主程式（直接呼叫）：
+    main._handle_url_fetch_request(url, author_only, skip_cache)
+    main.url_history / main.settings_mgr.clear_url_history()
+    main._author_name / main._author_only / main.schedule_save()
 """
 from __future__ import annotations
 
-import argparse
-import json
 import os
-import sys
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
@@ -33,22 +29,12 @@ from PyQt6.QtWidgets import (
 from aa_tool.qt_helpers import make_button
 
 
-def _load_qss() -> str:
-    qss_path = os.path.join(os.path.dirname(__file__), "aa_tool", "dark_theme.qss")
-    if os.path.exists(qss_path):
-        with open(qss_path, "r", encoding="utf-8") as f:
-            return f.read()
-    return ""
-
-
 class UrlFetchWindow(QMainWindow):
-    def __init__(self, *, cmd_file: str, reverse_cmd_file: str, init_file: str):
+    def __init__(self, main_window):
         super().__init__()
+        self._main = main_window
         self.setWindowTitle("🌐 網址讀取")
         self.resize(720, 620)
-
-        self._cmd_file = cmd_file
-        self._reverse_cmd_file = reverse_cmd_file
 
         self.ui_small_font = QFont("Microsoft JhengHei", 12)
 
@@ -57,36 +43,72 @@ class UrlFetchWindow(QMainWindow):
         self._current_url: str = ""
         self._author_only: bool = False
         self._author_name: str = ""
-        initial_url: str = ""
-        if init_file and os.path.exists(init_file):
-            try:
-                with open(init_file, "r", encoding="utf-8") as f:
-                    d = json.load(f)
-                self._url_history = d.get("url_history") or []
-                self._url_related_links = d.get("url_related_links") or []
-                self._current_url = d.get("current_url") or ""
-                self._author_only = bool(d.get("author_only"))
-                self._author_name = d.get("author_name") or ""
-                initial_url = d.get("initial_url") or ""
-            except (OSError, json.JSONDecodeError):
-                pass
-
         self._fetching = False
         self._history_filter: str = ""
 
         self._build_ui()
-
-        if initial_url:
-            self.url_entry.setText(initial_url)
-        self.author_only_switch.setChecked(self._author_only)
-        self.author_name_entry.setText(self._author_name)
-
         self._refresh_nav()
         self._refresh_history()
 
-        self._reverse_timer = QTimer(self)
-        self._reverse_timer.timeout.connect(self._poll_reverse_commands)
-        self._reverse_timer.start(300)
+    # ──────────────────────────── 狀態同步（由主程式呼叫） ────────────────────────────
+
+    def sync_state(self, *, url_history: list, url_related_links: list,
+                   current_url: str, author_only: bool, author_name: str,
+                   initial_url: str = "") -> None:
+        """主程式在 show() 之前呼叫，同步最新狀態到視窗。"""
+        self._url_history = list(url_history)
+        self._url_related_links = list(url_related_links)
+        self._current_url = current_url
+        self._author_only = author_only
+        self._author_name = author_name
+        self.author_only_switch.setChecked(author_only)
+        self.author_name_entry.setText(author_name)
+        if initial_url:
+            self.url_entry.setText(initial_url)
+        self._refresh_nav()
+        self._refresh_history()
+
+    def on_fetch_done(self, *, success: bool, status_message: str,
+                      status_color: str, url_history: list | None = None,
+                      url_related_links: list | None = None,
+                      current_url: str | None = None,
+                      auto_close: bool = False) -> None:
+        self._fetching = False
+        self.fetch_btn.setEnabled(True)
+        self._set_status(status_message, status_color)
+        if success:
+            if url_history is not None:
+                self._url_history = url_history
+            if url_related_links is not None:
+                self._url_related_links = url_related_links
+            if current_url is not None:
+                self._current_url = current_url
+            self._refresh_nav()
+            self._refresh_history()
+            if auto_close:
+                QTimer.singleShot(400, self.close)
+
+    def on_history_cleared(self, url_history: list) -> None:
+        self._url_history = url_history
+        self._refresh_history()
+
+    def on_history_updated(self, url_history: list,
+                           url_related_links: list | None = None,
+                           current_url: str | None = None) -> None:
+        self._url_history = url_history
+        if url_related_links is not None:
+            self._url_related_links = url_related_links
+            self._refresh_nav()
+        if current_url is not None:
+            self._current_url = current_url
+        self._refresh_history()
+
+    def on_author_updated(self, author_name: str) -> None:
+        self._author_name = author_name
+        try:
+            self.author_name_entry.setText(author_name)
+        except Exception:
+            pass
 
     # ──────────────────────────── UI ────────────────────────────
 
@@ -182,7 +204,6 @@ class UrlFetchWindow(QMainWindow):
         hist_top.addWidget(self.clear_btn)
         hist_outer.addLayout(hist_top)
 
-        # 搜尋框：對標題 + URL 做 case-insensitive 子字串過濾
         search_row = QHBoxLayout()
         search_row.setContentsMargins(0, 0, 0, 0)
         self.hist_search = QLineEdit()
@@ -384,119 +405,24 @@ class UrlFetchWindow(QMainWindow):
         self.fetch_btn.setEnabled(False)
         self._fetching = True
 
-        self._write_cmd({
-            "action": "fetch_request",
-            "url": raw,
-            "author_only": self.author_only_switch.isChecked(),
-            "author_name": self.author_name_entry.text().strip(),
-            "skip_cache": self.skip_cache_switch.isChecked(),
-        })
+        self._main._author_name = self.author_name_entry.text().strip()
+        self._main._handle_url_fetch_request(
+            raw,
+            self.author_only_switch.isChecked(),
+            skip_cache=self.skip_cache_switch.isChecked(),
+        )
 
     def _clear_history(self):
-        self._write_cmd({"action": "clear_history"})
+        self._main.url_history = []
+        self._main.settings_mgr.clear_url_history()
+        self.on_history_cleared([])
 
     def _set_status(self, text: str, color: str):
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"color: {color};")
 
-    # ──────────────────────────── IPC ────────────────────────────
-
-    def _write_cmd(self, cmd: dict, retries: int = 20):
-        """寫入 cmd_file。若檔案已存在（主程式尚未消費），稍後重試。"""
-        if not self._cmd_file:
-            return
-        if os.path.exists(self._cmd_file):
-            if retries > 0:
-                QTimer.singleShot(100, lambda: self._write_cmd(cmd, retries - 1))
-            return
-        try:
-            with open(self._cmd_file, "w", encoding="utf-8") as f:
-                json.dump(cmd, f, ensure_ascii=False)
-        except OSError:
-            pass
-
-    def _poll_reverse_commands(self):
-        if not self._reverse_cmd_file or not os.path.exists(self._reverse_cmd_file):
-            return
-        try:
-            with open(self._reverse_cmd_file, "r", encoding="utf-8") as f:
-                cmd = json.load(f)
-            os.remove(self._reverse_cmd_file)
-        except (OSError, json.JSONDecodeError):
-            return
-
-        action = cmd.get("action")
-        if action == "fetch_done":
-            self._fetching = False
-            self.fetch_btn.setEnabled(True)
-            self._set_status(cmd.get("status_message", ""),
-                             cmd.get("status_color", "#888888"))
-            if cmd.get("success"):
-                self._url_history = cmd.get("url_history") or []
-                self._url_related_links = cmd.get("url_related_links") or []
-                self._current_url = cmd.get("current_url") or ""
-                self._refresh_nav()
-                self._refresh_history()
-                if cmd.get("auto_close"):
-                    QTimer.singleShot(400, self.close)
-        elif action == "history_cleared":
-            self._url_history = cmd.get("url_history") or []
-            self._refresh_history()
-        elif action == "author_updated":
-            # 主程式套用 url_history 戳印的 author 後推送，同步顯示於作者欄位
-            author = cmd.get("author_name") or ""
-            self._author_name = author
-            try:
-                self.author_name_entry.setText(author)
-            except Exception:
-                pass
-        elif action == "history_updated":
-            # 主程式偵測到 cache 變動（例如另一個 aa_main_qt.py 寫入新紀錄）後推送
-            self._url_history = cmd.get("url_history") or []
-            related = cmd.get("url_related_links")
-            if related is not None:
-                self._url_related_links = related
-                self._refresh_nav()
-            cur = cmd.get("current_url")
-            if cur is not None:
-                self._current_url = cur
-            self._refresh_history()
-
     def closeEvent(self, event):
-        # 同步最終的 author_only 設定到主程式
-        try:
-            if self._cmd_file and not os.path.exists(self._cmd_file):
-                with open(self._cmd_file, "w", encoding="utf-8") as f:
-                    json.dump({
-                        "action": "close_sync",
-                        "author_only": self.author_only_switch.isChecked(),
-                        "author_name": self.author_name_entry.text().strip(),
-                    }, f, ensure_ascii=False)
-        except OSError:
-            pass
+        self._main._author_only = self.author_only_switch.isChecked()
+        self._main._author_name = self.author_name_entry.text().strip()
+        self._main.schedule_save()
         event.accept()
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--cmd-file", default="")
-    parser.add_argument("--reverse-cmd-file", default="")
-    parser.add_argument("--init-file", default="")
-    args = parser.parse_args()
-
-    app = QApplication(sys.argv)
-    qss = _load_qss()
-    if qss:
-        app.setStyleSheet(qss)
-
-    win = UrlFetchWindow(
-        cmd_file=args.cmd_file,
-        reverse_cmd_file=args.reverse_cmd_file,
-        init_file=args.init_file,
-    )
-    win.show()
-    sys.exit(app.exec())
-
-
-if __name__ == "__main__":
-    main()

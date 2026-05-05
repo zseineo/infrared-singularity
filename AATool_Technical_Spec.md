@@ -186,21 +186,18 @@
     *   **骰子搜尋**: 快速搜尋殘留的 `1D10:10` 骰子格式。
     *   `Ctrl+S` 快捷鍵觸發直接存檔（覆蓋原檔，若有 `source_file`），否則走另存新檔。
 
-### 4.5 網址讀取功能 (`open_url_fetch_qt()` — 獨立 PyQt6 視窗)
+### 4.5 網址讀取功能 (`open_url_fetch_qt()` — in-process PyQt6 視窗)
 *   **對應 Function**: `def open_url_fetch_qt(self):`（主程式）、`UrlFetchWindow` 於 [aa_url_fetch_qt.py](aa_url_fetch_qt.py)
-*   主程式以 subprocess 啟動獨立的 PyQt6 視窗，透過 JSON 命令檔 (IPC) 雙向溝通；UI 與抓取職責分離，**實際抓取/解析由主程式執行**，以確保作者名稱 (`author_name_entry`) 總是取最新值。
-*   **IPC 通訊協定**:
-    *   啟動時傳入 `--cmd-file`（Qt→主程式）、`--reverse-cmd-file`（主程式→Qt）、`--init-file`（JSON 初始狀態）。
-    *   初始狀態 (`init_file`)：`url_history`、`url_related_links`、`current_url`、`author_only`、`author_name`、`initial_url`。
-    *   Qt→主程式：`fetch_request {url, author_only, author_name}`、`clear_history`、`close_sync {author_only, author_name}`。
-    *   **作者名稱欄位** 已從主畫面移至網址讀取視窗（`aa_url_fetch_qt.py`），主程式以 `MainWindow._author_name` 狀態保存，由 `fetch_request` / `close_sync` IPC 更新，不再綁定 widget。
-    *   主程式→Qt：`fetch_done {success, status_message, status_color, [url_history, url_related_links, current_url, auto_close]}`、`history_cleared {url_history}`、`history_updated {url_history, [url_related_links, current_url]}`、`author_updated {author_name}`（戳印 meta 套用後同步至作者欄位）。
-    *   碰撞避免：寫入方若發現檔案仍存在（接收方未消費），延後 100ms 重試（Qt 最多 20 次，主程式相同）。
+*   `UrlFetchWindow` 由主程式直接實例化（**不再作為 subprocess 啟動**），以 lazy-init 方式建立（第一次開啟時才建立，之後 show/hide 重用），省去 Python 行程啟動時間。**實際抓取/解析仍由主程式執行**，以確保作者名稱總是取最新值。
+*   **通訊方式（直接 method call，無 IPC）**:
+    *   `open_url_fetch_qt()` → `win.sync_state(url_history, url_related_links, current_url, author_only, author_name, initial_url)` 同步狀態後 `show()`。
+    *   視窗→主程式（直接呼叫）：`main._author_name = ...`、`main._handle_url_fetch_request(url, author_only, skip_cache)`（fetch）；`main.url_history = []` + `main.settings_mgr.clear_url_history()`（clear）；`main._author_only / _author_name / schedule_save()`（close sync）。
+    *   主程式→視窗（公開方法）：`win.on_fetch_done(success, status_message, status_color, url_history, url_related_links, current_url, auto_close)`、`win.on_history_cleared(url_history)`、`win.on_history_updated(url_history, url_related_links, current_url)`、`win.on_author_updated(author_name)`（戳印 meta 套用後同步至作者欄位）。
+    *   `_url_fetch_win_visible()`：判斷視窗是否存在且可見，主程式推送更新前先檢查，避免呼叫已關閉視窗。
+    *   **作者名稱欄位**：`MainWindow._author_name` 狀態保存，由 `_do_fetch()` / `closeEvent` 直接更新，不再透過 IPC。
 *   **主程式端處理**:
-    *   `_poll_url_fetch_commands()`：每 500ms 讀取 `cmd_file`，subprocess 結束即停止輪詢。
-    *   `_handle_url_fetch_request(url, author_only)`：更新 `_author_only`→`schedule_save`→背景執行緒執行 `fetch_url` + `parse_page_html`，成功後透過 `_invoke_on_main` signal 將 `_apply` 派回主執行緒（`QTimer.singleShot` 只能在有 event loop 的執行緒呼叫，背景執行緒須用 signal 轉送），套用到 `source_text`、更新 `url_related_links`/`current_url`/`url_history`、觸發 `check_chapter_number`、`_update_work_title`、`show_toast`，最後以 `fetch_done` 回報 Qt 並要求 `auto_close`。
+    *   `_handle_url_fetch_request(url, author_only)`：更新 `_author_only`→`schedule_save`→背景執行緒執行 `fetch_url` + `parse_page_html`，成功後透過 `_invoke_on_main` signal 將 `_apply` 派回主執行緒（`QTimer.singleShot` 只能在有 event loop 的執行緒呼叫，背景執行緒須用 signal 轉送），套用到 `source_text`、更新 `url_related_links`/`current_url`/`url_history`、觸發 `check_chapter_number`、`_update_work_title`、`show_toast`，最後呼叫 `win.on_fetch_done(...)` 並要求 `auto_close`。
     *   `_invoke_on_main`：`pyqtSignal(object)`，在 `__init__` 連到 `lambda fn: fn()`，供背景執行緒把 callable 排到主執行緒執行（取代不能跨執行緒的 `QTimer.singleShot`）。
-    *   `_write_url_fetch_reverse()`：含重試邏輯的反向命令寫入。
 *   **Qt 端功能**:
     *   URL 輸入 + 忽略留言 Checkbox + 讀取按鈕（綠）+ Enter 觸發。
     *   關聯記事列表（含當前話標記 `▶`）+ 上一話/下一話按鈕。

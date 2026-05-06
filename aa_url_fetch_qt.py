@@ -1,40 +1,37 @@
-"""AA 創作翻譯輔助小工具 — URL 讀取視窗（in-process）。
+"""AA 創作翻譯輔助小工具 — URL 讀取面板（in-process，嵌入主視窗 QStackedWidget）。
 
-由主程式 (aa_main_qt.py) 直接實例化，不再作為獨立 subprocess 啟動，
-省去 Python 行程啟動時間與 JSON IPC 開銷。
+由主程式 (aa_main_qt.py) 直接實例化並嵌入為 QStackedWidget 第 3 頁，
+不再作為獨立視窗或 subprocess 啟動。
 
-主程式 → 視窗（公開方法）：
-    win.sync_state(...)           # show() 前同步狀態
+主程式 → 面板（公開方法）：
+    win.sync_state(...)           # show 前同步狀態
     win.on_fetch_done(...)        # 抓取完成回報
     win.on_history_cleared(...)   # 清除歷史後更新
     win.on_history_updated(...)   # 其他程序寫入後推播
     win.on_author_updated(...)    # 戳印 meta 套用後同步作者
 
-視窗 → 主程式（直接呼叫）：
+面板 → 主程式（直接呼叫）：
     main._handle_url_fetch_request(url, author_only, skip_cache)
     main.url_history / main.settings_mgr.clear_url_history()
     main._author_name / main._author_only / main.schedule_save()
+    main.show_translate_panel()   # 關閉面板（返回首頁）
 """
 from __future__ import annotations
 
-import os
-
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from aa_tool.qt_helpers import make_button
 
 
-class UrlFetchWindow(QMainWindow):
+class UrlFetchWindow(QWidget):
     def __init__(self, main_window):
         super().__init__()
         self._main = main_window
-        self.setWindowTitle("🌐 網址讀取")
-        self.resize(720, 620)
 
         self.ui_small_font = QFont("Microsoft JhengHei", 12)
 
@@ -50,12 +47,16 @@ class UrlFetchWindow(QMainWindow):
         self._refresh_nav()
         self._refresh_history()
 
+        esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        esc.activated.connect(self._main.show_translate_panel)
+
     # ──────────────────────────── 狀態同步（由主程式呼叫） ────────────────────────────
 
     def sync_state(self, *, url_history: list, url_related_links: list,
                    current_url: str, author_only: bool, author_name: str,
                    initial_url: str = "") -> None:
-        """主程式在 show() 之前呼叫，同步最新狀態到視窗。"""
+        """主程式在切換到此面板之前呼叫，同步最新狀態。"""
         self._url_history = list(url_history)
         self._url_related_links = list(url_related_links)
         self._current_url = current_url
@@ -67,6 +68,12 @@ class UrlFetchWindow(QMainWindow):
             self.url_entry.setText(initial_url)
         self._refresh_nav()
         self._refresh_history()
+
+    def sync_back_to_main(self) -> None:
+        """離開面板（返回首頁）時，由主程式呼叫，將狀態同步回去。"""
+        self._main._author_only = self.author_only_switch.isChecked()
+        self._main._author_name = self.author_name_entry.text().strip()
+        self._main.schedule_save()
 
     def on_fetch_done(self, *, success: bool, status_message: str,
                       status_color: str, url_history: list | None = None,
@@ -86,7 +93,7 @@ class UrlFetchWindow(QMainWindow):
             self._refresh_nav()
             self._refresh_history()
             if auto_close:
-                QTimer.singleShot(400, self.close)
+                QTimer.singleShot(400, self._main.show_translate_panel)
 
     def on_history_cleared(self, url_history: list) -> None:
         self._url_history = url_history
@@ -113,9 +120,7 @@ class UrlFetchWindow(QMainWindow):
     # ──────────────────────────── UI ────────────────────────────
 
     def _build_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(6)
 
@@ -420,9 +425,3 @@ class UrlFetchWindow(QMainWindow):
     def _set_status(self, text: str, color: str):
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"color: {color};")
-
-    def closeEvent(self, event):
-        self._main._author_only = self.author_only_switch.isChecked()
-        self._main._author_name = self.author_name_entry.text().strip()
-        self._main.schedule_save()
-        event.accept()

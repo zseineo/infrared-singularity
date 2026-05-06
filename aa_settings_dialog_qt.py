@@ -58,6 +58,7 @@ class SettingsDialog(QDialog):
         embed_font_in_html: bool,
         embed_font_name: str,
         editor_default_wysiwyg: bool,
+        korean_mode: bool,
         orig_cache_path: str,
         on_apply: Callable[[dict], None],
     ) -> None:
@@ -70,13 +71,14 @@ class SettingsDialog(QDialog):
         self._build_ui(auto_copy, work_history_limit, fetch_history_limit,
                        original_cache_limit, glossary_auto_search,
                        diff_save_mode, embed_font_in_html, embed_font_name,
-                       editor_default_wysiwyg)
+                       editor_default_wysiwyg, korean_mode)
         self._refresh_cache_size()
 
     def _build_ui(self, auto_copy: bool, wh_limit: int, fh_limit: int,
                   oc_limit: int, glossary_auto_search: bool,
                   diff_save_mode: bool, embed_font_in_html: bool,
-                  embed_font_name: str, editor_default_wysiwyg: bool) -> None:
+                  embed_font_name: str, editor_default_wysiwyg: bool,
+                  korean_mode: bool) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(10)
@@ -86,6 +88,14 @@ class SettingsDialog(QDialog):
         self.auto_copy_cb.setFont(_ui_font(12))
         self.auto_copy_cb.setChecked(auto_copy)
         root.addWidget(self.auto_copy_cb)
+
+        self.korean_mode_cb = QCheckBox("韓文提取模式（改用韓文字元集）")
+        self.korean_mode_cb.setFont(_ui_font(12))
+        self.korean_mode_cb.setChecked(korean_mode)
+        self.korean_mode_cb.setToolTip(
+            "開啟後，「提取」與「提取分析」會改用韓文字元集（Hangul 가-힣＋相容字母 ㄱ-ㅎㅏ-ㅣ）；\n"
+            "AA_Settings.json 中的 base_regex（日文版）將被略過，其他流程不變。")
+        root.addWidget(self.korean_mode_cb)
 
         self.glossary_auto_search_cb = QCheckBox("批次搜尋：點擊術語按鈕時自動搜尋")
         self.glossary_auto_search_cb.setFont(_ui_font(12))
@@ -251,6 +261,7 @@ class SettingsDialog(QDialog):
             'embed_font_name': self.embed_font_combo.currentData() or "monapo",
             'editor_default_wysiwyg':
                 self.editor_default_wysiwyg_cb.isChecked(),
+            'korean_mode': self.korean_mode_cb.isChecked(),
         }
         try:
             self._on_apply(values)

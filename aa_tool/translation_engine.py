@@ -185,6 +185,7 @@ def apply_translation(
     extracted: str,
     translated: str,
     glossary: dict[str, str],
+    append_mode: bool = False,
 ) -> str:
     """執行翻譯替換：將提取的原文替換為翻譯文，套用術語表並自動補全形空白。
 
@@ -193,6 +194,8 @@ def apply_translation(
         extracted: 提取結果（'ID|原文' 格式，每行一條）
         translated: AI 翻譯結果（'ID|翻譯文' 格式，每行一條）
         glossary: 術語表 dict
+        append_mode: 為 True 時，將翻譯文「附加在原文之後」而非取代原文。
+            此模式下不補全形空白（替換結果一定比原文長）。
 
     Returns:
         替換後的完整文本
@@ -229,8 +232,13 @@ def apply_translation(
         for jp_term, tw_term in sorted_glossary:
             final_translated = final_translated.replace(jp_term, tw_term)
 
-        len_diff = len(original) - len(final_translated)
-        padded = final_translated + ('　' * len_diff if len_diff > 0 else '')
+        if append_mode:
+            # 附加模式：以「原文 + 半形空白 + 翻譯文」取代原文位置；不補全形空白
+            final_translated = original + ' ' + final_translated
+            padded = final_translated
+        else:
+            len_diff = len(original) - len(final_translated)
+            padded = final_translated + ('　' * len_diff if len_diff > 0 else '')
 
         # 從 ID 解析行號（格式 NNN-S，NNN 為 1-indexed 行號）
         try:

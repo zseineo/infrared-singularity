@@ -24,15 +24,21 @@ def _compile_custom_filters(filter_str: str) -> list[re.Pattern]:
     return regexes
 
 
-def _postprocess_text(text: str) -> str:
-    """提取後的字串後處理（去除非內文字元）。"""
+def _postprocess_text(text: str, korean_mode: bool = False) -> str:
+    """提取後的字串後處理（去除非內文字元）。
+
+    - 一般（日文）模式：移除開頭非平假名/片假名/漢字/英文/數字的部分。
+    - 韓文模式：跳過該開頭剝除步驟（Hangul 不在白名單內，會被誤判為非內文）。
+    """
     # 若被邊框符號 │ 或 | 包起來，則只取邊框內的文字
     match = re.search(r'[│\|](.*)[│\|]', text)
     if match:
         text = match.group(1).strip(' \t　.')
 
-    # 移除開頭非平假名、片假名、漢字、英文、數字的部分
-    text = re.sub(
+    if not korean_mode:
+        # 移除開頭非平假名、片假名、漢字、英文、數字的部分。
+        # 韓文模式跳過此步驟，否則 Hangul 不在白名單內會把整段砍掉。
+        text = re.sub(
         r'^([^\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFFa-zA-ZＡ-Ｚａ-ｚ0-9０-９]+)',
         '', text
     ).strip()
@@ -133,6 +139,7 @@ def extract_text(
     filter_str: str,
     skip_title: str = "",
     author_name: str = "",
+    korean_mode: bool = False,
 ) -> list[tuple[str, int]]:
     """從原始文本中提取日文文字片段。
 
@@ -205,7 +212,7 @@ def extract_text(
                 if invalid_regex.match(text):
                     continue
 
-                text = _postprocess_text(text)
+                text = _postprocess_text(text, korean_mode=korean_mode)
 
                 if len(text) <= 2:
                     continue
@@ -246,6 +253,7 @@ def analyze_extraction(
     invalid_regex_str: str,
     symbol_regex_str: str,
     filter_str: str,
+    korean_mode: bool = False,
 ) -> str:
     """對輸入文字逐步分析提取流程，回傳分析報告字串。"""
     base_regex = _compile_regex(base_regex_str, DEFAULT_BASE_REGEX)
@@ -325,7 +333,7 @@ def analyze_extraction(
                     report.append("    - 無意義符號組合檢驗通過")
 
                 original_t = t
-                t = _postprocess_text(t)
+                t = _postprocess_text(t, korean_mode=korean_mode)
                 report.append(f"    [步驟 4] 後處理解析 (去除非內文字元): '{original_t}' => '{t}'")
 
                 if len(t) <= 2:

@@ -33,7 +33,8 @@ from PyQt6.QtWidgets import (
 )
 
 from aa_tool.constants import (
-    DEFAULT_BASE_REGEX, DEFAULT_INVALID_REGEX, DEFAULT_SYMBOL_REGEX,
+    DEFAULT_BASE_REGEX, DEFAULT_BASE_REGEX_KO,
+    DEFAULT_INVALID_REGEX, DEFAULT_SYMBOL_REGEX,
     DEFAULT_BG_COLOR, DEFAULT_FG_COLOR,
 )
 from aa_tool.html_io import read_html_pre_content, write_html_file, read_html_bg_color
@@ -61,7 +62,7 @@ from aa_tool.url_fetcher import fetch_url as _fetch_url, parse_page_html as _par
 from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 
-APP_VERSION = "1.11"
+APP_VERSION = "1.13"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -615,6 +616,7 @@ class MainWindow(QMainWindow):
         self.current_base_regex = DEFAULT_BASE_REGEX
         self.current_invalid_regex = DEFAULT_INVALID_REGEX
         self.current_symbol_regex = DEFAULT_SYMBOL_REGEX
+        self._korean_mode: bool = False
 
         # ── 應用狀態 ──
         self.url_history: list[dict] = []
@@ -680,6 +682,10 @@ class MainWindow(QMainWindow):
         self._batch_placeholder = QWidget()
         self.stack.addWidget(self._batch_placeholder)  # index 2
 
+        # 網址讀取面板（lazy init）
+        self._url_fetch_placeholder = QWidget()
+        self.stack.addWidget(self._url_fetch_placeholder)  # index 3
+
         # ── 底部動作列 ──
         self._action_bar = self._build_action_bar()
         root.addWidget(self._action_bar)
@@ -739,6 +745,12 @@ class MainWindow(QMainWindow):
         btn_apply.clicked.connect(self.apply_translation)
         hl.addWidget(btn_apply, 1)
 
+        btn_append = _make_btn("➕ 加入翻譯並編輯", "#fd7e14", "#e76b00",
+                               font=_ui_font(12), width=160)
+        btn_append.setFixedHeight(44)
+        btn_append.clicked.connect(self.apply_translation_append)
+        hl.addWidget(btn_append)
+
         btn_save = _make_btn("💾 替換翻譯並儲存", "#28a745", "#1e7e34",
                              font=_ui_font(12), width=120)
         btn_save.setFixedHeight(44)
@@ -764,6 +776,8 @@ class MainWindow(QMainWindow):
     # ════════════════════════════════════════════════════════════
 
     def show_translate_panel(self) -> None:
+        if self._url_fetch_win is not None and self.stack.currentIndex() == 3:
+            self._url_fetch_win.sync_back_to_main()
         self.stack.setCurrentIndex(0)
         self._nav_bar.hide()
         self._action_bar.show()
@@ -792,10 +806,11 @@ class MainWindow(QMainWindow):
                 glossary_provider=self._translate_panel.get_combined_glossary,
                 glossary_saver=self._save_glossary_entry,
                 extract_regex_provider=lambda: (
-                    self.current_base_regex,
+                    self._active_base_regex(),
                     self.current_invalid_regex,
                     self.current_symbol_regex,
                     self._translate_panel.get_filter_text(),
+                    self._korean_mode,
                 ),
                 extracted_provider=self._translate_panel.get_extracted_text,
                 translation_provider=self._translate_panel.get_ai_text,
@@ -900,6 +915,7 @@ class MainWindow(QMainWindow):
                 on_open_file=self._on_batch_open_file,
                 on_folder_change=self._on_batch_folder_change,
                 on_add_to_glossary=self._save_glossary_entry,
+                on_back=self.show_translate_panel,
                 glossary_auto_search=self._glossary_auto_search,
             )
             self.stack.removeWidget(self._batch_placeholder)
@@ -956,6 +972,10 @@ class MainWindow(QMainWindow):
     #  提取 / 翻譯
     # ════════════════════════════════════════════════════════════
 
+    def _active_base_regex(self) -> str:
+        """韓文模式啟用時改用韓文字元集，否則使用 AA_Settings.json 的 base_regex。"""
+        return DEFAULT_BASE_REGEX_KO if self._korean_mode else self.current_base_regex
+
     def extract_text(self) -> None:
         source = self._translate_panel.get_source_text()
         if not source.strip():
@@ -965,12 +985,13 @@ class MainWindow(QMainWindow):
         filter_text = self._translate_panel.get_filter_text().strip()
         extracted_list = _extract_text(
             source,
-            self.current_base_regex,
+            self._active_base_regex(),
             self.current_invalid_regex,
             self.current_symbol_regex,
             filter_text,
             skip_title=self._last_fetched_title,
             author_name=self._author_name,
+            korean_mode=self._korean_mode,
         )
         single_kana_list = _extract_single_kana(source, filter_text)
         seen = set(extracted_list)
@@ -1082,9 +1103,12 @@ class MainWindow(QMainWindow):
         if result is not None:
             self._translate_panel.doc_num.setText(str(result))
 
-    def _prepare_translation(self) -> tuple[str, str, str, str] | None:
+    def _prepare_translation(self, append_mode: bool = False) -> tuple[str, str, str, str] | None:
         """共用的翻譯前處理：驗證輸入、執行替換、回傳 (result_text, source,
-        name_base, display_title)；失敗時回傳 None 並已顯示 toast。"""
+        name_base, display_title)；失敗時回傳 None 並已顯示 toast。
+
+        append_mode=True 時，將翻譯文附加在原文之後（不取代原文）。
+        """
         if self.stack.currentIndex() != 0:
             return None
         source = self._translate_panel.get_source_text()
@@ -1099,7 +1123,8 @@ class MainWindow(QMainWindow):
         # 覆蓋率檢查改為「貼入翻譯」即時顯示於填入翻譯區塊右側
         # （見 _update_ai_match_label），這裡不再跳 Toast。
         glossary = parse_glossary(self._translate_panel.get_combined_glossary())
-        result_text = _apply_translation(source, extracted, translated, glossary)
+        result_text = _apply_translation(
+            source, extracted, translated, glossary, append_mode=append_mode)
         title = self._translate_panel.get_doc_title().strip() or "未命名"
         num = self._translate_panel.get_doc_num().strip()
         safe_title = _re_mod.sub(r'[\\/:*?"<>|]', '_', title)
@@ -1108,8 +1133,8 @@ class MainWindow(QMainWindow):
         display_title = f"{title}_{num}" if num else title
         return result_text, source, name_base, display_title
 
-    def apply_translation(self) -> None:
-        prepared = self._prepare_translation()
+    def apply_translation(self, append_mode: bool = False) -> None:
+        prepared = self._prepare_translation(append_mode=append_mode)
         if prepared is None:
             return
         result_text, source, name_base, display_title = prepared
@@ -1131,6 +1156,10 @@ class MainWindow(QMainWindow):
             display_title=display_title,
             is_temp_file=True,
         )
+
+    def apply_translation_append(self, _checked: bool = False) -> None:
+        """『加入翻譯並編輯』：將翻譯文附加在原文之後（不取代）後進入編輯器。"""
+        self.apply_translation(append_mode=True)
 
     # ── 內嵌字型 (settings) → write_html_file 參數的共用解析 ──
     _EMBED_FONT_MAP: dict[str, tuple[str, str]] = {
@@ -1243,10 +1272,11 @@ class MainWindow(QMainWindow):
             return
         report = _analyze_extraction(
             sel,
-            self.current_base_regex,
+            self._active_base_regex(),
             self.current_invalid_regex,
             self.current_symbol_regex,
             self._translate_panel.get_filter_text().strip(),
+            korean_mode=self._korean_mode,
         )
         dlg = QDialog(self)
         dlg.setWindowTitle("🔧 提取分析 (Debug)")
@@ -1323,13 +1353,15 @@ class MainWindow(QMainWindow):
         self._wiki_dialog.activateWindow()
 
     # ════════════════════════════════════════════════════════════
-    #  URL 抓取（in-process UrlFetchWindow，lazy-init）
+    #  URL 抓取（in-process UrlFetchWindow，嵌入 stack index 3）
     # ════════════════════════════════════════════════════════════
 
     def open_url_fetch_qt(self) -> None:
         from aa_url_fetch_qt import UrlFetchWindow
         if self._url_fetch_win is None:
             self._url_fetch_win = UrlFetchWindow(self)
+            self.stack.removeWidget(self._url_fetch_placeholder)
+            self.stack.insertWidget(3, self._url_fetch_win)
         self._url_fetch_win.sync_state(
             url_history=self.url_history,
             url_related_links=self.url_related_links,
@@ -1338,12 +1370,14 @@ class MainWindow(QMainWindow):
             author_name=self._author_name,
             initial_url=self.current_url,
         )
-        self._url_fetch_win.show()
-        self._url_fetch_win.raise_()
-        self._url_fetch_win.activateWindow()
+        self._nav_label.setText("網址讀取")
+        self._update_work_title("網址讀取")
+        self.stack.setCurrentIndex(3)
+        self._nav_bar.show()
+        self._action_bar.hide()
 
     def _url_fetch_win_visible(self) -> bool:
-        return self._url_fetch_win is not None and self._url_fetch_win.isVisible()
+        return self._url_fetch_win is not None
 
     def _url_cache_dir(self) -> str:
         d = os.path.join(tempfile.gettempdir(), "aa_url_cache")
@@ -1445,7 +1479,12 @@ class MainWindow(QMainWindow):
                 self._last_fetched_title = display_title
                 self.url_related_links = nav_links
                 self.current_url = raw_url
+                _old = next((h for h in self.url_history if h.get('url') == raw_url), {})
                 hist = {'url': raw_url, 'title': page_title or raw_url}
+                if _old.get('work_title'):
+                    hist['work_title'] = _old['work_title']
+                if _old.get('author'):
+                    hist['author'] = _old['author']
                 # 持久化：鎖定 append（多程序安全）+ per-URL 相關連結
                 self.settings_mgr.append_url_history(hist, max_items=self._fetch_history_limit)
                 self.settings_mgr.update_url_related_links(raw_url, nav_links)
@@ -1543,7 +1582,12 @@ class MainWindow(QMainWindow):
                     self._last_fetched_title = display_title
                     self.url_related_links = nav_links
                     self.current_url = next_url
+                    _old = next((h for h in self.url_history if h.get('url') == next_url), {})
                     hist = {'url': next_url, 'title': page_title or next_url}
+                    if _old.get('work_title'):
+                        hist['work_title'] = _old['work_title']
+                    if _old.get('author'):
+                        hist['author'] = _old['author']
                     # 持久化：鎖定 append（多程序安全）+ per-URL 相關連結
                     self.settings_mgr.append_url_history(hist, max_items=self._fetch_history_limit)
                     self.settings_mgr.update_url_related_links(next_url, nav_links)
@@ -1613,6 +1657,7 @@ class MainWindow(QMainWindow):
             editor_default_wysiwyg=self._editor_default_wysiwyg,
             side_panel_width=self._side_panel_width,
             side_auto_scroll=self._side_auto_scroll,
+            korean_mode=self._korean_mode,
         )
 
     def _apply_cache(self, cache: AppCache) -> None:
@@ -1665,6 +1710,7 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             self._side_panel_width = 0
         self._side_auto_scroll = bool(cache.side_auto_scroll)
+        self._korean_mode = bool(cache.korean_mode)
 
     def save_cache(self) -> None:
         self.settings_mgr.save_cache(self._gather_cache())
@@ -1686,6 +1732,7 @@ class MainWindow(QMainWindow):
             embed_font_in_html=self._embed_font_in_html,
             embed_font_name=self._embed_font_name,
             editor_default_wysiwyg=self._editor_default_wysiwyg,
+            korean_mode=self._korean_mode,
             orig_cache_path=self._orig_cache_path(),
             on_apply=self._on_settings_applied,
         )
@@ -1709,6 +1756,8 @@ class MainWindow(QMainWindow):
             'embed_font_name', self._embed_font_name) or "monapo")
         self._editor_default_wysiwyg = bool(values.get(
             'editor_default_wysiwyg', self._editor_default_wysiwyg))
+        self._korean_mode = bool(values.get(
+            'korean_mode', self._korean_mode))
         if self._batch_window is not None:
             self._batch_window.glossary_auto_search = self._glossary_auto_search
         # 立即修剪現有歷史以符合新上限

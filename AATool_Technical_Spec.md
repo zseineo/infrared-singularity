@@ -11,7 +11,7 @@
     *   `aa_tool/` — 純邏輯模組（無 UI 依賴）：`constants`、`font_measure`（Protocol）、`html_io`、`settings_manager`、`text_extraction`、`translation_engine`、`bubble_alignment`、`url_fetcher`、`wiki_name_fetcher`、`qt_helpers`、`dark_theme.qss`
 *   **技術棧**: Python 3, **PyQt6** (UI 框架), `re`, `math`, `os`, `html`, `urllib.request`, `threading`, `gzip`, `json`, `subprocess`
 *   **狀態存儲機制**:
-    *   `aa_settings_cache.json` — 暫存 UI 狀態 (原文、過濾規則、術語表、話數、預覽暫存、URL 記錄、背景/文字色、各開關狀態、作品+作者歷史 `work_history` 等)，確保關閉重開後不丟失資料。**正則表達式不從暫存讀取**，由 `AA_Settings.json` 管理。
+    *   `aa_settings_cache.json` — 暫存 UI 狀態 (原文、過濾規則、術語表、話數、預覽暫存、URL 記錄、背景/文字色、各開關狀態、作品+作者歷史 `work_history`、韓文提取模式開關 `korean_mode` 等)，確保關閉重開後不丟失資料。**正則表達式不從暫存讀取**，由 `AA_Settings.json` 管理（韓文模式啟用時改用 `DEFAULT_BASE_REGEX_KO` 常數，亦不從暫存讀取）。
     *   `AA_Settings.json` — 正式設定檔。寫入順序固定為 `base_regex`、`invalid_regex`、`symbol_regex`、`filter`、`glossary`、`glossary_temp`（regex 在前、文字內容在後，方便人工編輯時優先看到 regex）。讀取使用 `data.get(key)`，不依賴順序。`save_regex_to_settings()` 也會以同一順序重建 dict 寫回。
     *   `aa_original_cache.json` — 原文暫存。**主索引為 HTML 檔名 basename**，值為 `{text, ts, author_key?, extracted?, translation?}`；**上限由 `aa_settings_cache.json` 的 `original_cache_limit` 控制（預設 50）**，超過時以時間戳保留最新。編輯器儲存／翻譯按鈕按下時寫入（參見 §4.3）。`import_html` 或從批次搜尋開啟同名檔案時自動載入：原文(`text`)作為比對原文；`extracted`（提取狀態）與 `translation`（翻譯內容）若存在則同步還原至主面板 `extracted_text` / `ai_text` 欄位，使 Alt+4 局部透面板開啟時可直接顯示上次的狀態。**備援索引**：`author_key` 為從原文第一則投稿標頭抽出的「日期 + 時間.毫秒 + ID」指紋（例：`2023/04/02(日) 20:54:38.52 ID:5UkYdPSV`），由 `MainWindow._compute_author_fingerprint()` 生成。`_load_cache_entry_for_file()` 檔名查無時會讀取該 HTML 的 `<pre>` 內容、算出同樣指紋，掃描 cache 中 `author_key` 相符的 entry 作為 fallback；舊 entry 若無 `author_key` 欄位，在掃描當下以同規則從 `entry['text']` 即時計算，不需強制 migration。用途：使用者重新命名 HTML 檔後仍能找到對應原文。
     *   `aa_settings_cache.json` 新增 key：`work_history_limit`（作者歷史上限，預設 10）、`fetch_history_limit`（URL 讀取紀錄上限，預設 50）、`original_cache_limit`（`aa_original_cache.json` 上限，預設 50；舊版只有 `fetch_history_limit` 共用，讀取時若新欄位缺失則沿用 `fetch_history_limit` 作為遷移值）、`glossary_auto_search`（批次搜尋術語按鈕是否自動搜尋，預設 True）、`editor_default_wysiwyg`（進入編輯器時是否自動切換成所見即所得模式，預設 False）、`embed_font_name`（儲存 HTML 時要內嵌的字型名稱，可選 `"monapo"` / `"Saitamaar"` / `"textar"`，預設 `"monapo"`）；皆由 ⚙ 設定視窗（詳見 §4.12）調整並持久化。
@@ -39,12 +39,13 @@
 *   **Step 5**: 進入全螢幕或內嵌預覽視窗，在最終文本上進行微調（自動對話框、選區上色、對齊等），完成後點擊儲存匯出為 `.html`。
 
 ## 3. 主要模式 (Application Modes)
-主視窗以 `QStackedWidget` 管理三個面板，由 `MainWindow` 以 `show_translate_panel()` / `show_edit_panel()` / `show_batch_search_panel()` 切換：
+主視窗以 `QStackedWidget` 管理四個面板，由 `MainWindow` 以 `show_translate_panel()` / `show_edit_panel()` / `show_batch_panel()` / `open_url_fetch_qt()` 切換：
 *   **index 0 — `TranslatePanel`**（翻譯主面板，預設）
 *   **index 1 — `EditWindow`**（HTML 編輯，來自 `aa_edit_qt.py`，內嵌）
 *   **index 2 — `BatchSearchWindow`**（批次搜尋，來自 `aa_batch_search_qt.py`，內嵌）
+*   **index 3 — `UrlFetchWindow`**（網址讀取，來自 `aa_url_fetch_qt.py`，內嵌）
 
-進入 sub-panel（edit/batch）時會顯示頂部 `nav_bar` 返回按鈕；網址讀取視窗 (`aa_url_fetch_qt.py`) 仍以 subprocess 獨立視窗呈現並透過 IPC 與主程式溝通（詳見 4.5）。
+進入 sub-panel（edit/batch/url_fetch）時會顯示頂部 `nav_bar` 返回按鈕；所有面板均為 in-process，不開獨立視窗（詳見 4.5）。
 
 主視窗工具列（`TranslatePanel._build_toolbar`）在「批次搜尋」按鈕右側另提供「編輯模式」按鈕，對應 `MainWindow.resume_edit_panel()`：若目前有開啟中的 `EditWindow`，會直接切回編輯面板，避免從編輯模式誤按返回後需要重新走流程。
 
@@ -97,7 +98,8 @@
 *   **對應 Function**: `def apply_translation(self):`
 *   **映射表還原**: 讀取「提取結果」與「翻譯結果」，透過 `|` 分割還原為 Dict。
 *   **對應率即時檢查（內嵌標籤）**: 由 `MainWindow._update_ai_match_label()` 計算提取 ID 與翻譯 ID 的交集 / 提取 ID 總數；若低於 `50%`，在「填入翻譯」區塊標題列右側的 `_ai_match_label` (`QLabel`) 顯示「⚠️ 原文跟翻譯可能不對應（對應率 XX%）」（橘色 `#f39c12`）。`≥50%` 或任一邊為空時清空標籤。**唯一觸發點**：`ai_text.textChanged` → 走 `validate_ai_text()` 末端順帶呼叫，100ms `QTimer.singleShot` debounce。**故意不掛 `extracted_text.textChanged`**：使用者調整提取結果是常見編輯，當下不該再彈警告；對應率以使用者「貼上／更新填入翻譯」當下為準即可。**不再用 Toast**、**不再放在 `_prepare_translation`**。
-*   **共用前處理 `_prepare_translation()`**: 驗證輸入、記錄歷史、跑替換、組標題/檔名後回傳 `(result_text, source, name_base, display_title)`；`apply_translation()`（替換後進編輯器）與 `apply_translation_and_save()`（替換後 QFileDialog 直接存檔）共用此前處理。對應率檢查已抽出至 `_update_ai_match_label()` 即時顯示，不在這裡執行。
+*   **共用前處理 `_prepare_translation(append_mode=False)`**: 驗證輸入、記錄歷史、跑替換、組標題/檔名後回傳 `(result_text, source, name_base, display_title)`；`apply_translation()`（替換後進編輯器）、`apply_translation_append()`（附加後進編輯器）與 `apply_translation_and_save()`（替換後 QFileDialog 直接存檔）共用此前處理。`append_mode` 直接透傳給底層 `apply_translation()`。對應率檢查已抽出至 `_update_ai_match_label()` 即時顯示，不在這裡執行。
+*   **「加入翻譯並編輯」按鈕 (`apply_translation_append()`)**: 首頁底部 action bar 中、位於「替換翻譯並編輯」右側、「替換翻譯並儲存」左側（寬 160、高 44，橘色 `#fd7e14`）。實作上呼叫 `apply_translation(append_mode=True)`；走完全相同的暫存寫入、`save_original_for_file`、進編輯器流程，差別只在傳給底層 `apply_translation()` 的 `append_mode` 參數。底層 `apply_translation(..., append_mode=True)` 把每條翻譯文以 `original + ' ' + final_translated` 的形式寫回該行（原文與翻譯文之間補一個半形空白作為間隔；不取代原文，且不補全形空白，因附加結果一定比原文長）。其餘行為（術語表、長度排序、行號限定、全域術語覆蓋）與替換模式完全一致。
 *   **「翻譯並直接儲存」按鈕 (`apply_translation_and_save()`)**: 首頁底部 action bar 中、位於「替換翻譯並編輯」右側、「讀入暫存」左側（寬 120、高 44，綠色 `#28a745`）。`_prepare_translation()` 完成後以 `QFileDialog.getSaveFileName` 詢問存檔路徑（預設檔名為 `{title}_{num}.html`、預設目錄 `self._last_dir`），使用者確認後 `write_html_file()` 直接寫檔（非暫存、不進編輯器），同步更新 `_last_dir` 與暫存。
 *   **翻譯時立即寫入原文 cache（⚠️ 重要）**: `apply_translation()` 與 `apply_translation_and_save()` 都會在 `write_html_file()` 成功後 **立即** 呼叫 `self.save_original_for_file(file_path, source.rstrip('\n'), extracted=..., translation=...)`，把原始文本、提取狀態與翻譯內容一起寫入 `aa_original_cache.json`。`_on_edit_saved()` 的寫入同樣傳入目前 translate panel 的 extracted / translation。此設計保證：只要按下任一翻譯按鈕或在編輯器儲存，下次從批次搜尋重新開啟該檔時，不僅 Alt+2 比對原文可用，Alt+4 局部透面板也能直接還原上次的提取與翻譯狀態。內部使用 `_load_cache_entry_for_file(file_path)` 取得完整 entry（含 extracted / translation），`load_original_for_file()` 則保持原有介面（只回傳 `text`）供需要只讀原文的呼叫端使用。
 *   **合併術語表**: `get_combined_glossary()` 將一般術語表與臨時術語表合併後使用。
@@ -145,15 +147,14 @@
     *   **檢視模式快捷鍵（Alt+1/2/3）**: `Alt+1 = _return_to_editor()` 回到編輯模式（若目前在比對/預覽則自動切回；已在編輯則僅 focus）；`Alt+2 = _toggle_compare()` 進/出原文比對；`Alt+3 = _toggle_preview()` 進/出上色預覽。三模式可直接互切：在比對模式按 Alt+3 會直接跳到預覽，在預覽模式按 Alt+2 會直接跳到比對。`_toggle_compare` 以 `_compare_from_preview: bool` 記錄進入前是否在 WYSIWYG 模式；若為 True，離開比對時（Alt+2 toggle / Alt+1）返回 WYSIWYG 而非編輯模式。模式切換時的位置同步採「行號 + 捲軸值」雙軌：先以 `_move_cursor_to_block(widget, block_num)`（內含 `setTextCursor`，會自動把游標捲入可視範圍）設定邏輯游標，**再** `verticalScrollBar().setValue(...)` 覆蓋 Qt 自動捲動造成的偏移，達到「同一行在同一螢幕位置」的視覺對齊。注意：`_move_cursor_to_block` 不主動呼叫 `ensureCursorVisible()`，否則會與外部捲軸恢復打架。同一模式的快捷鍵重複按下則退出回上一個模式（toggle）。
     *   **局部重套用面板 (`_toggle_translate_side()` — Hotkey: `Alt+4`)**: 在編輯器右側展開可同時編輯「提取結果」與「填入翻譯」的面板（兩個 `QTextEdit`），按下「重新套用」會用新內容重跑 `apply_translation`，但**只覆蓋目前可視行以下**的部分（可視行以上維持使用者已編輯的成果）。實作要點：
         1. **UI 結構**：把 `self.stack`（編輯/比對/預覽 `QStackedWidget`）與 `self._translate_side`（右側面板 `QWidget`）放進 `QSplitter(Horizontal)`，預設右側 hide；Alt+4 切換可見。
-        2. **資料來源**：開啟時呼叫 `extracted_provider()` / `translation_provider()`（由主程式接到 `_translate_panel.get_extracted_text` / `get_ai_text`）拉最新內容；不會 cache 上次的編輯。
+        2. **資料來源（雙層：full vs. visible filter）**：開啟時呼叫 `extracted_provider()` / `translation_provider()`（由主程式接到 `_translate_panel.get_extracted_text` / `get_ai_text`）拉最新內容，存入 `self._side_extracted_full` / `self._side_ai_full`；面板上的 `side_extracted` / `side_ai` **永遠只顯示「當前編輯器可視範圍對應行」**的子集（filter rule：保留 `NNN-N|text` 中 NNN ∈ [visible_top_block+1, visible_bottom_block+1] 的列；非該格式或缺 ID 的列直接濾掉）。`_get_visible_line_range()` 從 `_active_edit_widget()` 的 `cursorForPosition(QPoint(0,0))` 與 `cursorForPosition(QPoint(0, vp_h-1))` 取上下界。`_refresh_side_panels_to_visible()` 是切換顯示範圍的單一入口：先以 `_save_side_edits_to_full()`（透過 `_merge_filtered_into_full` 依 ID 把使用者剛輸入的編輯合回 _full）保存當前面板編輯，再以 `_filter_text_by_line_range` 過濾 _full 後 `setPlainText`。`_side_visible_range: tuple|None` 快取上次套用的範圍；範圍未變則 early return，避免捲動時不必要的 setPlainText 把使用者選取/位置打掉。觸發點：`_toggle_translate_side()` 開啟時 `force=True`、`_on_editor_scrolled()`（無條件，不再受 `side_auto_scroll_cb` 控制）。
         3. **選取行對齊（選取＋置中）**：`_sync_side_panels_to_line(line_1based, *, select)` 是核心同步函式。觸發來源：(a) Alt+4 開啟面板時，由 `_get_selection_block_number()` 取「**選取起點所在行**」（無選取則回傳 `None`，不跳行）；(b) 自動捲動的選取/捲軸事件（見 3a）。提取結果格式為 `NNN-N|text`（NNN 是 1-based source 行號），優先精確匹配 `id_line == line_1based`；找不到退而求其次取第一條 `id_line ≥ line_1based`。命中後呼叫 `_place_line_centered(widget, idx, *, select)`：`select=True` 時對 block 做 `QTextCursor` KeepAnchor 到 `EndOfBlock` 並 `setTextCursor` 達成整列選取；置中位置由 `documentLayout().blockBoundingRect` 取得 block Y 後手動寫入 `verticalScrollBar`（不用 `ensureCursorVisible`，後者只保證可見不保證置中）。
         3a. **自動捲動開關 (`side_auto_scroll_cb: QCheckBox`)**：面板標題列上的「自動捲動」勾選框；建構於 `_build_translate_side_panel()`。**初始狀態與面板寬度都持久化**到 `aa_settings_cache.json`：欄位 `side_auto_scroll: bool` 與 `side_panel_width: int`（單位 px，0 表示沿用 splitter 預設 stretch）。`MainWindow` 的 `_side_auto_scroll` / `_side_panel_width` 在 cache load 時填入；建立 `EditWindow` 時透過 `init_side_auto_scroll` / `init_side_panel_width` 與 `on_side_state_change=(width|None, auto_scroll|None)` callback 串接：勾選框 `toggled` → 通知 `(None, checked)`；`_main_splitter.splitterMoved` → 在面板可見時通知 `(sizes[1], None)`。`MainWindow._on_side_state_changed` 任一參數為 `None` 表示只更新另一欄，呼叫 `schedule_save()` 落地。重啟程式後第一次開啟面板時，`_toggle_translate_side()` 中的 `_restore_side_panel_width()` 會在 splitter 已 layout（`width()>0`）的前提下套用記住的寬度，並夾取邊界（左側至少 200px、右側至少 120px）。三種互動規則：
-            - 勾選 + 編輯器選取改變（`selectionChanged`）+ 確實 `hasSelection` → `_on_editor_selection_changed` 呼叫 `_sync_side_panels_to_line(..., select=True)`，把對應行整列選取＋置中。
-            - 勾選 + 編輯器捲動（`verticalScrollBar.valueChanged`）+ **無選取** → `_on_editor_scrolled` 以 `cursorForPosition(QPoint(0, viewport_h // 2))` 取「可視中心行」，呼叫 `_sync_side_panels_to_line(..., select=False)` 只置中該行不動選取。
-            - 勾選 + 編輯器有選取時捲動 → 早期 return，**不**跟動面板（避免捲走使用者剛剛對齊的選取）。
-          訊號連接於 `EditWindow.__init__` 對 `editor` 與 `preview_view` 兩者都掛上，handler 內以 `_active_edit_widget()` 路由到當前模式對應 widget。所有 handler 開頭都先判斷 `self._translate_side.isVisible()` 與 checkbox 是否存在/勾選，避免面板隱藏時做白工或在 `_build_translate_side_panel` 之前的 race condition。Alt+4 開啟時若已有選取會直接跳行＋選取（不需要 checkbox）；checkbox 控制的只是「使用者後續在編輯器中互動時面板是否自動跟進」。
-        4. **重新套用**：以 `self._original_text` 為 source 重跑 `apply_translation(source, side_extracted, side_ai, glossary)`；切割合併 `editor.lines[:top]` + `new_full.lines[top:]`；保留 `verticalScrollBar` 位置。
-        5. **回寫主面板**：套用後呼叫 `extracted_setter` / `translation_setter` 把右側內容寫回主畫面的「提取結果」與「填入翻譯」，下次回主畫面看到的是修改過的版本。
+            - **顯示範圍跟動編輯器（無條件，不受 checkbox 控制）**：`_on_editor_scrolled` 在面板可見時呼叫 `_refresh_side_panels_to_visible()` 重設 side 內容為當前可視範圍子集；範圍未變（`_side_visible_range` cache 命中）則 early return，避免 setPlainText 把使用者選取/位置打掉。
+            - **選取行對齊（受 checkbox 控制）**：勾選 + 編輯器選取改變（`selectionChanged`）+ 確實 `hasSelection` → `_on_editor_selection_changed` 呼叫 `_sync_side_panels_to_line(..., select=True)`，把對應行整列選取＋置中（在過濾後的 side 顯示中尋找匹配 ID）。
+          訊號連接於 `EditWindow.__init__` 對 `editor` 與 `preview_view` 兩者都掛上，handler 內以 `_active_edit_widget()` 路由到當前模式對應 widget。Alt+4 開啟時若已有選取會直接跳行＋選取（不需要 checkbox）；checkbox 控制的只是「使用者後續在編輯器中互動時面板是否自動選取對應行」，**不影響顯示範圍跟動**。
+        4. **重新套用**：先以 `_save_side_edits_to_full()` 把當前面板（可視範圍）的編輯依 ID 合回 `_side_extracted_full` / `_side_ai_full`，再以 _full 為提取/翻譯資料源（**不是面板顯示的子集**，否則可視範圍以外的行會因為缺資料而把翻譯打回原文）跑 `apply_translation(self._original_text, side_extracted_full, side_ai_full, glossary)`；切割合併 `editor.lines[:top]` + `new_full.lines[top:]`；保留 `verticalScrollBar` 位置。
+        5. **回寫主面板**：套用後呼叫 `extracted_setter` / `translation_setter` 把 _full（含本次編輯）寫回主畫面的「提取結果」與「填入翻譯」，下次回主畫面看到的是修改過的版本。
         6. **限制**：必須有 `_original_text`（編輯器是從 `apply_translation` 進入時才會有）；比對/預覽模式中按下會提示先回編輯。
     *   **原文比對模式 (`_toggle_compare()` — Hotkey: `Alt+2`)**: 切換至 `QStackedWidget` index 1（`self.orig_view`，唯讀 `QTextEdit`），內容為傳入的 `_original_text`（或從 `aa_original_cache.json` 載入）。進入時以 `_move_cursor_to_block` 同步游標行號（從 editor 或 WYSIWYG preview_view 取 blockNumber）；比對中停用 `_edit_buttons`、工具列染棕 (`#8b6f47`)。`orig_view` 底色沿用編輯器 `_bg_color`。離開時以 `_compare_from_preview` 判斷返回目標：True → 返回 WYSIWYG（直接 render preview 並 setCurrentIndex(2)）；False → 返回編輯模式。
     *   **WYSIWYG 開檔自動重渲染**：`MainWindow.show_edit_panel()` 對既有 `EditWindow` `_replace_document()` 寫入新檔內容後，若 `_preview_active` 為 True 會立即呼叫 `_wysiwyg_rerender_after_editor_change()` 並**在捲動之前**執行，確保後續 `_scroll_to_line()` / `_scroll_to_top()` 能作用於最新的 preview 文件。`_scroll_to_line()` 與 `_scroll_to_top()` 在 `_preview_active=True` 時會同步把 `preview_view` 也捲到相同行（透過 `findBlockByLineNumber` 對 preview 文件取得對應 block）。批次搜尋從 WYSIWYG 預設開啟（`editor_default_wysiwyg=True`）切換到目標檔/目標行也走這條路徑：`_toggle_preview()` 之後額外補一次 `_scroll_to_line()` 才能正確捲到批次搜尋指定的行。先前需要手動 Alt+1 切回編輯再 Alt+3 切回預覽才會更新。
@@ -186,15 +187,17 @@
     *   **骰子搜尋**: 快速搜尋殘留的 `1D10:10` 骰子格式。
     *   `Ctrl+S` 快捷鍵觸發直接存檔（覆蓋原檔，若有 `source_file`），否則走另存新檔。
 
-### 4.5 網址讀取功能 (`open_url_fetch_qt()` — in-process PyQt6 視窗)
-*   **對應 Function**: `def open_url_fetch_qt(self):`（主程式）、`UrlFetchWindow` 於 [aa_url_fetch_qt.py](aa_url_fetch_qt.py)
-*   `UrlFetchWindow` 由主程式直接實例化（**不再作為 subprocess 啟動**），以 lazy-init 方式建立（第一次開啟時才建立，之後 show/hide 重用），省去 Python 行程啟動時間。**實際抓取/解析仍由主程式執行**，以確保作者名稱總是取最新值。
+### 4.5 網址讀取功能 (`open_url_fetch_qt()` — in-process，嵌入 QStackedWidget)
+*   **對應 Function**: `def open_url_fetch_qt(self):`（主程式）、`UrlFetchWindow(QWidget)` 於 [aa_url_fetch_qt.py](aa_url_fetch_qt.py)
+*   `UrlFetchWindow` 繼承 `QWidget`，嵌入主視窗 `QStackedWidget` 第 **3 頁**（index 3），以 lazy-init 方式建立（第一次開啟時才建立、替換 placeholder）。按下「網址讀取」按鈕後切換到此面板，不再開啟獨立視窗。**實際抓取/解析仍由主程式執行**，以確保作者名稱總是取最新值。
+*   **面板切換流程**:
+    *   `open_url_fetch_qt()` → lazy-init（若尚未建立：`removeWidget(placeholder)` → `insertWidget(3, win)`）→ `win.sync_state(...)` → `stack.setCurrentIndex(3)`，顯示 nav_bar、隱藏 action_bar。
+    *   「← 返回首頁」（nav_bar 共用按鈕）或按 **ESC** → `show_translate_panel()`，若當前頁為 3 則先呼叫 `win.sync_back_to_main()` 同步 `author_only / author_name`。ESC 透過 `QShortcut(Key_Escape, self, WidgetWithChildrenShortcut)` 實作，連接至 `main.show_translate_panel`。
+    *   抓取成功後 400ms 自動呼叫 `main.show_translate_panel()` 回到翻譯面板（`auto_close`）。
 *   **通訊方式（直接 method call，無 IPC）**:
-    *   `open_url_fetch_qt()` → `win.sync_state(url_history, url_related_links, current_url, author_only, author_name, initial_url)` 同步狀態後 `show()`。
-    *   視窗→主程式（直接呼叫）：`main._author_name = ...`、`main._handle_url_fetch_request(url, author_only, skip_cache)`（fetch）；`main.url_history = []` + `main.settings_mgr.clear_url_history()`（clear）；`main._author_only / _author_name / schedule_save()`（close sync）。
-    *   主程式→視窗（公開方法）：`win.on_fetch_done(success, status_message, status_color, url_history, url_related_links, current_url, auto_close)`、`win.on_history_cleared(url_history)`、`win.on_history_updated(url_history, url_related_links, current_url)`、`win.on_author_updated(author_name)`（戳印 meta 套用後同步至作者欄位）。
-    *   `_url_fetch_win_visible()`：判斷視窗是否存在且可見，主程式推送更新前先檢查，避免呼叫已關閉視窗。
-    *   **作者名稱欄位**：`MainWindow._author_name` 狀態保存，由 `_do_fetch()` / `closeEvent` 直接更新，不再透過 IPC。
+    *   面板→主程式（直接呼叫）：`main._author_name = ...`、`main._handle_url_fetch_request(url, author_only, skip_cache)`（fetch）；`main.url_history = []` + `main.settings_mgr.clear_url_history()`（clear）；`main._author_only / _author_name / schedule_save()`（`sync_back_to_main()`）。
+    *   主程式→面板（公開方法）：`win.on_fetch_done(success, status_message, status_color, url_history, url_related_links, current_url, auto_close)`、`win.on_history_cleared(url_history)`、`win.on_history_updated(url_history, url_related_links, current_url)`、`win.on_author_updated(author_name)`（戳印 meta 套用後同步至作者欄位）。
+    *   `_url_fetch_win_visible()`：判斷面板實例是否已建立（`self._url_fetch_win is not None`），主程式推送更新前先檢查。
 *   **主程式端處理**:
     *   `_handle_url_fetch_request(url, author_only)`：更新 `_author_only`→`schedule_save`→背景執行緒執行 `fetch_url` + `parse_page_html`，成功後透過 `_invoke_on_main` signal 將 `_apply` 派回主執行緒（`QTimer.singleShot` 只能在有 event loop 的執行緒呼叫，背景執行緒須用 signal 轉送），套用到 `source_text`、更新 `url_related_links`/`current_url`/`url_history`、觸發 `check_chapter_number`、`_update_work_title`、`show_toast`，最後呼叫 `win.on_fetch_done(...)` 並要求 `auto_close`。
     *   `_invoke_on_main`：`pyqtSignal(object)`，在 `__init__` 連到 `lambda fn: fn()`，供背景執行緒把 callable 排到主執行緒執行（取代不能跨執行緒的 `QTimer.singleShot`）。
@@ -242,6 +245,7 @@
 *   **IPC 雙向通訊**:
     *   Qt→主程式（`cmd_file`）：`open`（開啟檔案並跳行）、`sync_folder`（同步資料夾路徑）
     *   主程式→Qt（`reverse_cmd_file`）：`restore`（恢復視窗顯示）
+*   **ESC 返回首頁**: `BatchSearchWindow.__init__` 接受 `on_back` callback；`MainWindow.show_batch_panel()` 傳入 `on_back=self.show_translate_panel`。面板建立後以 `QShortcut(Key_Escape, self, WidgetWithChildrenShortcut)` 連接 `on_back`，按 ESC 直接返回首頁（翻譯面板）。
 *   **搜尋**: 在指定資料夾所有 HTML 的 `<pre>` 內容中搜尋，支援字串或正則，最多 500 筆結果。背景執行緒搜尋 + 分批渲染。
 *   **單筆替換 / 全部替換 / 復原**: 與舊版邏輯相同，另支援檔案層級的復原（`_undo_backups`）。
 *   **全部復原（`_undo_all_batch`）**: 按下「全部替換」後，其右側會顯示「全部復原」按鈕，點擊可將本次批次替換涉及的所有檔案一次還原至替換前狀態。採用 `_batch_undo` 快照（含 `backups`、`items`、`new_backup_files`），新搜尋或單筆復原動到同檔案時會使快照失效並隱藏按鈕。單筆「復原」按鈕則僅還原單一檔案。
@@ -272,6 +276,7 @@
     *   **`save_cache` 保留策略**：對 `url_history` / `work_history` 改為「保留檔上值」（由上列 helpers 維護），避免可能過時的 in-memory 版本蓋掉其他程序的新增。
     *   **即時跨程序同步**（`MainWindow._refresh_shared_history` + `QTimer` 1.5s 輪詢）：每 1.5 秒呼叫 `peek_shared_state(current_url)` 取出 `url_history` / `work_history` / 對應 URL 的 `url_related_links`，**直接比對內容**而非 mtime（避免低解析度檔案系統同秒寫入漏偵測）；有變動才更新 in-memory。若 URL 抓取子程序在跑，透過 `_write_url_fetch_reverse` 推送 `history_updated` 動作；子程序在 `_poll_reverse_commands` 中接收後刷新 `_url_history` / `_url_related_links` / `_current_url` 與 UI。效果：兩個 `aa_main_qt.py` 並開時，雙方寫入的歷史紀錄會在 ~1.5 秒內互相看見（類似討論板留言即時更新）。
     *   **所有 URL 寫入路徑都必須走 `append_url_history` + `update_url_related_links`**：`_handle_url_fetch_request._apply`（手動抓取）與 `_fetch_adjacent_chapter._apply`（上一話/下一話）皆已改用 helpers。若新增其他抓 URL 的路徑，務必同樣呼叫 helpers，否則該筆紀錄會被 `save_cache` 的「保留檔上值」策略當成不存在而不寫入。
+    *   **in-memory 更新必須保留戳印 meta**：`_handle_url_fetch_request._apply` 與 `_fetch_adjacent_chapter._apply` 在建立新 `hist` 條目、更新 `self.url_history` 之前，會先從舊 in-memory 條目撈出既有的 `work_title` / `author`，複製到新 `hist` 中（邏輯與 `append_url_history` 的磁碟保留策略一致）。這樣後續的 `_apply_url_history_meta` 才能從 in-memory 查到 meta 並套用；若遺漏此步驟，in-memory 更新會把戳印洗掉，導致戳印套用無效。
 *   **讀取/匯出設定檔**:
     *   `import_settings()`, `export_settings()`, `load_settings_at_startup()`: 管理 `AA_Settings.json`，包含自訂 Regex 規則、一般術語表與臨時術語表。
     *   `save_regex_to_settings()`: 僅更新 `AA_Settings.json` 中的三條正則，保留其他欄位不動。
@@ -320,6 +325,9 @@
     *   **清除暫存按鈕**：二次確認（`QMessageBox.question`）後把 `aa_original_cache.json` 覆寫為 `{}`，即時更新大小顯示。
     *   **批次搜尋：點擊術語按鈕時自動搜尋**（對應 `glossary_auto_search`，預設 True）：控制批次搜尋視窗右側「術語快捷面板」的 `[→]` 按鈕是否在填入搜尋/替換欄後自動觸發搜尋。對應 `MainWindow._glossary_auto_search`；套用時同步至 `self._batch_window.glossary_auto_search`。
     *   **儲存 HTML 時內嵌字型**（對應 `embed_font_in_html` + `embed_font_name`）：checkbox 開啟後可從下拉選單選擇要嵌入的 AA 字型（Monapo +3.5 MB、Saitamaar +2.7 MB、textar +4.3 MB）；checkbox 勾選/取消連動下拉可用狀態（`toggled → setEnabled`）。checkbox 與 combobox 同列以 `QHBoxLayout` 並排；各提示文字均以 tooltip 顯示，不寫在 label 內。**生效路徑**：所有需要把這個設定轉成 `write_html_file(embed_font_path=…, embed_font_family=…)` 參數的地方，統一呼叫 `MainWindow._resolved_embed_font()` → 回傳 `(path, family)`，未啟用或字型檔不存在時回 `(None, None)`。映射表 `_EMBED_FONT_MAP = {"monapo": ("monapo.ttf", "Monapo"), "Saitamaar": ("Saitamaar.ttf", "Saitamaar"), "textar": ("textar.ttf", "textar")}`。**現行呼叫點**：(1) `MainWindow.apply_translation_and_save()` —「翻譯並直接儲存」按鈕，不進編輯器直接 `QFileDialog` + `write_html_file`；(2) `EditWindow._write_current()` 透過 `embed_font_provider` callback 從主程式取 font_key，再以同樣的對應表解析（編輯器是獨立模組，沒有直接拿 MainWindow 實例，所以這份 map 在編輯器內也保留一份）。**不生效**：`aa_batch_search_qt.py` 的四處 `write_html_file` 都不傳 embed 參數——批次取代/復原是針對使用者既有的檔案，不應該因為主程式設定而主動改變那些檔案的字型內嵌狀態。
+    *   **韓文提取模式**（對應 `aa_settings_cache.json.korean_mode`，預設 False）：開啟後，「提取」、「提取分析」與編輯器的 `extract_regex_provider` 都會改用 `aa_tool/constants.py` 的 `DEFAULT_BASE_REGEX_KO`（將日文假名/漢字 `ぁ-んァ-ヶ一-龠々〆〤ッ` 換成韓文 Hangul `가-힣` ＋ 相容字母 `ㄱ-ㅎㅏ-ㅣ`），其餘 `invalid_regex` / `symbol_regex` / 過濾規則 / chunk 切分 / 發文者行剔除流程不變；`AA_Settings.json` 的 `base_regex` 在韓文模式下會被略過、不寫入。對應 `MainWindow._korean_mode`，由 `MainWindow._active_base_regex()` 集中分流（三個呼叫點：`extract_text` / `analyze_extraction` / `show_edit_panel` 的 `extract_regex_provider`）。
+        *   **後處理連動跳過**：`extract_text` / `analyze_extraction` 新增 `korean_mode: bool` 參數並透傳給 `_postprocess_text(text, korean_mode=...)`；當 `korean_mode=True` 時，後處理跳過「移除開頭非平假名/片假名/漢字/英文/數字」步驟（其字元類為 `[^぀-ゟ゠-ヿ一-鿿a-zA-ZＡ-Ｚａ-ｚ0-9０-９]`，未包含 Hangul 範圍，否則韓文整段會被砍成空字串並在「長度 ≤ 2」剔除）。邊框 `│|` 內取文字、結尾 `|｜(（` 剝除、開頭「數字＋點」剝除等其他後處理步驟保持不變。
+        *   **EditWindow 連動**：`extract_regex_provider` 從 4-tuple 擴為 5-tuple `(base, invalid, symbol, filter, korean_mode)`；`aa_edit_qt.py` 的「選取範圍提取」依長度做向後相容拆解，舊呼叫端少傳第 5 個值時會視為 `korean_mode=False`。
     *   **進入編輯器時預設開啟「所見即所得」模式**（對應 `editor_default_wysiwyg`，預設 False）：開啟後，每次 `MainWindow.show_edit_panel()` 切換到編輯面板時，若 `EditWindow._preview_active` 為 False 會自動呼叫 `_toggle_preview()` 進入 Alt+3 WYSIWYG 模式（替換翻譯、開啟 HTML、批次開檔等所有路徑都生效）。對應 `MainWindow._editor_default_wysiwyg`。
 *   **套用流程**：按「確定」呼叫 `MainWindow._on_settings_applied(values)` → 寫回 instance 屬性（含 `_glossary_auto_search`）→ 立即修剪 in-memory `work_history` / `url_history` 以符合新上限 → 同步給已開啟的 `BatchSearchWindow` → `save_cache()` 持久化。「取消」不套用任何變更。
 

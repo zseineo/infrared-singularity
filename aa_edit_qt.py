@@ -202,6 +202,15 @@ class EditWindow(QMainWindow):
         self._init_side_auto_scroll = bool(init_side_auto_scroll)
         self._on_side_state_change = on_side_state_change
 
+        # Alt+4 局部重套用：保留 provider 取得的「完整」提取結果與翻譯文字，
+        # 而 side_extracted / side_ai 只顯示當前編輯器可視範圍對應的行。
+        # 重新套用與編輯器捲動切換顯示範圍時都以 _full 為單一資料來源。
+        self._side_extracted_full = ""
+        self._side_ai_full = ""
+        # 上次套到面板的可視範圍 (lo, hi) 1-based source 行號；用於避免捲動時
+        # 範圍未變仍重設 setPlainText 把使用者選取/捲動位置打掉。
+        self._side_visible_range: tuple[int, int] | None = None
+
         # ── IPC 狀態 ──
         self._cmd_file = cmd_file
         self._reply_file = reply_file
@@ -1475,10 +1484,9 @@ class EditWindow(QMainWindow):
         self.side_auto_scroll_cb = QCheckBox("自動捲動")
         self.side_auto_scroll_cb.setStyleSheet("color:#ddd;")
         self.side_auto_scroll_cb.setToolTip(
-            "勾選後：\n"
-            "・在編輯器中重新「選取」一段文字 → 面板自動選取對應行\n"
-            "・編輯器捲動且當前無選取 → 面板隨可視中心行同步捲動\n"
-            "・編輯器有選取時捲動 → 面板不跟動（避免干擾選取對齊）")
+            "勾選後：在編輯器中重新「選取」一段文字 → 面板自動選取對應行\n"
+            "（提取框/翻譯框的內容已永遠只顯示當前編輯器可視範圍對應的行，\n"
+            " 不論是否勾選都會隨編輯器捲動更新顯示。）")
         # 持久化：載入上次的勾選狀態，並在 toggle 時通知主程式存檔
         self.side_auto_scroll_cb.setChecked(self._init_side_auto_scroll)
         self.side_auto_scroll_cb.toggled.connect(self._on_side_auto_toggled)
@@ -1491,7 +1499,7 @@ class EditWindow(QMainWindow):
         head.addWidget(btn_reapply)
         vl.addLayout(head)
 
-        hint = QLabel("可編輯下方兩欄後按「重新套用」；只會覆蓋畫面捲動到的當前行以下")
+        hint = QLabel("下方兩欄只顯示當前編輯器可視範圍對應的行；可編輯後按「重新套用」覆蓋當前行以下")
         hint.setFont(QFont("MS UI Gothic", 9))
         hint.setStyleSheet("color:#888;")
         hint.setWordWrap(True)
@@ -1587,16 +1595,21 @@ class EditWindow(QMainWindow):
             self._set_status("關閉局部重套用面板", "#0f0")
             return
 
-        # 開啟前先用 provider 拉最新內容
+        # 開啟前先用 provider 拉最新內容；保留為 _full，面板顯示由
+        # _refresh_side_panels_to_visible() 依當前編輯器可視範圍過濾。
         if self._extracted_provider is not None:
-            self.side_extracted.setPlainText(self._extracted_provider() or "")
+            self._side_extracted_full = self._extracted_provider() or ""
         if self._translation_provider is not None:
-            self.side_ai.setPlainText(self._translation_provider() or "")
+            self._side_ai_full = self._translation_provider() or ""
+        # 強制重設範圍快取，確保 refresh 一定會 setPlainText
+        self._side_visible_range = None
 
         self._translate_side.show()
         # 還原使用者上次調整的面板寬度（只在 init 寬度 > 0 時套用，
         # 否則沿用 setStretchFactor 預設）。每次開啟都套，保險起見。
         self._restore_side_panel_width()
+        # 依目前編輯器可視範圍過濾 side_extracted / side_ai 顯示內容
+        self._refresh_side_panels_to_visible(force=True)
         sel_block = self._get_selection_block_number()
         if sel_block is not None:
             self._sync_side_panels_to_line(sel_block + 1, select=True)
@@ -1615,6 +1628,99 @@ class EditWindow(QMainWindow):
             return None
         return target.document().findBlock(
             cursor.selectionStart()).blockNumber()
+
+    def _get_visible_line_range(self) -> tuple[int, int]:
+        """回傳當前可編輯 widget 的可視範圍 (top, bottom) 1-based 行號。
+
+        對應 source 行號（與面板提取格式 `NNN-N|text` 中 NNN 對齊）：
+        editor block_number 0-based + 1 = source 行號（apply_translation 輸出
+        與 source_lines 1:1 對應）。
+        """
+        target = self._active_edit_widget()
+        vp_h = target.viewport().height()
+        if vp_h <= 0:
+            return (1, 1)
+        top = target.cursorForPosition(QPoint(0, 0)).blockNumber() + 1
+        bottom = target.cursorForPosition(
+            QPoint(0, vp_h - 1)).blockNumber() + 1
+        if bottom < top:
+            bottom = top
+        return (top, bottom)
+
+    def _filter_text_by_line_range(
+        self, text: str, lo: int, hi: int
+    ) -> str:
+        """從 `NNN-N|text` 格式文字中保留 NNN 在 [lo, hi] 區間的行。
+        其他無法解析的行直接濾掉（面板只展示有 ID 的資料行）。"""
+        out = []
+        for ln in text.split('\n'):
+            if '|' not in ln:
+                continue
+            id_part = ln.split('|', 1)[0].strip()
+            if not id_part:
+                continue
+            try:
+                id_line = int(id_part.split('-')[0])
+            except ValueError:
+                continue
+            if lo <= id_line <= hi:
+                out.append(ln)
+        return '\n'.join(out)
+
+    def _merge_filtered_into_full(
+        self, full: str, filtered: str
+    ) -> str:
+        """把 filtered（使用者編輯後的可視範圍）依 ID 合回 full。
+        full 中 ID 對得上的列以 filtered 版本覆寫；filtered 中找不到對應 ID
+        的列（使用者新增）則丟棄。filtered 中遺漏的 ID（使用者刪除）保留 full 原樣。"""
+        edited: dict[str, str] = {}
+        for ln in filtered.split('\n'):
+            if '|' not in ln:
+                continue
+            id_part = ln.split('|', 1)[0].strip()
+            if id_part:
+                edited[id_part] = ln
+        out = []
+        for ln in full.split('\n'):
+            if '|' not in ln:
+                out.append(ln)
+                continue
+            id_part = ln.split('|', 1)[0].strip()
+            if id_part in edited:
+                out.append(edited[id_part])
+            else:
+                out.append(ln)
+        return '\n'.join(out)
+
+    def _save_side_edits_to_full(self) -> None:
+        """把目前 side_extracted / side_ai 的內容（可能含使用者編輯）依 ID
+        合併回 _side_extracted_full / _side_ai_full。在切換顯示範圍與重新套用
+        前都必須先呼叫，否則使用者剛輸入的修改會在 setPlainText 時消失。"""
+        if not getattr(self, "side_extracted", None):
+            return
+        self._side_extracted_full = self._merge_filtered_into_full(
+            self._side_extracted_full,
+            self.side_extracted.toPlainText())
+        self._side_ai_full = self._merge_filtered_into_full(
+            self._side_ai_full,
+            self.side_ai.toPlainText())
+
+    def _refresh_side_panels_to_visible(self, *, force: bool = False) -> None:
+        """依當前編輯器可視範圍重設 side_extracted / side_ai 顯示內容。
+        範圍與上次相同則不動（避免捲動時不必要地重設選取/位置）。"""
+        if not getattr(self, "side_extracted", None):
+            return
+        lo, hi = self._get_visible_line_range()
+        if not force and self._side_visible_range == (lo, hi):
+            return
+        # 切換範圍前先把現有編輯保存回 _full，避免 setPlainText 蓋掉
+        if self._side_visible_range is not None:
+            self._save_side_edits_to_full()
+        self._side_visible_range = (lo, hi)
+        self.side_extracted.setPlainText(
+            self._filter_text_by_line_range(self._side_extracted_full, lo, hi))
+        self.side_ai.setPlainText(
+            self._filter_text_by_line_range(self._side_ai_full, lo, hi))
 
     def _get_visible_top_line(self) -> int:
         """回傳目前可編輯 widget 的可視範圍最上方那行的 0-based 行索引。
@@ -1722,24 +1828,11 @@ class EditWindow(QMainWindow):
         self._sync_side_panels_to_line(sel_block + 1, select=True)
 
     def _on_editor_scrolled(self) -> None:
-        """編輯器捲動：若勾選自動捲動、面板開啟、且**目前無選取**，
-        把面板捲到可視中心行對應的列（不改選取，避免覆蓋使用者選取）。
-        """
+        """編輯器捲動：面板開啟時，重新依當前可視範圍過濾 side_extracted /
+        side_ai 顯示內容（無論自動捲動勾選與否，這是面板的基本顯示規則）。"""
         if not self._translate_side.isVisible():
             return
-        if not getattr(self, "side_auto_scroll_cb", None):
-            return
-        if not self.side_auto_scroll_cb.isChecked():
-            return
-        target = self._active_edit_widget()
-        if target.textCursor().hasSelection():
-            return  # 有選取時不跟動，讓選取對齊行保持在視野中
-        vp_h = target.viewport().height()
-        if vp_h <= 0:
-            return
-        center_cursor = target.cursorForPosition(QPoint(0, vp_h // 2))
-        line_1based = center_cursor.blockNumber() + 1
-        self._sync_side_panels_to_line(line_1based, select=False)
+        self._refresh_side_panels_to_visible()
 
     def _reapply_below_visible(self) -> None:
         """以目前 side_extracted / side_ai 內容重跑 apply_translation，
@@ -1758,8 +1851,13 @@ class EditWindow(QMainWindow):
         if self._preview_active:
             self._sync_preview_to_editor()
 
-        new_extracted = self.side_extracted.toPlainText()
-        new_ai = self.side_ai.toPlainText()
+        # 先把目前可視範圍的編輯（side_extracted / side_ai）合回 _full，
+        # 再以 _full 為完整資料源重跑 apply_translation；這樣可視範圍以外的
+        # 行（沒在面板顯示）仍能保留原本的提取/翻譯內容，重套用結果不會
+        # 把那些行的翻譯打回原文。
+        self._save_side_edits_to_full()
+        new_extracted = self._side_extracted_full
+        new_ai = self._side_ai_full
         if not new_extracted.strip() or not new_ai.strip():
             self._set_status("⚠️ 提取結果或翻譯為空", "#ffc107")
             return
@@ -1906,7 +2004,13 @@ class EditWindow(QMainWindow):
         if self._extract_regex_provider is None:
             self._set_status("⚠️ 無法取得提取正則設定", "#ffc107")
             return
-        base_re, invalid_re, symbol_re, filter_str = self._extract_regex_provider()
+        provided = self._extract_regex_provider()
+        # 向後相容：舊呼叫端可能只回傳 4 元素（無 korean_mode）
+        if len(provided) >= 5:
+            base_re, invalid_re, symbol_re, filter_str, korean_mode = provided[:5]
+        else:
+            base_re, invalid_re, symbol_re, filter_str = provided
+            korean_mode = False
 
         extracted_set = _extract_text(
             selected,
@@ -1914,6 +2018,7 @@ class EditWindow(QMainWindow):
             invalid_re,
             symbol_re,
             (filter_str or "").strip(),
+            korean_mode=korean_mode,
         )
         if not extracted_set:
             self._set_status("ℹ️ 選取範圍內未提取到日文", "#ffc107")

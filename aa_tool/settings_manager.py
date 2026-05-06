@@ -134,6 +134,8 @@ class AppCache:
     # - side_auto_scroll：「自動捲動」勾選框狀態
     side_panel_width: int = 0
     side_auto_scroll: bool = False
+    # 韓文提取模式：開啟後 base_regex 改用 DEFAULT_BASE_REGEX_KO
+    korean_mode: bool = False
 
 
 class SettingsManager:
@@ -297,6 +299,8 @@ class SettingsManager:
                 pass
             cache.side_auto_scroll = bool(data.get(
                 'side_auto_scroll', cache.side_auto_scroll))
+            cache.korean_mode = bool(data.get(
+                'korean_mode', cache.korean_mode))
         except Exception as e:
             print("Cache load failed:", e)
         return cache
@@ -362,6 +366,7 @@ class SettingsManager:
                 'embed_font_name': cache.embed_font_name,
                 'side_panel_width': cache.side_panel_width,
                 'side_auto_scroll': cache.side_auto_scroll,
+                'korean_mode': cache.korean_mode,
             }
             self._atomic_write_json(cache_file, data)
 

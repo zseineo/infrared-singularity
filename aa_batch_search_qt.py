@@ -16,7 +16,7 @@ import sys
 import threading
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont, QFontMetrics
+from PyQt6.QtGui import QFont, QFontMetrics, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QScrollArea,
@@ -53,6 +53,7 @@ class BatchSearchWindow(QMainWindow):
                  on_open_file=None,       # (file_path, line, folder) -> None
                  on_folder_change=None,   # (folder) -> None
                  on_add_to_glossary=None, # (a, b) -> None
+                 on_back=None,            # () -> None，ESC 返回首頁
                  glossary_auto_search: bool = True):
         super().__init__()
         self.setWindowTitle("AA 批次搜尋")
@@ -61,6 +62,7 @@ class BatchSearchWindow(QMainWindow):
         self._on_open_file = on_open_file
         self._on_folder_change = on_folder_change
         self._on_add_to_glossary = on_add_to_glossary
+        self._on_back = on_back
         self._cmd_file = cmd_file
         self._reverse_cmd_file = reverse_cmd_file
         self.glossary_auto_search: bool = glossary_auto_search
@@ -83,6 +85,11 @@ class BatchSearchWindow(QMainWindow):
         self._busy: bool = False
 
         self._build_ui()
+
+        if self._on_back:
+            esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+            esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            esc.activated.connect(self._on_back)
 
         if folder:
             self.folder_entry.setText(folder)

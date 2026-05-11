@@ -18,3 +18,4 @@ fonts/
 *.code-workspace
 HTML_Python_Feature_Checklist.md
 CLAUDE.md
+testcase/

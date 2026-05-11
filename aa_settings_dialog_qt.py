@@ -59,6 +59,8 @@ class SettingsDialog(QDialog):
         embed_font_name: str,
         editor_default_wysiwyg: bool,
         korean_mode: bool,
+        experimental_extraction: bool,
+        glossary_translation_only: bool,
         orig_cache_path: str,
         on_apply: Callable[[dict], None],
     ) -> None:
@@ -71,14 +73,16 @@ class SettingsDialog(QDialog):
         self._build_ui(auto_copy, work_history_limit, fetch_history_limit,
                        original_cache_limit, glossary_auto_search,
                        diff_save_mode, embed_font_in_html, embed_font_name,
-                       editor_default_wysiwyg, korean_mode)
+                       editor_default_wysiwyg, korean_mode,
+                       experimental_extraction, glossary_translation_only)
         self._refresh_cache_size()
 
     def _build_ui(self, auto_copy: bool, wh_limit: int, fh_limit: int,
                   oc_limit: int, glossary_auto_search: bool,
                   diff_save_mode: bool, embed_font_in_html: bool,
                   embed_font_name: str, editor_default_wysiwyg: bool,
-                  korean_mode: bool) -> None:
+                  korean_mode: bool, experimental_extraction: bool,
+                  glossary_translation_only: bool) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(10)
@@ -97,10 +101,31 @@ class SettingsDialog(QDialog):
             "AA_Settings.json 中的 base_regex（日文版）將被略過，其他流程不變。")
         root.addWidget(self.korean_mode_cb)
 
+        self.experimental_extraction_cb = QCheckBox(
+            "🧪 實驗性日文提取演算法（錨點掃描＋分數制過濾）")
+        self.experimental_extraction_cb.setFont(_ui_font(12))
+        self.experimental_extraction_cb.setChecked(experimental_extraction)
+        self.experimental_extraction_cb.setToolTip(
+            "實驗性功能：以「連續假名／助詞」為錨點向兩側擴展取出候選，\n"
+            "再依「日文文本可能性分數」（連續假名 / 助詞 / 局部 AA 噪聲密度）過濾。\n"
+            "目的：減少 AA 圖中夾雜少量合法字元時被誤提取的情況（如 rf7父く三）。\n"
+            "關閉時走原有 chunk-by-2-spaces + base_regex 路徑（韓文模式不受此選項影響）。")
+        root.addWidget(self.experimental_extraction_cb)
+
         self.glossary_auto_search_cb = QCheckBox("批次搜尋：點擊術語按鈕時自動搜尋")
         self.glossary_auto_search_cb.setFont(_ui_font(12))
         self.glossary_auto_search_cb.setChecked(glossary_auto_search)
         root.addWidget(self.glossary_auto_search_cb)
+
+        self.glossary_translation_only_cb = QCheckBox(
+            "套用翻譯時：術語表只套用於譯文部分")
+        self.glossary_translation_only_cb.setFont(_ui_font(12))
+        self.glossary_translation_only_cb.setChecked(glossary_translation_only)
+        self.glossary_translation_only_cb.setToolTip(
+            "開啟後，「替換翻譯／加入翻譯」執行時，術語表僅套用於 AI 翻譯文部分；\n"
+            "原文中未被提取出的區域（AA 圖、空行等）不會再被全域掃描替換。\n"
+            "關閉時（預設）會於整份文本最後再做一輪全域 glossary 套用。")
+        root.addWidget(self.glossary_translation_only_cb)
 
         self.diff_save_mode_cb = QCheckBox("儲存設定時僅合併差異")
         self.diff_save_mode_cb.setFont(_ui_font(12))
@@ -262,6 +287,10 @@ class SettingsDialog(QDialog):
             'editor_default_wysiwyg':
                 self.editor_default_wysiwyg_cb.isChecked(),
             'korean_mode': self.korean_mode_cb.isChecked(),
+            'experimental_extraction':
+                self.experimental_extraction_cb.isChecked(),
+            'glossary_translation_only':
+                self.glossary_translation_only_cb.isChecked(),
         }
         try:
             self._on_apply(values)

@@ -123,6 +123,7 @@ class AppCache:
     fetch_history_limit: int = 50
     original_cache_limit: int = 50
     glossary_auto_search: bool = True
+    glossary_translation_only: bool = False
     diff_save_mode: bool = False
     editor_default_wysiwyg: bool = False
     # 另存新檔時是否把字型 Base64 內嵌到 <head>（離線手機可正確顯示，
@@ -136,6 +137,11 @@ class AppCache:
     side_auto_scroll: bool = False
     # 韓文提取模式：開啟後 base_regex 改用 DEFAULT_BASE_REGEX_KO
     korean_mode: bool = False
+    # 實驗性日文提取演算法：錨點掃描 + 邊界擴展 + 分數制過濾。
+    # 目的：減少 AA 圖中夾雜少量合法字元時的誤提取。預設關閉，由設定 dialog 切換。
+    experimental_extraction: bool = False
+    # 「補空白」按鈕在每個字元之間插入的全形空白數量（1~3）。
+    pad_space_count: int = 2
 
 
 class SettingsManager:
@@ -284,6 +290,8 @@ class SettingsManager:
                 pass
             cache.glossary_auto_search = bool(data.get(
                 'glossary_auto_search', cache.glossary_auto_search))
+            cache.glossary_translation_only = bool(data.get(
+                'glossary_translation_only', cache.glossary_translation_only))
             cache.diff_save_mode = bool(data.get(
                 'diff_save_mode', cache.diff_save_mode))
             cache.embed_font_in_html = bool(data.get(
@@ -301,6 +309,14 @@ class SettingsManager:
                 'side_auto_scroll', cache.side_auto_scroll))
             cache.korean_mode = bool(data.get(
                 'korean_mode', cache.korean_mode))
+            cache.experimental_extraction = bool(data.get(
+                'experimental_extraction', cache.experimental_extraction))
+            try:
+                v = int(data.get('pad_space_count', cache.pad_space_count))
+                if v in (1, 2, 3):
+                    cache.pad_space_count = v
+            except (TypeError, ValueError):
+                pass
         except Exception as e:
             print("Cache load failed:", e)
         return cache
@@ -360,6 +376,7 @@ class SettingsManager:
                 'fetch_history_limit': cache.fetch_history_limit,
                 'original_cache_limit': cache.original_cache_limit,
                 'glossary_auto_search': cache.glossary_auto_search,
+                'glossary_translation_only': cache.glossary_translation_only,
                 'diff_save_mode': cache.diff_save_mode,
                 'embed_font_in_html': cache.embed_font_in_html,
                 'editor_default_wysiwyg': cache.editor_default_wysiwyg,
@@ -367,6 +384,8 @@ class SettingsManager:
                 'side_panel_width': cache.side_panel_width,
                 'side_auto_scroll': cache.side_auto_scroll,
                 'korean_mode': cache.korean_mode,
+                'experimental_extraction': cache.experimental_extraction,
+                'pad_space_count': cache.pad_space_count,
             }
             self._atomic_write_json(cache_file, data)
 

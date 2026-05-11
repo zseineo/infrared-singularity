@@ -325,7 +325,7 @@ def _parse_default(page_html: str, base_url: str, *, author_name: str = "", auth
         return None, [], ""
 
     start = m.start()
-    m_relate = re.search(r'<dl\s+class="relate_dl">', page_html[start + 1:])
+    m_relate = re.search(r'<dl\s+class="relate_dl[^"]*">', page_html[start + 1:])
     m2 = re.search(r'<div\s+class="article">', page_html[start + 1:])
     candidates = []
     if m_relate:
@@ -336,7 +336,36 @@ def _parse_default(page_html: str, base_url: str, *, author_name: str = "", auth
     article_html = page_html[start:end]
 
     lines_out = _extract_dt_dd_posts(article_html, author_name=author_name, author_only=author_only)
-    text_content = '\n\n'.join(lines_out)
+    text_content = '\n\n'.join(lines_out) if lines_out else ""
+
+    # ── 平面 <span class="aa"> 變體 fallback（無 dt/dd 結構）──
+    # 例：burakio002.blog97.fc2.com — 內文塞在多個 <span class="aa"> 內，
+    # 以 <br> 分行、貼文之間以 <hr> + 新的 span 分隔；標頭「N 名前：…」
+    # 直接寫在內文中。僅在 dt/dd 抽取失敗時啟用。
+    if not text_content:
+        flat = article_html
+        flat = re.sub(r'<script\b.*?</script>', '', flat, flags=re.DOTALL | re.IGNORECASE)
+        flat = re.sub(r'<table\b.*?</table>', '', flat, flags=re.DOTALL | re.IGNORECASE)
+        flat = re.sub(r'<a\s[^>]*>.*?</a>', '', flat, flags=re.DOTALL | re.IGNORECASE)
+        flat = re.sub(r'<hr\b[^>]*/?>', '\n', flat, flags=re.IGNORECASE)
+        flat = re.sub(r'<br\s*/?>', '\n', flat)
+        flat = _strip_tags_keep_color(flat)
+        flat = html.unescape(flat)
+        if author_name or author_only:
+            flat = _filter_color_by_author(flat, author_name, author_only=author_only)
+        else:
+            flat = re.sub(r'<span\s+style="color:[^"]*">|</span>', '', flat)
+        # 多個 span/hr 邊界會堆出 3+ 連續換行，壓回最多一行空白
+        flat = re.sub(r'\n{3,}', '\n\n', flat)
+        out_lines = flat.split('\n')
+        while out_lines and not out_lines[0].strip():
+            out_lines.pop(0)
+        while out_lines and not out_lines[-1].strip():
+            out_lines.pop()
+        # 安全閥：確認存在貼文標頭行才採用，避免把 cruft 當內文
+        if out_lines and any(_POST_HEADER_RE.search(_COLOR_SPAN_RE.sub('', ln))
+                             for ln in out_lines):
+            text_content = '\n'.join(out_lines)
 
     # 頁面標題
     title_m = re.search(r'<title>([^<]+)</title>', page_html)

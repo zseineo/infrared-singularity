@@ -171,6 +171,10 @@ class EditWindow(QMainWindow):
         init_side_panel_width: int = 0,   # Alt+4 面板寬度（px，0=預設）
         init_side_auto_scroll: bool = False,  # Alt+4 面板「自動捲動」初始狀態
         on_side_state_change=None,  # (width: int|None, auto_scroll: bool|None) -> None
+        init_pad_count: int = 2,  # 「補空白」每字之間插入的全形空白數（1~3）
+        on_pad_count_change=None,  # (count: int) -> None
+        default_wysiwyg_provider=None,  # () -> bool；對應主程式「進入編輯器時預設 WYSIWYG」設定
+        translation_only_provider=None,  # () -> bool；對應主程式「術語表只套用於譯文部分」設定
     ) -> None:
         super().__init__()
         self._html_file = html_file
@@ -201,12 +205,26 @@ class EditWindow(QMainWindow):
         self._init_side_panel_width = int(init_side_panel_width or 0)
         self._init_side_auto_scroll = bool(init_side_auto_scroll)
         self._on_side_state_change = on_side_state_change
+        try:
+            ipc = int(init_pad_count)
+        except (TypeError, ValueError):
+            ipc = 2
+        self._pad_space_count = ipc if ipc in (1, 2, 3) else 2
+        self._on_pad_count_change = on_pad_count_change
+        self._default_wysiwyg_provider = default_wysiwyg_provider
+        self._translation_only_provider = translation_only_provider
 
         # Alt+4 局部重套用：保留 provider 取得的「完整」提取結果與翻譯文字，
         # 而 side_extracted / side_ai 只顯示當前編輯器可視範圍對應的行。
         # 重新套用與編輯器捲動切換顯示範圍時都以 _full 為單一資料來源。
         self._side_extracted_full = ""
         self._side_ai_full = ""
+        # 開啟面板當下 provider 回傳的原始內容快照（baseline）；重新套用時
+        # 用 baseline 跑一次 apply_translation 與用編輯後 _full 跑的結果
+        # 逐行比對，只有「真正被側欄編輯影響的行」會覆蓋編輯器，其他行
+        # 維持編輯器現狀（保留使用者直接在編輯器中做的修改）。
+        self._side_extracted_baseline = ""
+        self._side_ai_baseline = ""
         # 上次套到面板的可視範圍 (lo, hi) 1-based source 行號；用於避免捲動時
         # 範圍未變仍重設 setPlainText 把使用者選取/捲動位置打掉。
         self._side_visible_range: tuple[int, int] | None = None
@@ -278,6 +296,9 @@ class EditWindow(QMainWindow):
         self.editor = QTextEdit()
         self.editor.setAcceptRichText(False)
         self.editor.setPlainText(text)
+        # 清除「空 → 初始內容」這條 undo entry，避免使用者一打開檔案按 Ctrl+Z
+        # 整份文字被還原成空白。從這之後使用者的編輯才開始記錄。
+        self.editor.document().clearUndoRedoStacks()
         self.editor.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.editor.setTabChangesFocus(False)
         self.editor.setFont(aa_font)
@@ -289,6 +310,7 @@ class EditWindow(QMainWindow):
         self.orig_view.setFont(aa_font)
         if self._original_text is not None:
             self.orig_view.setPlainText(self._original_text)
+            self.orig_view.document().clearUndoRedoStacks()
             self._apply_line_height_to(self.orig_view)
 
         self.preview_view = QTextEdit()
@@ -350,9 +372,9 @@ class EditWindow(QMainWindow):
         QShortcut(QKeySequence("Alt+1"), self,
                   activated=self._return_to_editor)
         QShortcut(QKeySequence("Alt+2"), self,
-                  activated=self._toggle_compare)
+                  activated=self._enter_compare_mode)
         QShortcut(QKeySequence("Alt+3"), self,
-                  activated=self._toggle_preview)
+                  activated=self._enter_preview_mode)
         QShortcut(QKeySequence("Alt+4"), self,
                   activated=self._toggle_translate_side)
         QShortcut(QKeySequence("Alt+E"), self,
@@ -433,22 +455,17 @@ class EditWindow(QMainWindow):
         btn_pad.clicked.connect(self._pad_spaces)
         tb.addWidget(btn_pad)
 
+        self._pad_count_combo = QComboBox()
+        self._pad_count_combo.addItems(["1", "2", "3"])
+        self._pad_count_combo.setCurrentText(str(self._pad_space_count))
+        self._pad_count_combo.setFixedWidth(46)
+        self._pad_count_combo.setToolTip("補空白：每字之間插入幾個全形空白")
+        self._pad_count_combo.currentTextChanged.connect(self._on_pad_count_changed)
+        tb.addWidget(self._pad_count_combo)
+
         tb.addSpacing(10)
 
-        # Group 3: 對話框工具
-        btn_bubble = _make_button("對話框修正", "#28a745", "#218838", width=85)
-        btn_bubble.clicked.connect(self._adjust_bubble)
-        tb.addWidget(btn_bubble)
-
-        btn_align = _make_button("對齊上一行", "#17a2b8", "#138496", width=85)
-        btn_align.clicked.connect(self._align_to_prev)
-        tb.addWidget(btn_align)
-
-        btn_smart = _make_button("自動判斷", "#e67e22", "#d35400", width=75)
-        btn_smart.clicked.connect(self._smart_action)
-        btn_smart.setToolTip("Alt+Q：依選取狀態自動執行對話框修正/上色/對齊")
-        tb.addWidget(btn_smart)
-
+        # Group 3: 對話框工具（對話框修正／對齊上一行／自動判斷已移除按鈕，改由 Alt+Q 觸發）
         btn_bubble_all = _make_button("對話框(全)", "#20c997", "#17a085", width=85)
         btn_bubble_all.clicked.connect(self._adjust_all_bubbles)
         tb.addWidget(btn_bubble_all)
@@ -456,8 +473,8 @@ class EditWindow(QMainWindow):
         # 比對模式時需要 disable 的控制項
         self._edit_buttons.extend([
             self.quick_orig, self.quick_trans, btn_exec, btn_reapply,
-            btn_strip, btn_pad,
-            btn_bubble, btn_align, btn_smart, btn_bubble_all,
+            btn_strip, btn_pad, self._pad_count_combo,
+            btn_bubble_all,
         ])
         # WYSIWYG 模式（Alt+3 編輯預覽）下仍可使用的「上色」相關控制項
         # 與 _edit_buttons 互斥：在 _set_preview_ui 時，只有這組保持 enabled。
@@ -630,10 +647,14 @@ class EditWindow(QMainWindow):
             self._on_back()
 
     def _on_escape(self) -> None:
-        """ESC 行為：搜尋列開啟時優先關閉；否則執行返回（或關閉視窗）。
+        """ESC 行為：Alt+4 局部面板開啟時優先關閉，其次關閉搜尋列；
+        否則執行返回（或關閉視窗）。
 
         若目前在 WYSIWYG 模式，先把編輯成果序列化回 editor 再返回，避免遺失。
         """
+        if self._translate_side.isVisible():
+            self._toggle_translate_side()
+            return
         if self.search_bar.isVisible():
             self._hide_search()
             return
@@ -753,12 +774,22 @@ class EditWindow(QMainWindow):
         # 1) 先把字型寫到 widget 與 document 兩層
         widget.setFont(font)
         widget.document().setDefaultFont(font)
-        # 2) 重新載入：每個字元的 charFormat 會以新 defaultFont 為基準重建。
-        #    用 blockSignals 抑制 setPlainText 觸發 textChanged → _on_changed
-        #    把 _dirty 標起來（換字型不該被當成編輯）。
+        # 2) 重新載入：每個字元的 charFormat 以新字型重建。
+        #    改用 cursor.beginEditBlock + select(Document) + insertText(text, fmt)：
+        #    - 帶入明確的 charFormat(font) 取代每個字元殘留的 explicit FontFamily，
+        #      與舊版 setPlainText 的視覺結果等價（保證切字型確實生效）。
+        #    - 整段刪除 + 插入合併為**單一 undo entry**，避免使用者按 Ctrl+Z
+        #      時先看到「全空白」中介狀態，再多按一次才回到原文字。
+        #    blockSignals 仍用於抑制 textChanged → _on_changed 把 _dirty 標起來。
+        fmt = QTextCharFormat()
+        fmt.setFont(font)
         widget.blockSignals(True)
         try:
-            widget.setPlainText(text)
+            cursor = widget.textCursor()
+            cursor.beginEditBlock()
+            cursor.select(QTextCursor.SelectionType.Document)
+            cursor.insertText(text, fmt)
+            cursor.endEditBlock()
         finally:
             widget.blockSignals(False)
         # 3) 還原游標位置與捲動
@@ -1025,10 +1056,25 @@ class EditWindow(QMainWindow):
             return
         selected = cursor.selectedText().replace('\u2029', '\n')
         lines = selected.split('\n')
-        padded_lines = ["　　".join(list(line)) for line in lines]
+        sep = "　" * self._pad_space_count
+        padded_lines = [sep.join(list(line)) for line in lines]
         padded = '\n'.join(padded_lines)
         cursor.insertText(padded)
-        self._set_status("已補入全形空白", "#0f0")
+        self._set_status(f"已補入全形空白 × {self._pad_space_count}", "#0f0")
+
+    def _on_pad_count_changed(self, text: str) -> None:
+        try:
+            n = int(text)
+        except (TypeError, ValueError):
+            return
+        if n not in (1, 2, 3):
+            return
+        self._pad_space_count = n
+        if self._on_pad_count_change is not None:
+            try:
+                self._on_pad_count_change(n)
+            except Exception:
+                pass
 
     # ════════════════════════════════════════════════════════════
     #  對話框工具（Phase C）
@@ -1494,12 +1540,13 @@ class EditWindow(QMainWindow):
         btn_reapply = _make_button("重新套用", "#28a745", "#218838", width=85)
         btn_reapply.setToolTip(
             "用右側「提取結果」與「填入翻譯」重新跑替換；\n"
-            "**只覆蓋目前可視行以下**的內容，可視行以上維持現狀。")
+            "只更新「側欄相對開啟時實際被編輯到的行」，\n"
+            "其他行維持編輯器現狀（包括使用者直接在編輯器中做的修改）。")
         btn_reapply.clicked.connect(self._reapply_below_visible)
         head.addWidget(btn_reapply)
         vl.addLayout(head)
 
-        hint = QLabel("下方兩欄只顯示當前編輯器可視範圍對應的行；可編輯後按「重新套用」覆蓋當前行以下")
+        hint = QLabel("下方兩欄只顯示當前編輯器可視範圍對應的行；可編輯後按「重新套用」只更新被改到的行")
         hint.setFont(QFont("MS UI Gothic", 9))
         hint.setStyleSheet("color:#888;")
         hint.setWordWrap(True)
@@ -1597,10 +1644,14 @@ class EditWindow(QMainWindow):
 
         # 開啟前先用 provider 拉最新內容；保留為 _full，面板顯示由
         # _refresh_side_panels_to_visible() 依當前編輯器可視範圍過濾。
+        # 同時把這份原始內容存為 baseline，重新套用時與編輯後 _full 比對
+        # 找出真正被側欄編輯影響的行。
         if self._extracted_provider is not None:
             self._side_extracted_full = self._extracted_provider() or ""
         if self._translation_provider is not None:
             self._side_ai_full = self._translation_provider() or ""
+        self._side_extracted_baseline = self._side_extracted_full
+        self._side_ai_baseline = self._side_ai_full
         # 強制重設範圍快取，確保 refresh 一定會 setPlainText
         self._side_visible_range = None
 
@@ -1692,18 +1743,83 @@ class EditWindow(QMainWindow):
                 out.append(ln)
         return '\n'.join(out)
 
+    def _merge_visible_range_into_full(
+        self, full: str, filtered: str, lo: int, hi: int
+    ) -> str:
+        """以 filtered 的內容覆蓋 full 中可視範圍 [lo, hi] 的所有列（依 ID 的 NNN
+        判定是否屬於可視範圍）。可視範圍以外的列保留 full 原樣。
+
+        相較於 `_merge_filtered_into_full` 的純 ID-based 合併，這個版本支援使用者
+        在側欄**修改 ID**（包括把 ID 改到可視範圍以外）：
+        - filtered 中的列以**整批替換**方式取代原可視範圍的列。
+        - filtered 中新出現的 ID（包含原 ID 改成新值）會落在原可視範圍位置；
+          落在範圍外的 ID 對 apply_translation 仍生效（後者用 dict 查 ID，與行序無關）。
+        - filtered 中遺漏的 ID（使用者刪除整列）也會在 _full 中被刪除。
+
+        filtered 中空行 / 無 ID 的行會被忽略（與面板顯示同步：面板只列有 ID 的列）。
+        """
+        out: list[str] = []
+        inserted = False
+
+        def _emit_filtered() -> None:
+            for fln in filtered.split('\n'):
+                if '|' not in fln:
+                    continue
+                if not fln.split('|', 1)[0].strip():
+                    continue
+                out.append(fln)
+
+        for ln in full.split('\n'):
+            in_range = False
+            if '|' in ln:
+                id_part = ln.split('|', 1)[0].strip()
+                try:
+                    id_line = int(id_part.split('-')[0])
+                    in_range = lo <= id_line <= hi
+                except ValueError:
+                    pass
+            if in_range:
+                if not inserted:
+                    _emit_filtered()
+                    inserted = True
+                # 跳過原可視範圍的列
+            else:
+                out.append(ln)
+        if not inserted:
+            # full 在可視範圍內沒有任何列：把 filtered 全部追加到末端
+            _emit_filtered()
+        return '\n'.join(out)
+
     def _save_side_edits_to_full(self) -> None:
-        """把目前 side_extracted / side_ai 的內容（可能含使用者編輯）依 ID
-        合併回 _side_extracted_full / _side_ai_full。在切換顯示範圍與重新套用
-        前都必須先呼叫，否則使用者剛輸入的修改會在 setPlainText 時消失。"""
+        """把目前 side_extracted / side_ai 的內容（可能含使用者編輯）合併回
+        _side_extracted_full / _side_ai_full。在切換顯示範圍與重新套用前都必須
+        先呼叫，否則使用者剛輸入的修改會在 setPlainText 時消失。
+
+        合併策略：
+        - 已知可視範圍 (`_side_visible_range`) 時，走 `_merge_visible_range_into_full`，
+          以「整批替換可視範圍」的方式套用，**支援使用者在側欄修改 ID**（含把 ID
+          改到範圍外、刪除整列）。原本純 ID-based 的合併會因 full 端與 filtered
+          端的 ID 對不上而把 ID 修改靜默丟掉，導致後續 `_reapply_below_visible`
+          被判定為「無變更」並拒絕套用。
+        - 沒有可視範圍紀錄時（罕見邊界，例如面板尚未呈現）退回 ID-based merge。
+        """
         if not getattr(self, "side_extracted", None):
             return
-        self._side_extracted_full = self._merge_filtered_into_full(
+        if self._side_visible_range is None:
+            self._side_extracted_full = self._merge_filtered_into_full(
+                self._side_extracted_full,
+                self.side_extracted.toPlainText())
+            self._side_ai_full = self._merge_filtered_into_full(
+                self._side_ai_full,
+                self.side_ai.toPlainText())
+            return
+        lo, hi = self._side_visible_range
+        self._side_extracted_full = self._merge_visible_range_into_full(
             self._side_extracted_full,
-            self.side_extracted.toPlainText())
-        self._side_ai_full = self._merge_filtered_into_full(
+            self.side_extracted.toPlainText(), lo, hi)
+        self._side_ai_full = self._merge_visible_range_into_full(
             self._side_ai_full,
-            self.side_ai.toPlainText())
+            self.side_ai.toPlainText(), lo, hi)
 
     def _refresh_side_panels_to_visible(self, *, force: bool = False) -> None:
         """依當前編輯器可視範圍重設 side_extracted / side_ai 顯示內容。
@@ -1721,16 +1837,6 @@ class EditWindow(QMainWindow):
             self._filter_text_by_line_range(self._side_extracted_full, lo, hi))
         self.side_ai.setPlainText(
             self._filter_text_by_line_range(self._side_ai_full, lo, hi))
-
-    def _get_visible_top_line(self) -> int:
-        """回傳目前可編輯 widget 的可視範圍最上方那行的 0-based 行索引。
-
-        WYSIWYG 模式以 preview_view 為基準（使用者實際看到的視圖）；
-        一般模式以 editor 為基準。
-        """
-        target = self._active_edit_widget()
-        cursor = target.cursorForPosition(QPoint(0, 0))
-        return cursor.blockNumber()
 
     def _sync_side_panels_to_line(
         self, line_1based: int, *, select: bool
@@ -1835,12 +1941,20 @@ class EditWindow(QMainWindow):
         self._refresh_side_panels_to_visible()
 
     def _reapply_below_visible(self) -> None:
-        """以目前 side_extracted / side_ai 內容重跑 apply_translation，
-        但**只覆蓋目前可視行以下**的部分；可視行以上維持現狀。
+        """重新套用：以「baseline vs. 編輯後」的逐行差異套用到編輯器。
 
-        WYSIWYG 模式：先 sync 把 markup 還原回 editor，使用 editor 的行作為
-        merge 來源；merge 完寫回 editor 後再 _wysiwyg_rerender_after_editor_change
-        重建 preview，讓使用者看到的彩色檢視即時反映新內容。
+        流程：
+        1. 把當前可視範圍的側欄編輯合回 `_side_extracted_full` / `_side_ai_full`。
+        2. 用 `_baseline`（面板開啟當下 provider 給的原始內容）跑一次
+           `apply_translation` 取得 `baseline_full`。
+        3. 用編輯後 `_full` 再跑一次取得 `new_full`。
+        4. 逐行比較 baseline_full vs new_full：
+           - 兩者相同 → 該行未受側欄編輯影響，保留 `editor[i]`（使用者直接在
+             編輯器中做的修改不會被打掉）。
+           - 兩者不同 → 該行因側欄編輯而改變，採用 `new_full[i]`。
+        WYSIWYG 模式：先 `_sync_preview_to_editor()` 把 markup 還原回 editor，
+        merge 完寫回 editor 後再 `_wysiwyg_rerender_after_editor_change()` 重建
+        彩色檢視。
         """
         if self._compare_active:
             self._set_status("⚠️ 請先回到編輯模式（Alt+1）", "#ffc107")
@@ -1851,10 +1965,6 @@ class EditWindow(QMainWindow):
         if self._preview_active:
             self._sync_preview_to_editor()
 
-        # 先把目前可視範圍的編輯（side_extracted / side_ai）合回 _full，
-        # 再以 _full 為完整資料源重跑 apply_translation；這樣可視範圍以外的
-        # 行（沒在面板顯示）仍能保留原本的提取/翻譯內容，重套用結果不會
-        # 把那些行的翻譯打回原文。
         self._save_side_edits_to_full()
         new_extracted = self._side_extracted_full
         new_ai = self._side_ai_full
@@ -1870,24 +1980,44 @@ class EditWindow(QMainWindow):
                 glossary_str = ""
         glossary = parse_glossary(glossary_str)
 
+        translation_only = False
+        if self._translation_only_provider is not None:
+            try:
+                translation_only = bool(self._translation_only_provider())
+            except Exception:
+                translation_only = False
+
         try:
+            baseline_full = apply_translation(
+                self._original_text,
+                self._side_extracted_baseline,
+                self._side_ai_baseline,
+                glossary,
+                translation_only=translation_only)
             new_full = apply_translation(
-                self._original_text, new_extracted, new_ai, glossary)
+                self._original_text, new_extracted, new_ai, glossary,
+                translation_only=translation_only)
         except Exception as e:
             self._set_status(f"❌ 套用失敗：{e}", "#dc3545")
             return
 
-        # 合併：保留 0..top_line-1（使用者已編輯的部分），top_line..end 用新結果
-        top_line = self._get_visible_top_line()
-        old_lines = self.editor.toPlainText().split('\n')
+        editor_lines = self.editor.toPlainText().split('\n')
+        baseline_lines = baseline_full.split('\n')
         new_lines = new_full.split('\n')
-        if top_line < 0:
-            top_line = 0
-        if top_line > len(old_lines):
-            top_line = len(old_lines)
-        if top_line > len(new_lines):
-            top_line = len(new_lines)
-        merged = old_lines[:top_line] + new_lines[top_line:]
+        # 三邊行數理論上同步（apply_translation 與 source 行數一致），
+        # 取最長以防意外，缺的部分以空字串補齊。
+        n = max(len(editor_lines), len(baseline_lines), len(new_lines))
+        merged: list[str] = []
+        affected = 0
+        for i in range(n):
+            ed = editor_lines[i] if i < len(editor_lines) else ""
+            base = baseline_lines[i] if i < len(baseline_lines) else ""
+            new = new_lines[i] if i < len(new_lines) else ""
+            if base != new:
+                merged.append(new)
+                affected += 1
+            else:
+                merged.append(ed)
         merged_text = '\n'.join(merged)
 
         # 保留捲動位置
@@ -1896,7 +2026,9 @@ class EditWindow(QMainWindow):
         self.editor.verticalScrollBar().setValue(scroll_val)
         self._wysiwyg_rerender_after_editor_change()
 
-        # 套用後寫回主面板（讓使用者下次回到主畫面看到的是修改過的版本）
+        # 套用後寫回主面板（讓使用者下次回到主畫面看到的是修改過的版本），
+        # 並把 baseline 推進到當前 _full，使後續再按一次重新套用時
+        # 不會把同一批改動誤判為「未變」。
         if self._extracted_setter is not None:
             try:
                 self._extracted_setter(new_extracted)
@@ -1907,10 +2039,14 @@ class EditWindow(QMainWindow):
                 self._translation_setter(new_ai)
             except Exception:
                 pass
+        self._side_extracted_baseline = new_extracted
+        self._side_ai_baseline = new_ai
 
-        affected = len(new_lines) - top_line
-        self._set_status(
-            f"✅ 已重新套用（覆蓋第 {top_line + 1} 行起共 {affected} 行）", "#0f0")
+        if affected == 0:
+            self._set_status("ℹ️ 沒有檢出變更，未修改編輯器", "#17a2b8")
+        else:
+            self._set_status(
+                f"✅ 已重新套用（更新 {affected} 行，其餘維持編輯器現狀）", "#0f0")
 
     # ════════════════════════════════════════════════════════════
     #  返回編輯模式（Alt+1）
@@ -1924,6 +2060,36 @@ class EditWindow(QMainWindow):
             self._toggle_preview()
         else:
             self.editor.setFocus()
+
+    def _enter_compare_mode(self) -> None:
+        """Alt+2：進入比對模式；若已在比對模式，則依「預設 WYSIWYG」設定離開：
+        - 設定關閉：回到 Alt+1 編輯模式（呼叫 _toggle_compare 退出比對）。
+        - 設定開啟：回到 Alt+3 WYSIWYG 模式（_toggle_compare 已用 _compare_from_preview
+          記住進入前是否在 WYSIWYG，若進入比對前就在 WYSIWYG，離開時自會回去；
+          若進入前在編輯模式但設定要求預設 WYSIWYG，這裡先 _toggle_compare 退出
+          比對到編輯，再呼叫 _toggle_preview 進 WYSIWYG）。
+        """
+        if not self._compare_active:
+            self._toggle_compare()
+            return
+        prefer_wysiwyg = False
+        if self._default_wysiwyg_provider is not None:
+            try:
+                prefer_wysiwyg = bool(self._default_wysiwyg_provider())
+            except Exception:
+                prefer_wysiwyg = False
+        # 退出比對模式（_toggle_compare 內若 _compare_from_preview=True 會自動回 WYSIWYG）
+        self._toggle_compare()
+        # 若退出後仍未進入 WYSIWYG 但設定要求，補一步進入
+        if prefer_wysiwyg and not self._preview_active:
+            self._toggle_preview()
+
+    def _enter_preview_mode(self) -> None:
+        """Alt+3：進入 WYSIWYG 預覽模式；已在預覽模式則不退出（僅 focus）。"""
+        if self._preview_active:
+            self.preview_view.setFocus()
+            return
+        self._toggle_preview()
 
     # ════════════════════════════════════════════════════════════
     #  從原文覆蓋選取範圍（Alt+W）
@@ -2005,8 +2171,12 @@ class EditWindow(QMainWindow):
             self._set_status("⚠️ 無法取得提取正則設定", "#ffc107")
             return
         provided = self._extract_regex_provider()
-        # 向後相容：舊呼叫端可能只回傳 4 元素（無 korean_mode）
-        if len(provided) >= 5:
+        # 向後相容：4 元素（舊）／5 元素（含 korean_mode）／6 元素（含 experimental）
+        experimental = False
+        if len(provided) >= 6:
+            (base_re, invalid_re, symbol_re, filter_str, korean_mode,
+             experimental) = provided[:6]
+        elif len(provided) >= 5:
             base_re, invalid_re, symbol_re, filter_str, korean_mode = provided[:5]
         else:
             base_re, invalid_re, symbol_re, filter_str = provided
@@ -2019,6 +2189,7 @@ class EditWindow(QMainWindow):
             symbol_re,
             (filter_str or "").strip(),
             korean_mode=korean_mode,
+            experimental=experimental,
         )
         if not extracted_set:
             self._set_status("ℹ️ 選取範圍內未提取到日文", "#ffc107")

@@ -62,7 +62,7 @@ from aa_tool.url_fetcher import fetch_url as _fetch_url, parse_page_html as _par
 from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 
-APP_VERSION = "1.13"
+APP_VERSION = "1.20"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -108,6 +108,55 @@ def _make_btn(text: str, color: str, hover: str, *,
     if font:
         btn.setFont(font)
     return btn
+
+
+# ════════════════════════════════════════════════════════════
+#  術語表 QTextEdit（右鍵選單加上「刪除整筆條目」）
+# ════════════════════════════════════════════════════════════
+
+class GlossaryTextEdit(QTextEdit):
+    """術語表專用 QTextEdit；在框選文字後右鍵會出現「刪除整筆條目」項目。
+
+    動作：刪除選取範圍涉及的整行（含換行符），標準 copy/paste 等行為保留。
+    刪除後 textChanged 會觸發既有的 schedule_save，連帶從 AA_Settings.json 移除。
+    """
+
+    def contextMenuEvent(self, event):  # noqa: N802 (Qt 命名)
+        from PyQt6.QtGui import QTextCursor as _TC
+        menu = self.createStandardContextMenu()
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            menu.addSeparator()
+            act = menu.addAction("刪除整筆條目")
+            act.triggered.connect(self._delete_selected_lines)
+        menu.exec(event.globalPos())
+
+    def _delete_selected_lines(self) -> None:
+        from PyQt6.QtGui import QTextCursor as _TC
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        text_len = len(self.toPlainText())
+
+        cursor.setPosition(start)
+        cursor.movePosition(_TC.MoveOperation.StartOfBlock)
+        line_start = cursor.position()
+
+        cursor.setPosition(end)
+        if cursor.positionInBlock() == 0 and end > start:
+            cursor.movePosition(_TC.MoveOperation.Left)
+        cursor.movePosition(_TC.MoveOperation.EndOfBlock)
+        line_end = cursor.position()
+        if line_end < text_len:
+            line_end += 1  # 一併移除行尾換行
+
+        cursor.beginEditBlock()
+        cursor.setPosition(line_start)
+        cursor.setPosition(line_end, _TC.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        cursor.endEditBlock()
 
 
 # ════════════════════════════════════════════════════════════
@@ -367,7 +416,7 @@ class TranslatePanel(QWidget):
         vl.addLayout(search_row)
 
         # 一般術語表
-        self.glossary_text = QTextEdit()
+        self.glossary_text = GlossaryTextEdit()
         self.glossary_text.setFont(_aa_font(13))
         self.glossary_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.glossary_text.setAcceptRichText(False)
@@ -617,6 +666,8 @@ class MainWindow(QMainWindow):
         self.current_invalid_regex = DEFAULT_INVALID_REGEX
         self.current_symbol_regex = DEFAULT_SYMBOL_REGEX
         self._korean_mode: bool = False
+        self._experimental_extraction: bool = False
+        self._glossary_translation_only: bool = False
 
         # ── 應用狀態 ──
         self.url_history: list[dict] = []
@@ -644,6 +695,8 @@ class MainWindow(QMainWindow):
         # 編輯器右側「局部重套用」面板（Alt+4）的持久化狀態
         self._side_panel_width: int = 0
         self._side_auto_scroll: bool = False
+        # 編輯器「補空白」每字之間插入的全形空白數量（1~3）
+        self._pad_space_count: int = 2
         self._save_timer: QTimer | None = None
         self._url_fetch_win = None  # UrlFetchWindow lazy-init（in-process）
         self._saved_glossary_lines = 0
@@ -811,6 +864,7 @@ class MainWindow(QMainWindow):
                     self.current_symbol_regex,
                     self._translate_panel.get_filter_text(),
                     self._korean_mode,
+                    self._experimental_extraction,
                 ),
                 extracted_provider=self._translate_panel.get_extracted_text,
                 translation_provider=self._translate_panel.get_ai_text,
@@ -833,6 +887,10 @@ class MainWindow(QMainWindow):
                 init_side_panel_width=self._side_panel_width,
                 init_side_auto_scroll=self._side_auto_scroll,
                 on_side_state_change=self._on_side_state_changed,
+                init_pad_count=self._pad_space_count,
+                on_pad_count_change=self._on_pad_count_changed,
+                default_wysiwyg_provider=lambda: self._editor_default_wysiwyg,
+                translation_only_provider=lambda: self._glossary_translation_only,
             )
             # 替換 placeholder
             self.stack.removeWidget(self._edit_placeholder)
@@ -992,6 +1050,8 @@ class MainWindow(QMainWindow):
             skip_title=self._last_fetched_title,
             author_name=self._author_name,
             korean_mode=self._korean_mode,
+            experimental=self._experimental_extraction,
+            work_title=self._translate_panel.get_doc_title().strip(),
         )
         single_kana_list = _extract_single_kana(source, filter_text)
         seen = set(extracted_list)
@@ -1124,7 +1184,9 @@ class MainWindow(QMainWindow):
         # （見 _update_ai_match_label），這裡不再跳 Toast。
         glossary = parse_glossary(self._translate_panel.get_combined_glossary())
         result_text = _apply_translation(
-            source, extracted, translated, glossary, append_mode=append_mode)
+            source, extracted, translated, glossary,
+            append_mode=append_mode,
+            translation_only=self._glossary_translation_only)
         title = self._translate_panel.get_doc_title().strip() or "未命名"
         num = self._translate_panel.get_doc_num().strip()
         safe_title = _re_mod.sub(r'[\\/:*?"<>|]', '_', title)
@@ -1277,6 +1339,7 @@ class MainWindow(QMainWindow):
             self.current_symbol_regex,
             self._translate_panel.get_filter_text().strip(),
             korean_mode=self._korean_mode,
+            experimental=self._experimental_extraction,
         )
         dlg = QDialog(self)
         dlg.setWindowTitle("🔧 提取分析 (Debug)")
@@ -1658,6 +1721,9 @@ class MainWindow(QMainWindow):
             side_panel_width=self._side_panel_width,
             side_auto_scroll=self._side_auto_scroll,
             korean_mode=self._korean_mode,
+            experimental_extraction=self._experimental_extraction,
+            glossary_translation_only=self._glossary_translation_only,
+            pad_space_count=self._pad_space_count,
         )
 
     def _apply_cache(self, cache: AppCache) -> None:
@@ -1711,6 +1777,13 @@ class MainWindow(QMainWindow):
             self._side_panel_width = 0
         self._side_auto_scroll = bool(cache.side_auto_scroll)
         self._korean_mode = bool(cache.korean_mode)
+        self._experimental_extraction = bool(cache.experimental_extraction)
+        self._glossary_translation_only = bool(cache.glossary_translation_only)
+        try:
+            v = int(cache.pad_space_count)
+            self._pad_space_count = v if v in (1, 2, 3) else 2
+        except (TypeError, ValueError):
+            self._pad_space_count = 2
 
     def save_cache(self) -> None:
         self.settings_mgr.save_cache(self._gather_cache())
@@ -1733,6 +1806,8 @@ class MainWindow(QMainWindow):
             embed_font_name=self._embed_font_name,
             editor_default_wysiwyg=self._editor_default_wysiwyg,
             korean_mode=self._korean_mode,
+            experimental_extraction=self._experimental_extraction,
+            glossary_translation_only=self._glossary_translation_only,
             orig_cache_path=self._orig_cache_path(),
             on_apply=self._on_settings_applied,
         )
@@ -1758,6 +1833,10 @@ class MainWindow(QMainWindow):
             'editor_default_wysiwyg', self._editor_default_wysiwyg))
         self._korean_mode = bool(values.get(
             'korean_mode', self._korean_mode))
+        self._experimental_extraction = bool(values.get(
+            'experimental_extraction', self._experimental_extraction))
+        self._glossary_translation_only = bool(values.get(
+            'glossary_translation_only', self._glossary_translation_only))
         if self._batch_window is not None:
             self._batch_window.glossary_auto_search = self._glossary_auto_search
         # 立即修剪現有歷史以符合新上限
@@ -1983,6 +2062,16 @@ class MainWindow(QMainWindow):
                 pass
         if auto_scroll is not None:
             self._side_auto_scroll = bool(auto_scroll)
+        self.schedule_save()
+
+    def _on_pad_count_changed(self, count: int) -> None:
+        try:
+            n = int(count)
+        except (TypeError, ValueError):
+            return
+        if n not in (1, 2, 3):
+            return
+        self._pad_space_count = n
         self.schedule_save()
 
     def _on_edit_saved(self, file_path: str,

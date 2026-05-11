@@ -186,6 +186,7 @@ def apply_translation(
     translated: str,
     glossary: dict[str, str],
     append_mode: bool = False,
+    translation_only: bool = False,
 ) -> str:
     """執行翻譯替換：將提取的原文替換為翻譯文，套用術語表並自動補全形空白。
 
@@ -196,6 +197,8 @@ def apply_translation(
         glossary: 術語表 dict
         append_mode: 為 True 時，將翻譯文「附加在原文之後」而非取代原文。
             此模式下不補全形空白（替換結果一定比原文長）。
+        translation_only: 為 True 時，術語表「只套用於譯文部分」；
+            跳過最後對整份 source 的全域 glossary 覆蓋（AA 圖等未提取區域不變）。
 
     Returns:
         替換後的完整文本
@@ -260,6 +263,8 @@ def apply_translation(
     source = '\n'.join(source_lines)
 
     # 全域術語覆蓋：未被提取的原文部分也套用術語表
-    source = apply_glossary_to_text(source, glossary)
+    # translation_only=True 時跳過此步，僅譯文部分套用術語表
+    if not translation_only:
+        source = apply_glossary_to_text(source, glossary)
 
     return source

@@ -18,6 +18,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
@@ -26,6 +28,44 @@ from PyQt6.QtWidgets import (
 )
 
 from aa_tool.qt_helpers import make_button
+
+
+# 標題正規化：去掉網站尾綴、外圍 tag、話數資訊，保留作品名稱主體。
+_TITLE_CHAPTER_RES = [
+    re.compile(r'第\s*[0-9０-９〇零一二三四五六七八九十百千]+\s*話'),
+    re.compile(r'その\s*[0-9０-９〇零一二三四五六七八九十百千]+'),
+    re.compile(r'番外編\s*[0-9０-９〇零一二三四五六七八九十百千]*'),
+    re.compile(r'後日談\s*[0-9０-９〇零一二三四五六七八九十百千]*'),
+    re.compile(r'[0-9０-９]+\s*話'),
+]
+_TITLE_SITE_SUFFIX_RE = re.compile(r'\s+[-—–]\s+.+$')
+_TITLE_LEADING_TAGS_RE = re.compile(r'^(?:[【\[][^】\]]*[】\]][\s　]*)+')
+_TITLE_TRAILING_TAGS_RE = re.compile(r'(?:[\s　]*[【\[][^】\]]*[】\]])+\s*$')
+
+
+def _normalize_title_for_filter(raw_title: str) -> str:
+    """把網址記錄的標題正規化成「作品名稱」主體，去掉網站名稱與話數資訊。
+
+    處理順序：
+      1. 去掉 " - 網站名稱" 尾綴（半形/長破折號）
+      2. 去掉開頭的 【...】 / [...] tag 群
+      3. 在第一個「話數模式」處截斷（第N話／そのN／番外編N／後日談N／N話）
+      4. 去掉殘留在尾端的 【...】 tag 群
+      5. 去掉前後空白（含全形）
+    """
+    if not raw_title:
+        return ""
+    t = _TITLE_SITE_SUFFIX_RE.sub("", raw_title)
+    t = _TITLE_LEADING_TAGS_RE.sub("", t)
+    earliest = len(t)
+    for pat in _TITLE_CHAPTER_RES:
+        m = pat.search(t)
+        if m and m.start() < earliest:
+            earliest = m.start()
+    if earliest < len(t):
+        t = t[:earliest]
+    t = _TITLE_TRAILING_TAGS_RE.sub("", t)
+    return t.strip(' 　\t')
 
 
 class UrlFetchWindow(QWidget):
@@ -202,21 +242,27 @@ class UrlFetchWindow(QWidget):
         lbl_hist.setFont(self.ui_small_font)
         hist_top.addWidget(lbl_hist)
         hist_top.addStretch()
-        self.clear_btn = make_button("清除紀錄", color="#dc3545", hover="#c82333",
-                                     font=self.ui_small_font, width=80)
-        self.clear_btn.setFixedHeight(24)
-        self.clear_btn.clicked.connect(self._clear_history)
-        hist_top.addWidget(self.clear_btn)
         hist_outer.addLayout(hist_top)
 
         search_row = QHBoxLayout()
         search_row.setContentsMargins(0, 0, 0, 0)
+        search_row.setSpacing(4)
         self.hist_search = QLineEdit()
         self.hist_search.setFont(self.ui_small_font)
         self.hist_search.setPlaceholderText("🔍 搜尋紀錄（標題）")
         self.hist_search.setClearButtonEnabled(True)
         self.hist_search.textChanged.connect(self._on_history_search_changed)
-        search_row.addWidget(self.hist_search, 1)
+        # 搜尋框寬度：螢幕寬度的 1/4（最少 160px）
+        screen_obj = QApplication.primaryScreen()
+        screen_w = (screen_obj.availableGeometry().width()
+                    if screen_obj is not None else 1280)
+        self.hist_search.setFixedWidth(max(160, screen_w // 4))
+        search_row.addWidget(self.hist_search, 0)
+        # 標題快速篩選按鈕區
+        self.title_btn_row = QHBoxLayout()
+        self.title_btn_row.setContentsMargins(0, 0, 0, 0)
+        self.title_btn_row.setSpacing(3)
+        search_row.addLayout(self.title_btn_row, 1)
         hist_outer.addLayout(search_row)
 
         self.hist_scroll = QScrollArea()
@@ -320,7 +366,80 @@ class UrlFetchWindow(QWidget):
         self._history_filter = (text or "").strip().lower()
         self._refresh_history()
 
+    def _rebuild_title_filter_buttons(self) -> None:
+        """依當前 url_history 重新產生「標題快速篩選按鈕」。
+
+        - 取每筆 entry 的 `title`，呼叫 `_normalize_title_for_filter` 過濾話數／網站名稱
+        - 依當前讀取順序（newest-first）去重後排列
+        - 每按鈕固定寬度（90px）顯示前 8 字（超過 8 字尾端加 …），完整標題放 tooltip
+        - 依當前可用空間決定可塞入幾顆按鈕，多出來的不顯示
+        """
+        # 清掉舊按鈕
+        while self.title_btn_row.count() > 0:
+            item = self.title_btn_row.takeAt(0)
+            if item is None:
+                break
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        # 取出唯一正規化標題（依當前讀取順序，最新優先）
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for entry in reversed(self._url_history):
+            if not isinstance(entry, dict):
+                continue
+            raw = entry.get('title') or ''
+            norm = _normalize_title_for_filter(raw)
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            normalized.append(norm)
+
+        if not normalized:
+            return
+
+        btn_w = 90
+        spacing = self.title_btn_row.spacing()
+        # 推算可用寬度：以面板當前寬度減去搜尋框與邊界
+        panel_w = self.width()
+        if panel_w <= 0:
+            screen_obj = QApplication.primaryScreen()
+            panel_w = (screen_obj.availableGeometry().width()
+                       if screen_obj is not None else 1280)
+        used = self.hist_search.width() + 40  # 左右 padding + 列邊界
+        avail = max(0, panel_w - used)
+        max_btns = max(0, (avail + spacing) // (btn_w + spacing))
+        if max_btns <= 0:
+            return
+
+        btn_font = QFont(self.ui_small_font)
+        btn_font.setPointSize(max(1, btn_font.pointSize() - 2))
+
+        for title in normalized[:max_btns]:
+            display = title[:8] + ('…' if len(title) > 8 else '')
+            btn = QPushButton(display)
+            btn.setFont(btn_font)
+            btn.setFixedSize(btn_w, 24)
+            btn.setToolTip(title)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton { background:#3a3f44; color:#ddd;"
+                " border:1px solid #555; border-radius:3px; padding:0 4px; }"
+                "QPushButton:hover { background:#4a5057; color:#fff; }"
+            )
+            btn.clicked.connect(
+                lambda checked=False, t=title: self.hist_search.setText(t))
+            self.title_btn_row.addWidget(btn)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        # 視窗大小改變時重新計算可塞入的按鈕數量
+        if hasattr(self, 'title_btn_row'):
+            self._rebuild_title_filter_buttons()
+
     def _refresh_history(self):
+        self._rebuild_title_filter_buttons()
         self._clear_layout_rows(self.hist_inner_layout)
         insert_at = lambda w: self.hist_inner_layout.insertWidget(
             self.hist_inner_layout.count() - 1, w)
@@ -416,11 +535,6 @@ class UrlFetchWindow(QWidget):
             self.author_only_switch.isChecked(),
             skip_cache=self.skip_cache_switch.isChecked(),
         )
-
-    def _clear_history(self):
-        self._main.url_history = []
-        self._main.settings_mgr.clear_url_history()
-        self.on_history_cleared([])
 
     def _set_status(self, text: str, color: str):
         self.status_label.setText(text)

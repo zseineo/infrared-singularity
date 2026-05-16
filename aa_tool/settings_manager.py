@@ -140,6 +140,9 @@ class AppCache:
     # 實驗性日文提取演算法：錨點掃描 + 邊界擴展 + 分數制過濾。
     # 目的：減少 AA 圖中夾雜少量合法字元時的誤提取。預設關閉，由設定 dialog 切換。
     experimental_extraction: bool = False
+    # 實驗性：替換翻譯時，若被替換原文的「右側」殘留內容像 AA 圖（沿用實驗提取
+    # 演算法的 AA 噪聲判定）且譯文較短，則於譯文後補等量全形空白。預設關閉。
+    pad_right_aa: bool = False
     # 「補空白」按鈕在每個字元之間插入的全形空白數量（1~3）。
     pad_space_count: int = 2
 
@@ -311,6 +314,8 @@ class SettingsManager:
                 'korean_mode', cache.korean_mode))
             cache.experimental_extraction = bool(data.get(
                 'experimental_extraction', cache.experimental_extraction))
+            cache.pad_right_aa = bool(data.get(
+                'pad_right_aa', cache.pad_right_aa))
             try:
                 v = int(data.get('pad_space_count', cache.pad_space_count))
                 if v in (1, 2, 3):
@@ -385,6 +390,7 @@ class SettingsManager:
                 'side_auto_scroll': cache.side_auto_scroll,
                 'korean_mode': cache.korean_mode,
                 'experimental_extraction': cache.experimental_extraction,
+                'pad_right_aa': cache.pad_right_aa,
                 'pad_space_count': cache.pad_space_count,
             }
             self._atomic_write_json(cache_file, data)
@@ -417,10 +423,11 @@ class SettingsManager:
             except OSError:
                 pass
 
-    def append_url_history(self, entry: dict, max_items: int = 50) -> None:
+    def append_url_history(self, entry: dict) -> None:
         """新增一筆 URL 歷史（讀檔 → 以 url 去重 → append 於末端 → 寫回）。
 
         採 newest-last 慣例，與 aa_url_fetch_qt.py 既有 `reversed(url_history)` 顯示一致。
+        紀錄無上限；清除時才依設定保留最近 N 筆。
         """
         url = (entry or {}).get('url', '')
         if not url:
@@ -438,11 +445,13 @@ class SettingsManager:
                         new_entry['work_title'] = h['work_title']
                     if 'author' not in new_entry and h.get('author'):
                         new_entry['author'] = h['author']
+                    if 'fingerprint' not in new_entry and h.get('fingerprint'):
+                        new_entry['fingerprint'] = h['fingerprint']
                     break
             hist = [h for h in hist
                     if isinstance(h, dict) and h.get('url') != url]
             hist.append(new_entry)
-            data['url_history'] = hist[-max_items:]
+            data['url_history'] = hist
             self._atomic_write_json(cache_file, data)
 
     def stamp_url_history_meta(self, url: str, work_title: str,
@@ -533,3 +542,17 @@ class SettingsManager:
             data = self._read_cache_raw()
             data['url_history'] = []
             self._atomic_write_json(cache_file, data)
+
+    def clear_url_history_keep_n(self, keep_n: int) -> int:
+        """清除 URL 歷史，保留最近 keep_n 筆（keep_n=0 表示全清）。回傳清除後的筆數。"""
+        cache_file = self.get_cache_file()
+        with locked_file(cache_file + '.lock'):
+            data = self._read_cache_raw()
+            hist = data.get('url_history', []) or []
+            if keep_n > 0:
+                hist = hist[-keep_n:]
+            else:
+                hist = []
+            data['url_history'] = hist
+            self._atomic_write_json(cache_file, data)
+            return len(hist)

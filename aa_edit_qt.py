@@ -20,8 +20,9 @@ import sys
 
 from PyQt6.QtCore import QPoint, Qt, QTimer
 from PyQt6.QtGui import (
-    QColor, QFont, QFontDatabase, QFontMetricsF, QKeySequence, QShortcut,
-    QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument, QTextFormat,
+    QColor, QFont, QFontDatabase, QFontMetricsF, QGuiApplication, QKeySequence,
+    QShortcut, QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument,
+    QTextFormat,
 )
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QFileDialog, QHBoxLayout,
@@ -175,6 +176,8 @@ class EditWindow(QMainWindow):
         on_pad_count_change=None,  # (count: int) -> None
         default_wysiwyg_provider=None,  # () -> bool；對應主程式「進入編輯器時預設 WYSIWYG」設定
         translation_only_provider=None,  # () -> bool；對應主程式「術語表只套用於譯文部分」設定
+        pad_right_aa_provider=None,  # () -> bool；對應主程式「替換翻譯時偵測右側 AA 圖補空白」設定
+        url_for_text_provider=None,  # (text: str) -> str | None；以指紋查 url_history 取得對應網址
     ) -> None:
         super().__init__()
         self._html_file = html_file
@@ -213,6 +216,8 @@ class EditWindow(QMainWindow):
         self._on_pad_count_change = on_pad_count_change
         self._default_wysiwyg_provider = default_wysiwyg_provider
         self._translation_only_provider = translation_only_provider
+        self._pad_right_aa_provider = pad_right_aa_provider
+        self._url_for_text_provider = url_for_text_provider
 
         # Alt+4 局部重套用：保留 provider 取得的「完整」提取結果與翻譯文字，
         # 而 side_extracted / side_ai 只顯示當前編輯器可視範圍對應的行。
@@ -381,6 +386,8 @@ class EditWindow(QMainWindow):
                   activated=self._reverse_glossary_replace)
         QShortcut(QKeySequence("Alt+C"), self,
                   activated=self._extract_jp_from_selection)
+        # Redo（Ctrl+Z 由 QTextEdit 原生處理，這裡補一個 Alt+Z 重做）
+        QShortcut(QKeySequence("Alt+Z"), self, activated=self._redo)
 
         if scroll_to_line and scroll_to_line > 0:
             self._scroll_to_line(scroll_to_line)
@@ -483,6 +490,12 @@ class EditWindow(QMainWindow):
         tb.addStretch()
 
         # Group 4: 右側
+        btn_copy_url = _make_button("📋 複製網址", "#6c757d", "#5a6268", width=95)
+        btn_copy_url.setToolTip(
+            "以當前原文的投稿指紋查網址讀取紀錄，找到匹配條目則複製其網址")
+        btn_copy_url.clicked.connect(self._copy_url_by_fingerprint)
+        tb.addWidget(btn_copy_url)
+
         btn_bg = _make_button("底色", "#6c757d", "#5a6268", width=50)
         btn_bg.clicked.connect(self._choose_bg)
         tb.addWidget(btn_bg)
@@ -1434,6 +1447,20 @@ class EditWindow(QMainWindow):
         """回傳目前可編輯的文字 widget：WYSIWYG 模式下為 preview_view，否則為 editor。"""
         return self.preview_view if self._preview_active else self.editor
 
+    def _redo(self) -> None:
+        """Alt+Z：對目前可編輯的 widget 執行 redo（重做被 Ctrl+Z 撤銷的編輯）。"""
+        if self._compare_active:
+            self._set_status("⚠️ 比對模式（Alt+2）下無法重做，請先回編輯模式", "#ffc107")
+            return
+        target = self._active_edit_widget()
+        doc = target.document()
+        if not doc.isRedoAvailable():
+            self._set_status("ℹ️ 沒有可重做的操作", "#17a2b8")
+            return
+        target.redo()
+        self._apply_line_height()  # redo 後行高可能跑掉，補一次（內含 preview_view 同步）
+        self._set_status("↪️ 已重做", "#0f0")
+
     def _wysiwyg_rerender_after_editor_change(self) -> None:
         """WYSIWYG 期間，若工具用 sync→在 editor 上執行→需要把結果反映回 preview_view。
 
@@ -1987,16 +2014,33 @@ class EditWindow(QMainWindow):
             except Exception:
                 translation_only = False
 
+        pad_right_aa = False
+        if self._pad_right_aa_provider is not None:
+            try:
+                pad_right_aa = bool(self._pad_right_aa_provider())
+            except Exception:
+                pad_right_aa = False
+        symbol_regex_str = None
+        if pad_right_aa and self._extract_regex_provider is not None:
+            try:
+                provided = self._extract_regex_provider()
+                if provided and len(provided) >= 3:
+                    symbol_regex_str = provided[2]
+            except Exception:
+                symbol_regex_str = None
+
         try:
             baseline_full = apply_translation(
                 self._original_text,
                 self._side_extracted_baseline,
                 self._side_ai_baseline,
                 glossary,
-                translation_only=translation_only)
+                translation_only=translation_only,
+                pad_right_aa=pad_right_aa, symbol_regex_str=symbol_regex_str)
             new_full = apply_translation(
                 self._original_text, new_extracted, new_ai, glossary,
-                translation_only=translation_only)
+                translation_only=translation_only,
+                pad_right_aa=pad_right_aa, symbol_regex_str=symbol_regex_str)
         except Exception as e:
             self._set_status(f"❌ 套用失敗：{e}", "#dc3545")
             return
@@ -2144,60 +2188,73 @@ class EditWindow(QMainWindow):
         self._set_status(f"↩️ 已以原文覆蓋（{len(extracted)} 字）", "#0f0")
 
     # ════════════════════════════════════════════════════════════
-    #  從選取範圍提取日文並複製（Alt+C）
+    #  從 Alt+4 面板選取範圍複製（去掉流水號）（Alt+C）
     # ════════════════════════════════════════════════════════════
 
     def _extract_jp_from_selection(self) -> None:
-        """Alt+C：從選取範圍（編輯器、WYSIWYG 預覽或原文比對模式）提取日文並複製到剪貼簿。
+        """Alt+C：複製 Alt+4 面板（提取結果／填入翻譯）中使用者選取的字串，
+        並去掉每行最前面的「ID|」流水號前綴。
 
-        先複製選取內容，再以主程式「提取日文」相同的正則邏輯剔除 AA 圖形，
-        只保留純文字行後以 \\n 串接寫入剪貼簿。
+        - 若 Alt+4 面板未開啟，提示使用者開啟。
+        - 偵測對象：side_extracted / side_ai，取目前有焦點且有選取者；
+          若兩者皆無焦點則優先抓有選取的那一個。
         """
-        if self._compare_active:
-            view = self.orig_view
-        else:
-            # WYSIWYG 與一般編輯都從 _active_edit_widget 取
-            view = self._active_edit_widget()
-        cursor = view.textCursor()
-        if not cursor.hasSelection():
-            self._set_status("⚠️ 請先選取要提取日文的範圍", "#ffc107")
+        if not self._translate_side.isVisible():
+            self._set_status(
+                "⚠️ 請先按 Alt+4 開啟「局部重套用」面板再選取要複製的內容",
+                "#ffc107")
             return
-        selected = cursor.selectedText().replace('', '\n')
+
+        candidates = []
+        for w in (self.side_extracted, self.side_ai):
+            if w.textCursor().hasSelection():
+                candidates.append(w)
+        if not candidates:
+            self._set_status("⚠️ 請在 Alt+4 面板中先選取要複製的範圍", "#ffc107")
+            return
+        # 優先用目前有焦點的那一個；否則用第一個有選取的
+        view = next((w for w in candidates if w.hasFocus()), candidates[0])
+
+        selected = view.textCursor().selectedText().replace(' ', '\n')
         if not selected.strip():
             self._set_status("⚠️ 選取範圍內沒有內容", "#ffc107")
             return
 
-        if self._extract_regex_provider is None:
-            self._set_status("⚠️ 無法取得提取正則設定", "#ffc107")
-            return
-        provided = self._extract_regex_provider()
-        # 向後相容：4 元素（舊）／5 元素（含 korean_mode）／6 元素（含 experimental）
-        experimental = False
-        if len(provided) >= 6:
-            (base_re, invalid_re, symbol_re, filter_str, korean_mode,
-             experimental) = provided[:6]
-        elif len(provided) >= 5:
-            base_re, invalid_re, symbol_re, filter_str, korean_mode = provided[:5]
-        else:
-            base_re, invalid_re, symbol_re, filter_str = provided
-            korean_mode = False
-
-        extracted_set = _extract_text(
-            selected,
-            base_re,
-            invalid_re,
-            symbol_re,
-            (filter_str or "").strip(),
-            korean_mode=korean_mode,
-            experimental=experimental,
-        )
-        if not extracted_set:
-            self._set_status("ℹ️ 選取範圍內未提取到日文", "#ffc107")
-            return
-        output = '\n'.join(extracted_set.keys())
+        out_lines = []
+        for line in selected.split('\n'):
+            idx = line.find('|')
+            out_lines.append(line[idx + 1:] if idx >= 0 else line)
+        output = '\n'.join(out_lines)
         QApplication.clipboard().setText(output)
         self._set_status(
-            f"✅ 已提取 {len(extracted_set)} 行日文並複製到剪貼簿", "#0f0")
+            f"✅ 已複製 {len(out_lines)} 行到剪貼簿（已去除流水號）", "#0f0")
+
+    # ════════════════════════════════════════════════════════════
+    #  複製對應網址（以投稿指紋查網址讀取紀錄）
+    # ════════════════════════════════════════════════════════════
+
+    def _copy_url_by_fingerprint(self) -> None:
+        """以編輯器當前全文計算投稿指紋，呼叫主程式 provider 查網址讀取紀錄，
+        找到匹配條目即把網址複製到剪貼簿；無 provider／無匹配則顯示提示。
+        """
+        if self._url_for_text_provider is None:
+            self._set_status("⚠️ 無法取得網址查詢功能", "#ffc107")
+            return
+        text = self.editor.toPlainText()
+        if not text.strip():
+            self._set_status("⚠️ 編輯器內沒有文字", "#ffc107")
+            return
+        try:
+            url = self._url_for_text_provider(text)
+        except Exception as e:
+            self._set_status(f"⚠️ 查詢失敗：{e}", "#ffc107")
+            return
+        if not url:
+            self._set_status(
+                "ℹ️ 在網址讀取紀錄中找不到對應網址", "#ffc107")
+            return
+        QApplication.clipboard().setText(url)
+        self._set_status(f"✅ 已複製網址：{url}", "#0f0")
 
     # ════════════════════════════════════════════════════════════
     #  其他
@@ -2352,6 +2409,11 @@ class EditWindow(QMainWindow):
         if not last_dir and self._html_file and not self._is_temp_file:
             last_dir = os.path.dirname(self._html_file)
         default_path = os.path.join(last_dir, default_name) if last_dir else default_name
+        # 開對話框前先重設 IME composition 狀態，緩解 Windows 原生
+        # `IFileDialog` 在 IME 切換／組字殘留下檔名框游標不見的 bug。
+        im = QGuiApplication.inputMethod()
+        if im is not None:
+            im.reset()
         file_path, _ = QFileDialog.getSaveFileName(
             self, "另存新檔", default_path,
             "HTML files (*.html);;All files (*.*)")

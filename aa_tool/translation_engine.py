@@ -1,6 +1,7 @@
 import re
 
-from .constants import BORDER_CHARS
+from .constants import BORDER_CHARS, DEFAULT_SYMBOL_REGEX
+from .text_extraction import aa_noise_ratio
 
 
 # 用 backtick 作為「保留外圍空白」的分隔符。選 backtick 是因為：
@@ -80,25 +81,93 @@ def parse_glossary(glossary_str: str) -> dict[str, str]:
     return glossary
 
 
+# 「右側 AA 圖偵測」判定門檻：被替換原文右側剩餘字串（已剝掉緊接的收尾括號與
+# 空白）去空白後，AA 噪聲字元佔比 >= 此值即視為「右側擋著 AA 圖」需要補空白
+# （沿用實驗提取演算法的 AA 噪聲定義，見 text_extraction.aa_noise_ratio）。
+_RIGHT_AA_NOISE_THRESHOLD = 0.34
+# 緊接在被替換文字之後的「對話／括號收尾」字元 — 屬於文字本身的尾巴而非右側
+# 的 AA 圖（否則「　　「こんにちは」」這種以 `」` 結尾的對話行會被誤判）。
+_TRAILING_CLOSERS = set('」』）)】〕〉》｝}］]')
+
+
+def _right_side_has_aa(
+    rest: str,
+    pad_right_aa: bool,
+    symbol_regex: 're.Pattern | None',
+) -> bool:
+    """判斷某行被替換原文右側的剩餘字串 `rest` 是否「擋著 AA 圖」需要補空白。
+
+    - 一律：`rest` 含對話框邊框字元（`BORDER_CHARS`）→ True（向後相容既有行為，
+      無論實驗開關是否開啟）。
+    - 額外（`pad_right_aa=True` 且提供 `symbol_regex` 時）：先跳過緊接的收尾
+      括號（`_TRAILING_CLOSERS`）與空白，剩下的內容以 `aa_noise_ratio` 評估，
+      去空白後 AA 噪聲比例 >= `_RIGHT_AA_NOISE_THRESHOLD` → True。
+    """
+    if any(c in rest for c in BORDER_CHARS):
+        return True
+    if not pad_right_aa or symbol_regex is None:
+        return False
+    i = 0
+    n = len(rest)
+    while i < n and (rest[i] in _TRAILING_CLOSERS or rest[i] in (' ', '　')):
+        i += 1
+    tail = rest[i:]
+    if not tail:
+        return False
+    return aa_noise_ratio(tail, symbol_regex) >= _RIGHT_AA_NOISE_THRESHOLD
+
+
 def _replace_with_padding(
     line: str,
     original: str,
     translated: str,
     padded_translated: str,
+    pad_right_aa: bool = False,
+    symbol_regex: 're.Pattern | None' = None,
+    len_diff: int = 0,
 ) -> str:
-    """在一行中執行替換，依邊框字元判斷是否需要補空白。"""
+    """在一行中執行替換，依右側是否擋著 AA 圖判斷補空白或消空白。
+
+    - `len_diff > 0`（譯文較短）：右側擋著 AA 圖時，於譯文後補 `len_diff` 個
+      全形空白（用 `padded_translated`），把右側 AA 圖推回原欄位。
+    - `len_diff < 0`（譯文較長，且 `pad_right_aa=True`）：右側擋著 AA 圖時，
+      跳過並保留緊接的收尾括號後，吃掉最多 `-len_diff` 個空白（全形或半形）；
+      空白不足時能吃幾個算幾個，盡量讓右側 AA 圖維持原欄位、不動 AA 圖本身。
+    """
     if original not in line:
         return line
     try:
         pattern = re.compile(re.escape(original))
-
-        def repl(m):
-            rest = m.string[m.end():]
-            if any(c in rest for c in BORDER_CHARS):
-                return padded_translated
-            return translated
-
-        return pattern.sub(repl, line)
+        result: list[str] = []
+        pos = 0
+        for m in pattern.finditer(line):
+            result.append(line[pos:m.start()])
+            rest = line[m.end():]
+            has_aa = _right_side_has_aa(rest, pad_right_aa, symbol_regex)
+            if has_aa and len_diff > 0:
+                # 譯文較短：補空白
+                result.append(padded_translated)
+                pos = m.end()
+            elif has_aa and len_diff < 0 and pad_right_aa:
+                # 譯文較長：吃掉右側空白（實驗性，僅 pad_right_aa 啟用時）
+                result.append(translated)
+                k = m.end()
+                # 先保留緊接的收尾括號（屬於文字尾巴，不可吃）
+                while k < len(line) and line[k] in _TRAILING_CLOSERS:
+                    k += 1
+                result.append(line[m.end():k])
+                # 吃掉最多 -len_diff 個空白
+                want = -len_diff
+                eaten = 0
+                while eaten < want and k < len(line) and line[k] in ('　', ' '):
+                    eaten += 1
+                    k += 1
+                pos = k
+            else:
+                result.append(translated)
+                pos = m.end()
+        result.append(line[pos:])
+        return ''.join(result)
     except Exception:
         return line.replace(original, translated)
 
@@ -187,6 +256,8 @@ def apply_translation(
     glossary: dict[str, str],
     append_mode: bool = False,
     translation_only: bool = False,
+    pad_right_aa: bool = False,
+    symbol_regex_str: 'str | None' = None,
 ) -> str:
     """執行翻譯替換：將提取的原文替換為翻譯文，套用術語表並自動補全形空白。
 
@@ -199,10 +270,24 @@ def apply_translation(
             此模式下不補全形空白（替換結果一定比原文長）。
         translation_only: 為 True 時，術語表「只套用於譯文部分」；
             跳過最後對整份 source 的全域 glossary 覆蓋（AA 圖等未提取區域不變）。
+        pad_right_aa: 實驗性。為 True 時，除了「右側有對話框邊框字元」之外，
+            「右側剩餘內容像 AA 圖」（依 `symbol_regex_str` 與 `aa_noise_ratio`
+            判定，門檻見 `_RIGHT_AA_NOISE_THRESHOLD`）也會在譯文較短時補等量
+            全形空白，盡量讓右側 AA 圖維持原位置。
+        symbol_regex_str: AA 符號正則字串（通常為主程式的 `symbol_regex`）；
+            僅在 `pad_right_aa=True` 時使用，None / 編譯失敗時退回
+            `DEFAULT_SYMBOL_REGEX`。
 
     Returns:
         替換後的完整文本
     """
+    # 右側 AA 圖偵測用的 symbol regex（僅在 pad_right_aa 啟用時編譯）
+    symbol_regex: 're.Pattern | None' = None
+    if pad_right_aa:
+        try:
+            symbol_regex = re.compile(symbol_regex_str or DEFAULT_SYMBOL_REGEX)
+        except re.error:
+            symbol_regex = re.compile(DEFAULT_SYMBOL_REGEX)
     # 解析映射表
     orig_map: dict[str, str] = {}
     for line in extracted.split('\n'):
@@ -236,9 +321,10 @@ def apply_translation(
             final_translated = final_translated.replace(jp_term, tw_term)
 
         if append_mode:
-            # 附加模式：以「原文 + 半形空白 + 翻譯文」取代原文位置；不補全形空白
+            # 附加模式：以「原文 + 半形空白 + 翻譯文」取代原文位置；不補/不消空白
             final_translated = original + ' ' + final_translated
             padded = final_translated
+            len_diff = 0
         else:
             len_diff = len(original) - len(final_translated)
             padded = final_translated + ('　' * len_diff if len_diff > 0 else '')
@@ -251,13 +337,15 @@ def apply_translation(
 
         if 0 <= line_idx < len(source_lines):
             source_lines[line_idx] = _replace_with_padding(
-                source_lines[line_idx], original, final_translated, padded
+                source_lines[line_idx], original, final_translated, padded,
+                pad_right_aa, symbol_regex, len_diff,
             )
         else:
             # ID 無法解析時退回全行掃描（保護性 fallback）
             for i in range(len(source_lines)):
                 source_lines[i] = _replace_with_padding(
-                    source_lines[i], original, final_translated, padded
+                    source_lines[i], original, final_translated, padded,
+                    pad_right_aa, symbol_regex, len_diff,
                 )
 
     source = '\n'.join(source_lines)

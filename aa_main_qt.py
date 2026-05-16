@@ -266,7 +266,12 @@ class TranslatePanel(QWidget):
         row.addWidget(btn_import)
 
         btn_export = _make_btn("📤 儲存設定", "#28a745", "#218838", font=_ui_font(12))
+        btn_export.setToolTip(
+            "左鍵：依設定行為儲存（可能合併差異）\n右鍵：強制以覆蓋方式儲存")
         btn_export.clicked.connect(self._main.export_settings)
+        btn_export.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        btn_export.customContextMenuRequested.connect(
+            lambda _pos: self._main.export_settings(force_overwrite=True))
         row.addWidget(btn_export)
 
         btn_debug = _make_btn("🔧提取Debug", "#6c757d", "#5a6268", font=_ui_font(12))
@@ -667,6 +672,7 @@ class MainWindow(QMainWindow):
         self.current_symbol_regex = DEFAULT_SYMBOL_REGEX
         self._korean_mode: bool = False
         self._experimental_extraction: bool = False
+        self._pad_right_aa: bool = False
         self._glossary_translation_only: bool = False
 
         # ── 應用狀態 ──
@@ -891,6 +897,8 @@ class MainWindow(QMainWindow):
                 on_pad_count_change=self._on_pad_count_changed,
                 default_wysiwyg_provider=lambda: self._editor_default_wysiwyg,
                 translation_only_provider=lambda: self._glossary_translation_only,
+                pad_right_aa_provider=lambda: self._pad_right_aa,
+                url_for_text_provider=self._find_url_for_text,
             )
             # 替換 placeholder
             self.stack.removeWidget(self._edit_placeholder)
@@ -1186,7 +1194,9 @@ class MainWindow(QMainWindow):
         result_text = _apply_translation(
             source, extracted, translated, glossary,
             append_mode=append_mode,
-            translation_only=self._glossary_translation_only)
+            translation_only=self._glossary_translation_only,
+            pad_right_aa=self._pad_right_aa,
+            symbol_regex_str=self.current_symbol_regex)
         title = self._translate_panel.get_doc_title().strip() or "未命名"
         num = self._translate_panel.get_doc_num().strip()
         safe_title = _re_mod.sub(r'[\\/:*?"<>|]', '_', title)
@@ -1383,6 +1393,27 @@ class MainWindow(QMainWindow):
         else:
             self.show_status("⚠️ 尚未讀取過網址！", "#f39c12")
 
+    def _find_url_for_text(self, text: str) -> str | None:
+        """以投稿標頭指紋查 url_history，回傳對應網址；找不到回 None。
+
+        編輯器「複製網址」按鈕用此 callback：以當前編輯器全文計算指紋，
+        在 url_history（含舊有但無 fingerprint 欄位的條目）中尋找匹配。
+        """
+        if not text:
+            return None
+        fp = self._compute_author_fingerprint(text)
+        if not fp:
+            return None
+        for h in self.url_history:
+            if not isinstance(h, dict):
+                continue
+            entry_fp = h.get('fingerprint')
+            if not entry_fp:
+                continue
+            if entry_fp == fp:
+                return h.get('url') or None
+        return None
+
     def _update_work_title(self, work_title: str = "") -> None:
         self.setWindowTitle(f"{APP_TITLE} — {work_title}" if work_title else APP_TITLE)
 
@@ -1548,14 +1579,18 @@ class MainWindow(QMainWindow):
                     hist['work_title'] = _old['work_title']
                 if _old.get('author'):
                     hist['author'] = _old['author']
+                fp = self._compute_author_fingerprint(text_content)
+                if fp:
+                    hist['fingerprint'] = fp
+                elif _old.get('fingerprint'):
+                    hist['fingerprint'] = _old['fingerprint']
                 # 持久化：鎖定 append（多程序安全）+ per-URL 相關連結
-                self.settings_mgr.append_url_history(hist, max_items=self._fetch_history_limit)
+                self.settings_mgr.append_url_history(hist)
                 self.settings_mgr.update_url_related_links(raw_url, nav_links)
                 # 同步 in-memory（newest-last 慣例）
                 self.url_history = [h for h in self.url_history
                                     if h.get('url') != raw_url]
                 self.url_history.append(hist)
-                self.url_history = self.url_history[-self._fetch_history_limit:]
                 # 套用戳印 meta（若有）：work_title → doc_title、author → 作者欄
                 self._apply_url_history_meta(raw_url)
                 self.schedule_save()
@@ -1651,14 +1686,18 @@ class MainWindow(QMainWindow):
                         hist['work_title'] = _old['work_title']
                     if _old.get('author'):
                         hist['author'] = _old['author']
+                    fp = self._compute_author_fingerprint(text_content)
+                    if fp:
+                        hist['fingerprint'] = fp
+                    elif _old.get('fingerprint'):
+                        hist['fingerprint'] = _old['fingerprint']
                     # 持久化：鎖定 append（多程序安全）+ per-URL 相關連結
-                    self.settings_mgr.append_url_history(hist, max_items=self._fetch_history_limit)
+                    self.settings_mgr.append_url_history(hist)
                     self.settings_mgr.update_url_related_links(next_url, nav_links)
                     # 同步 in-memory（newest-last）
                     self.url_history = [h for h in self.url_history
                                         if h.get('url') != next_url]
                     self.url_history.append(hist)
-                    self.url_history = self.url_history[-self._fetch_history_limit:]
                     # 套用戳印 meta（若有）：work_title → doc_title、author → 作者欄
                     self._apply_url_history_meta(next_url)
                     self.schedule_save()
@@ -1722,6 +1761,7 @@ class MainWindow(QMainWindow):
             side_auto_scroll=self._side_auto_scroll,
             korean_mode=self._korean_mode,
             experimental_extraction=self._experimental_extraction,
+            pad_right_aa=self._pad_right_aa,
             glossary_translation_only=self._glossary_translation_only,
             pad_space_count=self._pad_space_count,
         )
@@ -1778,6 +1818,7 @@ class MainWindow(QMainWindow):
         self._side_auto_scroll = bool(cache.side_auto_scroll)
         self._korean_mode = bool(cache.korean_mode)
         self._experimental_extraction = bool(cache.experimental_extraction)
+        self._pad_right_aa = bool(cache.pad_right_aa)
         self._glossary_translation_only = bool(cache.glossary_translation_only)
         try:
             v = int(cache.pad_space_count)
@@ -1799,6 +1840,7 @@ class MainWindow(QMainWindow):
             auto_copy=self._auto_copy,
             work_history_limit=self._work_history_limit,
             fetch_history_limit=self._fetch_history_limit,
+            fetch_history_count=len(self.url_history),
             original_cache_limit=self._original_cache_limit,
             glossary_auto_search=self._glossary_auto_search,
             diff_save_mode=self._diff_save_mode,
@@ -1807,9 +1849,11 @@ class MainWindow(QMainWindow):
             editor_default_wysiwyg=self._editor_default_wysiwyg,
             korean_mode=self._korean_mode,
             experimental_extraction=self._experimental_extraction,
+            pad_right_aa=self._pad_right_aa,
             glossary_translation_only=self._glossary_translation_only,
             orig_cache_path=self._orig_cache_path(),
             on_apply=self._on_settings_applied,
+            on_clear_url_history=self._on_clear_url_history_from_settings,
         )
         dlg.exec()
 
@@ -1835,17 +1879,26 @@ class MainWindow(QMainWindow):
             'korean_mode', self._korean_mode))
         self._experimental_extraction = bool(values.get(
             'experimental_extraction', self._experimental_extraction))
+        self._pad_right_aa = bool(values.get(
+            'pad_right_aa', self._pad_right_aa))
         self._glossary_translation_only = bool(values.get(
             'glossary_translation_only', self._glossary_translation_only))
         if self._batch_window is not None:
             self._batch_window.glossary_auto_search = self._glossary_auto_search
-        # 立即修剪現有歷史以符合新上限
+        # 立即修剪作者歷史以符合新上限
         if len(self.work_history) > self._work_history_limit:
             self.work_history = self.work_history[:self._work_history_limit]
-        if len(self.url_history) > self._fetch_history_limit:
-            self.url_history = self.url_history[-self._fetch_history_limit:]
         self.save_cache()
         self.show_status("✅ 設定已套用", "#0f0")
+
+    def _on_clear_url_history_from_settings(self, keep_n: int) -> int:
+        """從設定視窗清除 URL 歷史，保留最近 keep_n 筆。回傳清除後筆數。"""
+        new_count = self.settings_mgr.clear_url_history_keep_n(keep_n)
+        self.url_history = self.url_history[-keep_n:] if keep_n > 0 else []
+        if self._url_fetch_win_visible():
+            self._url_fetch_win.on_history_cleared(self.url_history)
+        self.save_cache()
+        return new_count
 
     def _load_initial_state(self) -> None:
         self.load_cache()
@@ -1868,13 +1921,19 @@ class MainWindow(QMainWindow):
     def _count_nonempty(text: str) -> int:
         return sum(1 for l in text.strip().splitlines() if l.strip())
 
-    def export_settings(self) -> None:
+    def export_settings(self, force_overwrite: bool = False) -> None:
+        """儲存設定到 AA_Settings.json。
+
+        force_overwrite=True 時強制以覆蓋方式儲存，忽略「儲存差異」設定
+        （由首頁「儲存設定」按鈕右鍵觸發）；左鍵走預設行為。
+        """
         self.save_cache()
         p = self._translate_panel
         cur_filter = p.get_filter_text().strip()
         cur_glossary = p.get_glossary_text().strip()
         cur_glossary_temp = p.get_glossary_temp_text().strip()
-        if self._diff_save_mode:
+        diff_mode = self._diff_save_mode and not force_overwrite
+        if diff_mode:
             existing = self.settings_mgr.load_settings()
             cur_filter = merge_filter_diff(existing.filter_text, cur_filter)
             cur_glossary = merge_glossary_diff(existing.glossary, cur_glossary)
@@ -1893,7 +1952,12 @@ class MainWindow(QMainWindow):
             self._saved_glossary_lines = self._count_nonempty(settings.glossary)
             self._saved_glossary_temp_lines = self._count_nonempty(settings.glossary_temp)
             self._saved_filter_lines = self._count_nonempty(settings.filter_text)
-            tag = "（合併差異）" if self._diff_save_mode else ""
+            if diff_mode:
+                tag = "（合併差異）"
+            elif force_overwrite and self._diff_save_mode:
+                tag = "（強制覆蓋）"
+            else:
+                tag = ""
             self.show_status(f"✅ 設定儲存成功！{tag}", "#0f0")
         except Exception as e:
             self.show_status(f"❌ 設定儲存失敗: {e}", "#dc3545")
@@ -1924,7 +1988,7 @@ class MainWindow(QMainWindow):
         self.show_status("✅ 暫存讀取成功！", "#0f0")
 
     # ════════════════════════════════════════════════════════════
-    #  原文暫存 (依檔名索引，上限由 self._original_cache_limit 控制)
+    #  原文暫存 (依「投稿標頭指紋」索引，上限由 self._original_cache_limit 控制)
     # ════════════════════════════════════════════════════════════
 
     def _orig_cache_path(self) -> str:
@@ -1980,15 +2044,19 @@ class MainWindow(QMainWindow):
     def save_original_for_file(self, file_path: str, original_text: str,
                                extracted: str = "",
                                translation: str = "") -> None:
+        """以「投稿標頭指紋」（日期 + 時間 + 作者 ID）作為唯一索引存入原文暫存。
+
+        指紋由伺服器產生，翻譯流程不會動到，跨檔名改名仍能命中。
+        若文字無法計算出指紋（罕見：純翻譯結果、舊格式投稿等）則略過寫入。
+        """
         if not file_path or not original_text:
+            return
+        key = self._compute_author_fingerprint(original_text)
+        if not key:
             return
         # 讀回現有資料再合併（保留其他執行緒/進程已寫入的條目）
         data = self._load_orig_cache_data()
-        key = os.path.basename(file_path)
         entry: dict = {'text': original_text, 'ts': time.time()}
-        fp = self._compute_author_fingerprint(original_text)
-        if fp:
-            entry['author_key'] = fp
         if extracted:
             entry['extracted'] = extracted
         if translation:
@@ -2003,15 +2071,15 @@ class MainWindow(QMainWindow):
         self._save_orig_cache_data(data)
 
     def _load_cache_entry_for_file(self, file_path: str) -> dict | None:
-        """回傳完整 cache entry（含 text / extracted / translation），找不到回傳 None。"""
+        """以「投稿標頭指紋」查 cache。回傳完整 entry（含 text / extracted /
+        translation），找不到回傳 None。指紋從目標檔的 <pre> 內容計算。
+
+        相容性：舊版以檔名 basename 為 key、entry 內有 `author_key` 欄位作備援；
+        讀檔時若直接以指紋查不到，會掃過 values 比對 `author_key` 或重算指紋，
+        舊資料仍可被命中（migration-friendly）。
+        """
         if not file_path:
             return None
-        data = self._load_orig_cache_data()
-        # 第一層：依檔名 basename 查
-        entry = data.get(os.path.basename(file_path))
-        if isinstance(entry, dict) and isinstance(entry.get('text'), str) and entry['text']:
-            return entry
-        # 第二層：以「投稿標頭指紋」作備援索引（檔名被改過時仍能命中）
         try:
             pre = read_html_pre_content(file_path)
         except OSError:
@@ -2021,6 +2089,13 @@ class MainWindow(QMainWindow):
         target_fp = self._compute_author_fingerprint(pre)
         if not target_fp:
             return None
+        data = self._load_orig_cache_data()
+        # 第一層：以指紋為 key 直接查（新版寫入路徑）
+        entry = data.get(target_fp)
+        if isinstance(entry, dict) and isinstance(entry.get('text'), str) and entry['text']:
+            return entry
+        # 第二層：掃過 values，比對舊版 `author_key` 欄位或從 text 重算指紋
+        # （讓舊 cache 仍能被命中）
         for cached_entry in data.values():
             if not isinstance(cached_entry, dict):
                 continue

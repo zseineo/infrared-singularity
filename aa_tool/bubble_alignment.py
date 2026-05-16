@@ -5,7 +5,7 @@
   - normal: 普通框（￣/＿）
   - shout:  吶喊框（_人/⌒Y）
   - slash:  斜線框（＼─|／）
-  - box:    方框（┌─┐ / │ / └─┘）
+  - box:    方框（┌─┐ / │ / └─┘，亦支援粗體 ┏━┓ / ┃ / ┗━┛）
 """
 from __future__ import annotations
 
@@ -403,9 +403,10 @@ def process_normal(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
     return new_box
 
 
-_BOX_TOP_RE = re.compile(r'^(.*?)(┌)(─+)(┐)\s*$')
-_BOX_BOT_RE = re.compile(r'^(.*?)(└)(─+)(┘)\s*$')
-_BOX_CONTENT_RE = re.compile(r'^(.*?)(│)(.*)(│)\s*$')
+# 細線 ┌─┐│└┘ 與粗線 ┏━┓┃┗┛ 兩套方框字元皆支援。
+_BOX_TOP_RE = re.compile(r'^(.*?)([┌┏])([─━]+)([┐┓])\s*$')
+_BOX_BOT_RE = re.compile(r'^(.*?)([└┗])([─━]+)([┘┛])\s*$')
+_BOX_CONTENT_RE = re.compile(r'^(.*?)([│┃])(.*)([│┃])\s*$')
 
 
 def _parse_box_lines(box_lines: list[str]) -> list[dict]:
@@ -420,14 +421,18 @@ def _parse_box_lines(box_lines: list[str]) -> list[dict]:
             parsed.append({
                 'type': 'top',
                 'prefix': mt.group(1),
+                'lcorner': mt.group(2),
                 'dashes': mt.group(3),
+                'rcorner': mt.group(4),
                 'orig': sl_n,
             })
         elif mb:
             parsed.append({
                 'type': 'bot',
                 'prefix': mb.group(1),
+                'lcorner': mb.group(2),
                 'dashes': mb.group(3),
+                'rcorner': mb.group(4),
                 'orig': sl_n,
             })
         elif mc:
@@ -435,6 +440,8 @@ def _parse_box_lines(box_lines: list[str]) -> list[dict]:
             parsed.append({
                 'type': 'content',
                 'prefix': mc.group(1),
+                'lside': mc.group(2),
+                'rside': mc.group(4),
                 'inner': inner,
                 'orig': sl_n,
             })
@@ -444,16 +451,17 @@ def _parse_box_lines(box_lines: list[str]) -> list[dict]:
 
 
 def process_box(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
-    """處理方框框（┌─┐/│/└─┘），回傳對齊後的各行。失敗回傳 None。"""
+    """處理方框框（┌─┐/│/└─┘，或粗體 ┏━┓/┃/┗━┛），回傳對齊後的各行。失敗回傳 None。
+
+    各行重建時沿用該行自身的角落／邊線字元，因此細線與粗線方框都能正確處理。
+    """
     parsed = _parse_box_lines(box_lines)
 
-    # 原始邊框寬度（由第一個 top 的 ┌─...─┐ 量測）
+    # 原始邊框寬度（由第一個 top 的 角落＋橫線 量測）
     obw = 0
-    prefix = ''
     for ps in parsed:
         if ps['type'] == 'top':
-            obw = m.measure('┌' + ps['dashes'] + '┐')
-            prefix = ps['prefix']
+            obw = m.measure(ps['lcorner'] + ps['dashes'] + ps['rcorner'])
             break
     if obw == 0:
         return None
@@ -462,44 +470,36 @@ def process_box(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
     mcw = 0
     for ps in parsed:
         if ps['type'] == 'content':
-            needed = m.measure('│' + ps['inner'].rstrip(_PAD_CHARS) + '　│')
+            needed = m.measure(
+                ps['lside'] + ps['inner'].rstrip(_PAD_CHARS) + '　' + ps['rside']
+            )
             if needed > mcw:
                 mcw = needed
     tw = (mcw + m.measure('　')) if mcw > 0 else obw
 
-    # 計算邊框需要幾個 ─
-    dash_w = m.measure('─')
-    lr_w = m.measure('┌') + m.measure('┐')
-    inner_target = max(tw - lr_w, dash_w)
-
     # 重建
     result: list[str] = []
     for ps in parsed:
-        if ps['type'] == 'top':
+        if ps['type'] in ('top', 'bot'):
+            dash_char = ps['dashes'][0] if ps['dashes'] else '─'
+            dash_w = m.measure(dash_char)
+            lr_w = m.measure(ps['lcorner']) + m.measure(ps['rcorner'])
+            inner_target = max(tw - lr_w, dash_w)
             dashes = ''
-            while m.measure(dashes + '─') <= inner_target:
-                dashes += '─'
+            while m.measure(dashes + dash_char) <= inner_target:
+                dashes += dash_char
             # snap：若再多一個更接近目標則補上
             d1 = inner_target - m.measure(dashes)
-            d2 = m.measure(dashes + '─') - inner_target
+            d2 = m.measure(dashes + dash_char) - inner_target
             if d2 < d1:
-                dashes += '─'
-            result.append(ps['prefix'] + '┌' + dashes + '┐')
-        elif ps['type'] == 'bot':
-            dashes = ''
-            while m.measure(dashes + '─') <= inner_target:
-                dashes += '─'
-            d1 = inner_target - m.measure(dashes)
-            d2 = m.measure(dashes + '─') - inner_target
-            if d2 < d1:
-                dashes += '─'
-            result.append(ps['prefix'] + '└' + dashes + '┘')
+                dashes += dash_char
+            result.append(ps['prefix'] + ps['lcorner'] + dashes + ps['rcorner'])
         elif ps['type'] == 'content':
             inner = ps['inner'].rstrip(_PAD_CHARS)
-            side_w = m.measure('│') + m.measure('│')
+            side_w = m.measure(ps['lside']) + m.measure(ps['rside'])
             tiw = max(tw - side_w, 0.0)
             padded = _pad_to_width(inner, tiw, m)
-            result.append(ps['prefix'] + '│' + padded + '│')
+            result.append(ps['prefix'] + ps['lside'] + padded + ps['rside'])
         else:
             result.append(ps['orig'])
     return result

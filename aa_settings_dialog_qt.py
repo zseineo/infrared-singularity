@@ -52,6 +52,7 @@ class SettingsDialog(QDialog):
         auto_copy: bool,
         work_history_limit: int,
         fetch_history_limit: int,
+        fetch_history_count: int,
         original_cache_limit: int,
         glossary_auto_search: bool,
         diff_save_mode: bool,
@@ -60,9 +61,11 @@ class SettingsDialog(QDialog):
         editor_default_wysiwyg: bool,
         korean_mode: bool,
         experimental_extraction: bool,
+        pad_right_aa: bool,
         glossary_translation_only: bool,
         orig_cache_path: str,
         on_apply: Callable[[dict], None],
+        on_clear_url_history: Callable[[int], int],
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("設定")
@@ -70,19 +73,21 @@ class SettingsDialog(QDialog):
         self.resize(460, 460)
         self._orig_cache_path = orig_cache_path
         self._on_apply = on_apply
+        self._on_clear_url_history = on_clear_url_history
         self._build_ui(auto_copy, work_history_limit, fetch_history_limit,
-                       original_cache_limit, glossary_auto_search,
-                       diff_save_mode, embed_font_in_html, embed_font_name,
-                       editor_default_wysiwyg, korean_mode,
-                       experimental_extraction, glossary_translation_only)
+                       fetch_history_count, original_cache_limit,
+                       glossary_auto_search, diff_save_mode, embed_font_in_html,
+                       embed_font_name, editor_default_wysiwyg, korean_mode,
+                       experimental_extraction, pad_right_aa,
+                       glossary_translation_only)
         self._refresh_cache_size()
 
     def _build_ui(self, auto_copy: bool, wh_limit: int, fh_limit: int,
-                  oc_limit: int, glossary_auto_search: bool,
+                  fh_count: int, oc_limit: int, glossary_auto_search: bool,
                   diff_save_mode: bool, embed_font_in_html: bool,
                   embed_font_name: str, editor_default_wysiwyg: bool,
                   korean_mode: bool, experimental_extraction: bool,
-                  glossary_translation_only: bool) -> None:
+                  pad_right_aa: bool, glossary_translation_only: bool) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(10)
@@ -111,6 +116,20 @@ class SettingsDialog(QDialog):
             "目的：減少 AA 圖中夾雜少量合法字元時被誤提取的情況（如 rf7父く三）。\n"
             "關閉時走原有 chunk-by-2-spaces + base_regex 路徑（韓文模式不受此選項影響）。")
         root.addWidget(self.experimental_extraction_cb)
+
+        self.pad_right_aa_cb = QCheckBox(
+            "🧪 替換翻譯時：偵測文字右側 AA 圖並補全形空白")
+        self.pad_right_aa_cb.setFont(_ui_font(12))
+        self.pad_right_aa_cb.setChecked(pad_right_aa)
+        self.pad_right_aa_cb.setToolTip(
+            "實驗性功能：替換翻譯時，若某行被替換原文的「右側」殘留內容像 AA 圖\n"
+            "（半形片假名／框線／AA 常用符號比例偏高 — 沿用實驗提取演算法的 AA 噪聲判定），\n"
+            "則盡量讓右側的 AA 圖維持原位置、減少替換後需手動重新排版的情況：\n"
+            "  • 譯文比原文短 → 於譯文後補等量全形空白。\n"
+            "  • 譯文比原文長 → 吃掉右側多餘空白（全/半形），空白不夠就能吃幾個算幾個。\n"
+            "（對話框替換也走此路徑。）\n"
+            "關閉時（預設）僅當右側出現對話框邊框字元（| │ ｜ ┃）才補空白、且不吃空白。")
+        root.addWidget(self.pad_right_aa_cb)
 
         self.glossary_auto_search_cb = QCheckBox("批次搜尋：點擊術語按鈕時自動搜尋")
         self.glossary_auto_search_cb.setFont(_ui_font(12))
@@ -192,16 +211,24 @@ class SettingsDialog(QDialog):
         row1.addStretch()
         root.addLayout(row1)
 
-        # ── 網址讀取紀錄上限 ──
+        # ── 網址讀取紀錄 ──
         row2 = QHBoxLayout()
-        lbl2 = QLabel("網址讀取紀錄儲存數量：")
+        lbl2 = QLabel("清除網址紀錄時保留筆數：")
         lbl2.setFont(_ui_font(12))
         row2.addWidget(lbl2)
         self.fetch_spin = QSpinBox()
-        self.fetch_spin.setRange(1, 500)
-        self.fetch_spin.setValue(max(1, int(fh_limit)))
+        self.fetch_spin.setRange(0, 9999)
+        self.fetch_spin.setValue(max(0, int(fh_limit)))
         self.fetch_spin.setFont(_ui_font(11))
         row2.addWidget(self.fetch_spin)
+        clear_url_btn = _make_btn("清除紀錄", "#dc3545", "#c82333",
+                                  font=_ui_font(11), width=80)
+        clear_url_btn.clicked.connect(self._on_clear_url_btn)
+        row2.addWidget(clear_url_btn)
+        self.fetch_count_lbl = QLabel(f"（目前共 {fh_count} 筆）")
+        self.fetch_count_lbl.setFont(_ui_font(11))
+        self.fetch_count_lbl.setStyleSheet("color:#888;")
+        row2.addWidget(self.fetch_count_lbl)
         row2.addStretch()
         root.addLayout(row2)
 
@@ -274,6 +301,21 @@ class SettingsDialog(QDialog):
         except OSError as e:
             QMessageBox.warning(self, "清除失敗", f"無法寫入暫存檔：{e}")
 
+    def _on_clear_url_btn(self) -> None:
+        keep_n = int(self.fetch_spin.value())
+        msg = (f"清除後將保留最新的 {keep_n} 筆紀錄。"
+               if keep_n > 0 else "所有網址紀錄都會被刪除。")
+        ret = QMessageBox.question(
+            self, "清除網址紀錄",
+            f"確定要清除網址紀錄嗎？\n{msg}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        new_count = self._on_clear_url_history(keep_n)
+        self.fetch_count_lbl.setText(f"（目前共 {new_count} 筆）")
+
     def _on_ok(self) -> None:
         values = {
             'auto_copy': self.auto_copy_cb.isChecked(),
@@ -289,6 +331,7 @@ class SettingsDialog(QDialog):
             'korean_mode': self.korean_mode_cb.isChecked(),
             'experimental_extraction':
                 self.experimental_extraction_cb.isChecked(),
+            'pad_right_aa': self.pad_right_aa_cb.isChecked(),
             'glossary_translation_only':
                 self.glossary_translation_only_cb.isChecked(),
         }

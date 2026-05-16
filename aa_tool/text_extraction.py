@@ -24,18 +24,23 @@ def _compile_custom_filters(filter_str: str) -> list[re.Pattern]:
     return regexes
 
 
-def _postprocess_text(text: str, korean_mode: bool = False) -> str:
+def _postprocess_text(text: str, korean_mode: bool = False,
+                      experimental: bool = False) -> str:
     """提取後的字串後處理（去除非內文字元）。
 
     - 一般（日文）模式：移除開頭非平假名/片假名/漢字/英文/數字的部分。
     - 韓文模式：跳過該開頭剝除步驟（Hangul 不在白名單內，會被誤判為非內文）。
+    - **實驗性模式（experimental=True）**：也跳過該步驟 — anchor + boundary
+      expansion 已精準定位候選邊界，不再用「剝除非內文開頭」做兜底；保留
+      邊界擴展選到的字元（含 `（` `,` `.` 等），讓 `_complete_brackets` 等
+      後處理直接作用於原始候選。
     """
     # 若被邊框符號 │ 或 | 包起來，則只取邊框內的文字
     match = re.search(r'[│\|](.*)[│\|]', text)
     if match:
         text = match.group(1).strip(' \t　.')
 
-    if not korean_mode:
+    if not korean_mode and not experimental:
         # 移除開頭非平假名、片假名、漢字、英文、數字的部分。
         # 韓文模式跳過此步驟，否則 Hangul 不在白名單內會把整段砍掉。
         text = re.sub(
@@ -43,8 +48,11 @@ def _postprocess_text(text: str, korean_mode: bool = False) -> str:
         '', text
     ).strip()
 
-    # 移除開頭的「數字＋點」格式（全形半形皆可），如 １．、1.、３.
-    text = re.sub(r'^[0-9０-９]+[.．]', '', text).strip()
+    # 移除開頭的「(可選 AA noise 標點)+數字＋點」格式（全形半形皆可）。
+    # 容許 `[、,，.．]*` 前綴是為了實驗性模式（無 strip-head 兜底）下，
+    # 邊界擴展把 AA 圖中的 `.２．` `..４．` `、..８．` 等 AA-flavored
+    # 前綴吃進候選；這裡一併剝除才能還原成乾淨的 `２．→ ""` 結果。
+    text = re.sub(r'^[、,，.．]*[0-9０-９]+[.．]', '', text).strip()
     # 若句尾包含特定符號，則將其刪除
     text = text.rstrip('|｜(（').strip()
 
@@ -92,10 +100,10 @@ _DICE_NOTATION_FW_RE = re.compile(r'(【\d+D\d+)：(\d+】)')
 # 解法：anchor regex 排除這四個字元；但 `_VALID_CHAR_RE` 仍保留它們（合法日文
 # 邊界擴展時不應切斷，例如「く＼，」式的疊字寫法）。
 # 連續 ≥2 平假名 anchor（平假名出現於 AA 圖機率低，2 char 仍是強信號）。
-# 允許 `ー`（U+30FC 長音符號）夾於平假名之間，捕捉「だーかーらー」這類拉長口吻。
-# 排除 ゝゞ 疊字標記。
+# 允許 `ー`（U+30FC 長音符號）、`～`(U+FF5E)、`〜`(U+301C) 夾於平假名之間，
+# 捕捉「だーかーらー」「で～も～ね～」這類拉長口吻。排除 ゝゞ 疊字標記。
 _HIRAGANA_RUN_RE = re.compile(
-    r'[ぁ-゜ゟ][ぁ-゜ゟー]+')
+    r'[ぁ-゜ゟ][ぁ-゜ゟー～〜]+')
 # 連續 ≥3 片假名 anchor（片假名常出現於 AA 圖作為視覺元素，2 char run 如
 # `トミ`、`ニヽ`、`トー` 在 AA 中假陽性多；真實日文片假名詞幾乎都 ≥3 char：
 # `コスト`、`ヒーロー`、`コンピューター`、`チョロ`、`カット`）。需要 2-char
@@ -113,8 +121,20 @@ _KANJI_HIRA_RE = re.compile(
 # 中間平假名同樣排除 ゝゞ 疊字標記。
 _OKURIGANA_RE = re.compile(
     r'[一-鿿々][ぁ-゜ゟ][一-鿿々]')
+# 片假名 + 日文助詞 anchor：捕捉「ダメで」「メだ」「ノで」「タの」這類
+# 「片假名單字+助詞」的對話模式（如「ダメで元々」「ダメだ」「ノルで」）。
+# AA 圖極少湊出「kata+ 真正助詞」組合（AA 多用 kata+小字假名/標點 ぃぅゝヾ
+# 等裝飾），假陽性風險低。第二字僅限 `_PARTICLES` 集合，更具區辨力。
+_KATA_PARTICLE_RE = re.compile(
+    r'[゠-ーヿ][のはをにがでとへやかもだねよわ]')
 # 漢字字元集（用於「短候選含漢字 = 強短信號」判斷）
 _KANJI_RE = re.compile(r'[一-鿿々]')
+
+# 對話框邊框字元（左/右）：用於 `_is_dialogue_box_bounded` 偵測候選是否
+# 位於 ｜…| / ＜…│ / │…＞ 等對話框內。命中即列入 strong_jp（免疫密度懲罰）
+# 並 +2 分，讓對話框內的合法日文不會因為鄰近邊框導致密度過高被誤殺。
+_DIALOGUE_LEFT_MARKERS = set('＜<│|｜')
+_DIALOGUE_RIGHT_MARKERS = set('＞>│|｜')
 
 # 半形片假名 — AA 圖最大宗的噪聲來源
 _HALFWIDTH_KANA_CHARS = set(chr(c) for c in range(0xFF66, 0xFFA0))
@@ -128,29 +148,52 @@ _AA_PUNCT_CHARS = set('〔〕㌻㍉〟〝丶ヽヾ')
 _JP_END_PUNCT = set('！？。、…')
 
 # 短句 anchor：假名 run + 日文句末標點。分兩種強度：
-# - **強標點**（`！？!?`）：≥1 假名（含 ≥1 平假名）即可，如「え！？」「ま！」。
+# - **強標點**（**全形** `！？`）：≥1 假名（含 ≥1 平假名）即可，如「え！？」「ま！」。
 # - **弱標點**（`、。…`）：需 ≥2 假名（含 ≥1 平假名），如「いや、」「はあ…」。
-#   排除「へ、」這類「單 1 平假名 + 弱標點」的 AA 易混淆模式（`へ` 是助詞
-#   且常出現於 AA 圖）。
+#   排除「へ、」這類「單 1 平假名 + 弱標點」的 AA 易混淆模式。
+# **半形 `!?` 不算強標點**：AA 圖中半形驚嘆/問號常被借作裝飾（如「く!」「ンへ!」
+# 「く!.」），不可單憑半形 `!` 把短碎片當成短句 anchor。半形 `!?` 在 scoring
+# 仍給較低 bonus（見 `_score_candidate`）。
 # lookahead 確保整段 kana run 含 ≥1 平假名（排除純片假名短語如「メヘ、」與
 # ゝゞ 疊字標記）。
 _SHORT_UTT_RE = re.compile(
     r'(?=[ぁ-゜ゟ゠-ーヿ]*[ぁ-゜ゟ])'
-    r'(?:[ぁ-゜ゟ゠-ーヿ]+[！？!?]'
+    r'(?:[ぁ-゜ゟ゠-ーヿ]+[！？]'
     r'|[ぁ-゜ゟ゠-ーヿ]{2,}[、。…])')
+
+# 平假名 + 真片假名（非 ー）+ 平假名 — 「こンっ」這類片假名單字夾在平假名間。
+# 真實日文罕見此模式（片假名詞會整串寫，不會單字夾入平假名）；AA 圖則常見。
+# `゠-ヺ`(U+30A0-30FA) 排除 `ー`(U+30FC 長音符號) — 避免「だーか」這類拉長口吻誤判。
+_HIRA_KATA_HIRA_RE = re.compile(r'[ぁ-゜ゟ][゠-ヺ][ぁ-゜ゟ]')
 
 # 漢字 + 句末標點 anchor：純漢字片語 + 日文標點（如「自分？」「諸君！」「認…」）。
 # 純漢字短語在 AA 圖中極少出現（AA 用半形片假名／符號），通常是省略平假名的
 # 對話寫法。此 anchor 補足 _KANJI_HIRA_RE 漏掉的「漢字直接接句末標點」情境。
 _KANJI_END_PUNCT_RE = re.compile(r'[一-鿿々][！？。、…]')
 
-# 「拉長念法」spaced-out anchor：CJK 字元 + 全形空白（**1 個以上**）至少重複 3 次，
-# 最後再接 CJK 字元。允許 `　+` 是為了涵蓋「な　ん　と　痛　ま　し　　い　事　件…」
-# 這類因強調語氣而出現雙空白／不規則空白的句子。
+# 數字 + 平假名計數詞 + 漢字 anchor：捕捉「1か月」「2つ目」「3か所」這類
+# 「數字 + ひらがな助数詞 + 漢字」結構（か月 / つ目 / か所 等）。AA 圖中
+# 「數字緊接平假名再接漢字」極為罕見（AA 多用 `1.:.:` 點線結構），假陽性風險低。
+_COUNTER_RE = re.compile(r'[0-9０-９]+[ぁ-゜ゟ][一-鿿]')
+
+# 片假名 stutter anchor：片假名（可帶 `、`）至少重複 3 次，捕捉「パ、パパ」
+# 「マ、ママ」這類結巴／呼喊式對話。`_KATAKANA_RUN_RE` 已涵蓋無 `、` 的
+# 3+ 連續片假名；此 anchor 補足 `、` 夾雜的情況。注意：全同字（如「ニ、ニニ」）
+# 仍可能命中，但後續 score 過濾與密度檢查會擋下純 AA 裝飾。
+_KATA_STUTTER_RE = re.compile(r'(?:[゠-ーヿ]、?){3,}')
+
+# 「拉長念法」spaced-out anchor：CJK 字元 + 全形空白（**1~2 個**）至少重複 3 次，
+# 最後再接 CJK 字元 + 可選的（空白 + 句末標點）。
+# 限制 inter-char 空白為 1~2 個（`　{1,2}`）— 使用者觀察「一般對話空格不會超過
+# 2 格」，3+ 連續空白應視為 chunk 邊界（AA 圖與對話的分隔），不該被拉長念法
+# 偵測橋接。例如「ミ　　　　　何　　故　　脱　　ぐ」應只抓「何　　故　　脱　　ぐ」，
+# 不該把孤立的「ミ」也拉進來。
 # 例：「シ　ロ　ウ　殿　は　勇　者　で　す　な！」、
-#     「な　ん　と　痛　ま　し　　い　事　件　な　の　で　し　ょ　う」
+#     「な　ん　と　痛　ま　し　　い　事　件　な　の　で　し　ょ　う」、
+#     「何　　故　　脱　　ぐ　　。」
 _SPACED_OUT_RE = re.compile(
-    r'(?:[ぁ-ゟ゠-ヿ一-鿿]　+){3,}[ぁ-ゟ゠-ヿ一-鿿][！？。!?]*')
+    r'(?:[ぁ-ゟ゠-ヿ一-鿿]　{1,2}){3,}[ぁ-ゟ゠-ヿ一-鿿]'
+    r'(?:[　 ]*[！？。!?]+)?')
 
 # 數字選項 anchor：數字（可帶範圍 `～`）+ **全形**「：」/「．」分隔。
 # 例：「１：」、「１０：」、「１～３：」、「1．」。
@@ -167,6 +210,14 @@ _NUMBER_OPTION_RE = re.compile(
 _REPEAT_SMALL_HIRA_RE = re.compile(
     r'([ぁぃぅぇぉっゃゅょゎゕゖ])\1{2,}')
 
+# AA 風格雜訊標點前綴：以 `、,，.．\-` 等「日文非起始字元」開頭（如「-へ!.」
+# 「,..へ！-」「.込り!」）。真實日文對話幾乎不會以這些字元開頭（會用 ←、…、
+# 全形括號或直接內容）；boundary expansion 把 AA 圖中的雜訊標點吃進候選時
+# 是強 AA 信號。對命中此模式的候選 -4 分。
+# 注意：實驗模式停用 strip-head（讓 AA flavor 留在輸出）後，這個前綴會出現
+# 在候選裡 — 此規則就是用「前綴存在」當證據判斷候選是 AA 碎片並剔除。
+_AA_PUNCT_PREFIX_RE = re.compile(r'^[、,，.．\-]+')
+
 # AA 風格 latin 前綴：以半形 latin 字母（含大小寫）開頭、後接（可選）更多
 # 字母/數字、最後接 CJK 字元（如「jニ」「j爻」「rf7父」「i7从V」「jI斗ぅ示」）。
 # 真實日文句子幾乎不會以 latin 字母開頭直接接 CJK；AA 圖則常用此模式作裝飾。
@@ -180,10 +231,11 @@ _AA_LATIN_PREFIX_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9]*[぀-ヿ一-鿿]')
 # AA 圖則常借小字片假名作裝飾起頭（如「ィｆ芥ぅ」「ィ7从V」）。
 _AA_SMALL_KATA_PREFIX_RE = re.compile(r'^[ァィゥェォャュョッヮヶ]')
 
-# AA 風格 latin 尾綴：CJK 字元後接孤立的 1-2 個半形小寫字母結尾（如「行灯な心マi」
-# 結尾的 `マi`）。真實日文句子罕見以 CJK 後直接接半形 latin 結尾；AA 圖則
-# 常用此模式（單字母當視覺裝飾）。對命中此模式的候選 -3 分。
-_AA_LATIN_SUFFIX_RE = re.compile(r'[぀-ヿ一-鿿][a-z]{1,2}$')
+# AA 風格 latin 尾綴：CJK 字元後接孤立的 1-2 個半形字母（大小寫皆可）、
+# 可再接一個尾標點（如「行灯な心マi」結尾的 `マi`、「怎うぅx,」結尾的 `ぅx,`）。
+# 真實日文句子罕見以 CJK 後直接接半形 latin 結尾；AA 圖則常用此模式（單字母
+# 當視覺裝飾）。對命中此模式的候選 -3 分。
+_AA_LATIN_SUFFIX_RE = re.compile(r'[぀-ヿ一-鿿][a-zA-Z]{1,2}[、,，.．]?$')
 
 # 連續 ≥3 個相同平假名 — AA 圖裝飾特徵（如「んんんんんん」「あああ」）。
 # 真實日文擬聲詞如「あはは」「ふふふ」3 同字至多 3 個；若 ≥4 個連續，幾乎肯定是
@@ -223,6 +275,12 @@ def _find_anchors(line: str) -> list[tuple[int, int]]:
     for m in _NUMBER_OPTION_RE.finditer(line):
         anchors.append((m.start(), m.end()))
     for m in _KANJI_END_PUNCT_RE.finditer(line):
+        anchors.append((m.start(), m.end()))
+    for m in _COUNTER_RE.finditer(line):
+        anchors.append((m.start(), m.end()))
+    for m in _KATA_STUTTER_RE.finditer(line):
+        anchors.append((m.start(), m.end()))
+    for m in _KATA_PARTICLE_RE.finditer(line):
         anchors.append((m.start(), m.end()))
     anchors.sort()
     return anchors
@@ -303,6 +361,28 @@ def _local_aa_density(line: str, start: int, end: int,
     return noise / non_space
 
 
+def aa_noise_ratio(text: str, symbol_regex: re.Pattern) -> float:
+    """`text` 中「AA 噪聲字元」佔「非空白字元」的比例（0.0 ~ 1.0）。
+
+    AA 噪聲的定義與 `_local_aa_density` 一致：半形片假名 ∪ AA 慣用標點
+    (`_AA_PUNCT_CHARS`) ∪ `symbol_regex` 命中字元。無非空白字元時回 0.0。
+
+    用途：替換翻譯時判斷「某行被替換原文的右側殘留內容」是否像 AA 圖
+    （見 `translation_engine._right_side_has_aa`）。
+    """
+    noise = 0
+    non_space = 0
+    for ch in text:
+        if ch in (' ', '　'):
+            continue
+        non_space += 1
+        if (ch in _HALFWIDTH_KANA_CHARS
+                or ch in _AA_PUNCT_CHARS
+                or symbol_regex.match(ch)):
+            noise += 1
+    return noise / non_space if non_space else 0.0
+
+
 def _class_transitions(text: str) -> int:
     """字元類別跳轉次數（hira/kata/kanji/latin/digit/punct/other 之間）。"""
     def cls(ch: str) -> str:
@@ -358,9 +438,12 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     has_num_option = bool(_NUMBER_OPTION_RE.search(text))
     if has_num_option:
         s += 3
-    # 含 ！ 或 ？ — 強烈口語/對話信號（如「え！？」「あ？」短句）
-    if any(ch in text for ch in '！？!?'):
+    # 句末標點 bonus。全形 `！？` 是強口語/對話信號（+2）；半形 `!?` 在 AA 圖
+    # 中常被借作裝飾，信號較弱（+1）；`。、…` 一般日文標點（+1）。
+    if any(ch in text for ch in '！？'):
         s += 2
+    elif any(ch in text for ch in '!?'):
+        s += 1
     elif any(ch in text for ch in '。、…'):
         s += 1
     # 行尾對話 bonus + 多重懲罰豁免：典型 AA 排版（左圖右文），右側候選
@@ -369,16 +452,28 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     is_right_edge = _is_right_edge_dialogue(line, start, end)
     if is_right_edge:
         s += 2
+    # 對話框內 bonus + 密度豁免：候選兩側被 ｜| / ＜＞ / │ 包夾時。
+    # 對話框內的合法日文（如「│一旦止め―――│」）因 │ 邊框會把局部 AA 密度
+    # 拉高被誤殺；偵測到對話框邊界時，把它視為強日文信號豁免密度懲罰。
+    is_box_bounded = _is_dialogue_box_bounded(line, start, end)
+    if is_box_bounded:
+        s += 2
     # AA 噪聲懲罰：在「強日文信號」缺席時才嚴罰。
     # 注意：`_OKURIGANA_RE` 與 `_KANJI_HIRA_RE` 雖然有分數 bonus，但不列入
     # strong_jp — AA 圖中「kanji+hira」「kanji-hira-kanji」三字偶然碰撞時
     # （如「灯な心」「彡く弍」）若也豁免局部 AA 密度懲罰，會放掉大量假陽性。
     # has_run + len 門檻從 8 降到 7（為了 `じゃあオープン`）。
+    any_hira = any(0x3041 <= ord(c) <= 0x309F for c in text)
+    # `has_run + len>=7` 條件需要含平假名 — 純片假名長候選（如「ニニー―――ニ」）
+    # 不可僅靠長度被視為強日文信號；真實長對話幾乎必含平假名。
+    # strong_jp 的句末標點只認**全形** `！？。` — 半形 `!?` 信號不足以豁免
+    # 局部 AA 密度懲罰（避免「ンへ!」這類含半形 `!` 的 AA 碎片被放行）。
     strong_jp = (particle_count >= 2
-                 or (has_run and len(text) >= 7)
-                 or any(ch in text for ch in '！？!?。')
+                 or (has_run and len(text) >= 7 and any_hira)
+                 or any(ch in text for ch in '！？。')
                  or has_num_option
-                 or is_right_edge)
+                 or is_right_edge
+                 or is_box_bounded)
     # 注意：分母改為「非空白字元數」後（見 `_local_aa_density`），閾值
     # 從原本 0.6 降到 0.4，否則 AA padding 大量空白會把比例壓低逃避懲罰。
     density = _local_aa_density(line, start, end, symbol_regex, 8)
@@ -386,6 +481,12 @@ def _score_candidate(text: str, line: str, start: int, end: int,
         s -= 4
     elif density > 0.4:
         s -= 1
+    # 註：曾評估「整行 AA 比例懲罰」，但實測無效 — AA 圖常用 content-class 字元
+    # （latin `i`/`l`、漢字 `彡`/`从`）當裝飾「柱子」，會把整行比例稀釋（如
+    # `|i:i:i|` 中的 `i` 算 content），導致純 AA 行的比例反而比合法短句行還低。
+    # 改善「AA 圖中碰巧像日文的碎片」（如 `怎うぅx,`）的正解是補強
+    # DEFAULT_SYMBOL_REGEX（用 scan_aa_symbols.py 找高頻裝飾字元），讓
+    # `_local_aa_density` 的判定更準。
     # 類別跳轉率懲罰：只在較長文字、且無強日文信號時才套用。
     # 門檻從 5 升到 6 — 避免「お腹痛い）」這類 5-char 日文短句（漢字-平假名
     # -漢字-平假名-閉括號，類別頻繁跳轉但合法）被誤殺。
@@ -409,6 +510,18 @@ def _score_candidate(text: str, line: str, start: int, end: int,
         s -= 3
     # AA 小字片假名前綴懲罰：「ィｆ芥ぅ」這類片段
     if _AA_SMALL_KATA_PREFIX_RE.match(text):
+        s -= 3
+    # AA 雜訊標點前綴懲罰：「-へ!.」「,..へ！-」「.込り!」這類片段
+    if _AA_PUNCT_PREFIX_RE.match(text):
+        s -= 4
+    # 平假名夾真片假名懲罰：「とつこンっ」的「こンっ」這類片假名單字夾在平假名間。
+    if _HIRA_KATA_HIRA_RE.search(text):
+        s -= 3
+    # 純片假名長候選（無平假名）懲罰：「ニニー―――ニ」這類純 kata + 裝飾片段。
+    # 真實日文 ≥5 char 句子幾乎都含平假名（即使片假名為主的詞也常接助詞 の/だ
+    # 等）；right_edge / box_bounded / spaced-out 等強信號可豁免（涵蓋
+    # 「ハハハハッ」笑聲在行尾的情況）。
+    if len(text) >= 5 and not any_hira and not strong_jp:
         s -= 3
     return s
 
@@ -439,14 +552,14 @@ def _is_strong_short_candidate(text: str) -> bool:
     """短候選（≤ 3 char）是否具備「強日文信號」可獨立成立。
 
     具備以下任一即可獨立保留：
-    - 含 `！？` **且長度 ≥ 3**（如「え！？」「だっ！？」）。長度 2 含 `！？` 的
-      情況（如「ま！」「へ！」）信號不足，需要靠同行伴隨候選或行尾位置才保留 —
-      避免「へ！」等 AA 碎片誤抓。
+    - 含**全形** `！？` **且長度 ≥ 3**（如「え！？」「だっ！？」）。長度 2 含
+      `！？` 的情況（如「ま！」）信號不足，需要靠同行伴隨候選或行尾位置才保留。
+      **半形 `!?` 不算** — AA 圖中半形驚嘆/問號常被借作裝飾。
     - 命中 `_OKURIGANA_RE`（漢字+平假名+漢字）
     - 含 ≥2 種不同助詞（不計重複出現）
     - 命中 `_NUMBER_OPTION_RE`（數字選項格式）
     """
-    if any(c in text for c in '！？!?') and len(text) >= 3:
+    if any(c in text for c in '！？') and len(text) >= 3:
         return True
     if _OKURIGANA_RE.search(text):
         return True
@@ -460,6 +573,29 @@ def _is_strong_short_candidate(text: str) -> bool:
 
 
 _RIGHT_EDGE_CLOSERS = set('＞」』）〕]>―‐—–')
+
+
+def _is_dialogue_box_bounded(line: str, start: int, end: int) -> bool:
+    """候選位於對話框 ｜…| / ＜…│ / │…＞ 等內部 → 強烈日文對話信號。
+
+    判定：跳過候選兩側空白後，緊鄰的非空白字元是對話框邊框字元
+    （左側 `＜<│|｜`，右側 `＞>│|｜`）。命中時：
+    - 列入 `strong_jp`（免疫局部 AA 密度懲罰）
+    - 額外 +2 分
+    用途：捕捉「│一旦止め―――│」「＜起きた.│」「｜（…………あ、ダメだ）|」
+    這類對話框內的合法日文 — 候選因鄰近 `│|｜` 邊框會被 `_local_aa_density`
+    判定為高 AA 密度而誤殺，此機制把這種「自帶 AA 邊界」情境視為強信號。
+    """
+    i = start - 1
+    while i >= 0 and line[i] in (' ', '　'):
+        i -= 1
+    left_ok = i >= 0 and line[i] in _DIALOGUE_LEFT_MARKERS
+    if not left_ok:
+        return False
+    j = end
+    while j < len(line) and line[j] in (' ', '　'):
+        j += 1
+    return j < len(line) and line[j] in _DIALOGUE_RIGHT_MARKERS
 
 
 def _is_right_edge_dialogue(line: str, start: int, end: int) -> bool:
@@ -712,7 +848,8 @@ def extract_text(
                     proc_line, invalid_regex, symbol_regex):
                 # 把骰子內的全形 `：` 還原為半形 `:`
                 text = _DICE_NOTATION_FW_RE.sub(r'\1:\2', raw_text)
-                text = _postprocess_text(text, korean_mode=False)
+                text = _postprocess_text(text, korean_mode=False,
+                                          experimental=True)
                 # 短句允許長度 2 的條件：見 `_extract_experimental_line` 內註解。
                 # 此處走 postprocess 之後再過一次 min_len 防剝離後過短。
                 is_re_post = _is_right_edge_dialogue(line, cand_s, _e)
@@ -870,7 +1007,7 @@ def analyze_extraction(
                     continue
                 t = _DICE_NOTATION_FW_RE.sub(r'\1:\2', t)
                 original_t = t
-                t = _postprocess_text(t, korean_mode=False)
+                t = _postprocess_text(t, korean_mode=False, experimental=True)
                 report.append(f"    [後處理] '{original_t}' => '{t}'")
                 if len(t) <= 2:
                     report.append("    -> ❌ 剔除：後處理後長度 <= 2。")
@@ -1088,6 +1225,16 @@ def get_chapter_display(text_first_lines: str) -> tuple[str, str] | None:
         (number_str, display_label) 元組，例如 ("8", "第8話")、("3", "番外編3")、
         ("216", "その216")，或 None。
     """
+    # 第N-N話 — 複合話數（如「第5-2話」），完整保留分節編號
+    match = re.search(
+        r'第\s*([０-９\d]+)\s*[-－ー−ｰ]\s*([０-９\d]+)\s*話', text_first_lines)
+    if match:
+        trans = str.maketrans('０１２３４５６７８９', '0123456789')
+        a = str(int(match.group(1).translate(trans)))
+        b = str(int(match.group(2).translate(trans)))
+        n = f"{a}-{b}"
+        return (n, f"第{n}話")
+
     # 第N話 — 阿拉伯數字
     match = re.search(r'第\s*(\d+)\s*話', text_first_lines)
     if match:

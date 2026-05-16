@@ -150,13 +150,15 @@ def _cleanup_unmatched_spans(text: str) -> str:
 
 
 # 貼文標頭行 — 用於在非 dt/dd 結構中分割貼文
-# 支援兩種格式：
+# 支援三種格式：
 #   1.「N 名前：NAME[...]」(5ch / FC2 / himana)
 #   2.「N ： NAME ： YYYY/MM/DD(...)」(yaruobook / yaruok 等 FC2 變體)
+#   3.「N ： NAME  YYYY/MM/DD(...)」(yaruyarach.blog.fc2.com 等 — 名稱與日期間僅空白)
+# 第 2、3 種共用 regex：名稱與日期之間的分隔符 `(?:[：:]|\[[^\]]*\])` 為可選。
 _POST_HEADER_RE = re.compile(
     r'^\s*\d+\s*(?:'
     r'(?:名前|Name)\s*[：:]'
-    r'|[：:]\s*.+?\s*(?:[：:]|\[[^\]]*\])\s*\d{4}[/年]'
+    r'|[：:]\s*.+?\s*(?:[：:]|\[[^\]]*\])?\s*\d{4}[/年]'
     r')'
 )
 _COLOR_SPAN_RE = re.compile(r'<span\s+style="color:[^"]*">|</span>')
@@ -164,11 +166,11 @@ _COLOR_SPAN_RE = re.compile(r'<span\s+style="color:[^"]*">|</span>')
 # 從標頭提取投稿者名稱：「N 名前：NAME[...]」→ NAME
 _POSTER_NAME_RE = re.compile(r'(?:名前|Name)\s*[：:]\s*(.+?)(?:\[|投稿日|$)')
 
-# 替代格式 → NAME。支援兩種分隔符（yaruobook.jp 用 `：`、yarucha 用 `[sage]` / `[]`）：
-#   「N ： NAME ： YYYY/MM/DD...」
-#   「N : NAME [] YYYY/MM/DD...」
+# 替代格式 → NAME。分隔符可選（yaruobook.jp 用 `：`、yarucha 用 `[sage]` / `[]`、
+# yaruyarach 名稱與日期間僅以空白分隔）：
+#   「N ： NAME ： YYYY/MM/DD...」 / 「N : NAME [] YYYY/MM/DD...」 / 「N ： NAME  YYYY/MM/DD...」
 _POSTER_NAME_RE_ALT = re.compile(
-    r'^\s*\d+\s*[：:]\s*(.+?)\s*(?:[：:]|\[[^\]]*\])\s*\d{4}[/年]'
+    r'^\s*\d+\s*[：:]\s*(.+?)\s*(?:[：:]|\[[^\]]*\])?\s*\d{4}[/年]'
 )
 
 
@@ -312,6 +314,28 @@ def _extract_dt_dd_posts(
             lines_out.append(dt_text + '\n' + '\n'.join(dd_lines))
 
     return lines_out
+
+
+_NAV_DATE_RE = re.compile(r'\((\d{4})/(\d{1,2})/(\d{1,2})\)')
+
+
+def _is_nav_ascending_by_date(items: list[dict]) -> bool:
+    """偵測關聯清單是否已是「舊 → 新」時間順序。
+
+    從每個 item 標題尾端的 `(YYYY/MM/DD)` 抽日期，比較相鄰配對：
+    遞增多於遞減即視為已是時間順序。無日期或全相同則回傳 False
+    （退回呼叫端既有的 reverse 預設行為）。
+    """
+    dates: list[tuple[int, int, int]] = []
+    for it in items:
+        m = _NAV_DATE_RE.search(it.get('title', ''))
+        if m:
+            dates.append((int(m.group(1)), int(m.group(2)), int(m.group(3))))
+    if len(dates) < 2:
+        return False
+    asc = sum(1 for i in range(len(dates) - 1) if dates[i] < dates[i + 1])
+    desc = sum(1 for i in range(len(dates) - 1) if dates[i] > dates[i + 1])
+    return asc > desc
 
 
 # ════════════════════════════════════════════════════════════════
@@ -505,7 +529,8 @@ def _parse_himanatokiniyaruo(page_html: str, base_url: str, *, author_name: str 
 def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", author_only: bool = False) -> tuple[str | None, list[dict], str]:
     """解析 FC2 Blog 格式（含 web.archive.org 封存版）。
 
-    內文：<div class="ently_text"> 或 <div class="entry_body">，截止於 fc2button-clap div 或 relate_dl。
+    內文：<div class="ently_text">、<div class="entry_body"> 或 <div class="eBody">，
+          截止於 fc2button-clap div 或 relate_dl。
     標題：<title>...</title>
     關聯：<dl class="relate_dl ..."> 中的 <li class="relate_li">
     """
@@ -513,34 +538,59 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
     title_m = re.search(r'<title>([^<]+)</title>', page_html)
     page_title = html.unescape(title_m.group(1)).strip() if title_m else ""
 
-    # ── 內文 ──（支援兩種 FC2 模板：ently_text 與 entry_body）
-    ently_m = re.search(r'<div\s+class="(?:ently_text|entry_body)">', page_html)
-    if not ently_m:
-        return None, [], page_title
-
-    content_start = ently_m.end()
-    end_m = re.search(
+    # ── 內文 ──（支援三種 FC2 模板：ently_text / entry_body / eBody）
+    # eBody 變體（例：chronoyaruo.blog.fc2.com）以多個 <div class="aa"> 容納內文、
+    # <br> 分行，且續篇貼文另置於 <div class="eBody" id="more"> —— 兩段之間沒有
+    # 邊界標記，會一併被 fc2button-clap / relate_dl 終止點涵蓋進來。
+    # 另：長期未更新的 FC2 blog 會在文章前插入「スポンサーサイト」廣告區塊，
+    # 它同樣是 <div class="ently_text">（內含 sita_rss / counter script 等 cruft），
+    # 因此逐一掃描所有容器，取第一個內文含貼文標頭的；都沒有則退回第一個。
+    _end_re = re.compile(
         r'<div\s+class="fc2button-clap[^"]*"'
         r'|<dl\s+class="relate_dl'
         r'|<!--/ently_text-->'
-        r'|<!--/entry_body-->',
-        page_html[content_start:],
+        r'|<!--/entry_body-->'
+        r'|<!--/eBody-->'
     )
-    content_end = content_start + end_m.start() if end_m else len(page_html)
-    content_html = page_html[content_start:content_end]
 
-    # 移除 <a> 連結整段（含導覽文字如 Next/Back/前往目錄）
-    content_html = re.sub(r'<a\s[^>]*>.*?</a>', '', content_html, flags=re.DOTALL)
-    content_text = re.sub(r'<br\s*/?>', '\n', content_html)
-    content_text = _strip_tags_keep_color(content_text)
-    content_text = html.unescape(content_text)
+    def _extract_body(start_idx: int) -> str:
+        rest = page_html[start_idx:]
+        em = _end_re.search(rest)
+        raw = rest[:em.start()] if em else rest
+        # 移除非內文元素：<script>（FC2 計數器/blogroll）、<a>...</a>（導覽連結）
+        raw = re.sub(r'<script\b.*?</script>', '', raw, flags=re.DOTALL | re.IGNORECASE)
+        raw = re.sub(r'<a\s[^>]*>.*?</a>', '', raw, flags=re.DOTALL)
+        txt = re.sub(r'<br\s*/?>', '\n', raw)
+        txt = _strip_tags_keep_color(txt)
+        return html.unescape(txt)
+
+    def _has_post_header(txt: str) -> bool:
+        return any(_POST_HEADER_RE.search(_COLOR_SPAN_RE.sub('', ln))
+                   for ln in txt.split('\n'))
+
+    containers = list(re.finditer(
+        r'<div\s+class="(?:ently_text|entry_body|eBody)"[^>]*>', page_html))
+    if not containers:
+        return None, [], page_title
+
+    content_text = None
+    for cm in containers:
+        body = _extract_body(cm.end())
+        if content_text is None:
+            content_text = body  # 預設取第一個容器（fallback）
+        if _has_post_header(body):
+            content_text = body
+            break
 
     # 依作者名稱過濾顏色：非作者貼文移除 color span（或完全跳過）
     # 若勾了忽略留言但未指定作者，交由 _filter_color_by_author 自動偵測
+    # 未指定作者時：保留所有 color span（讓站方的作者標色等原色顯示），
+    # 但仍需呼叫 _cleanup_unmatched_spans 清除 <span class="aa"> 等外層
+    # span 被 _strip_tags_keep_color 剝掉開標籤後殘留的孤兒 </span>。
     if author_name or author_only:
         content_text = _filter_color_by_author(content_text, author_name, author_only=author_only)
     else:
-        content_text = re.sub(r'<span\s+style="color:[^"]*">|</span>', '', content_text)
+        content_text = _cleanup_unmatched_spans(content_text)
 
     lines = content_text.split('\n')
     while lines and not lines[0].strip():
@@ -569,7 +619,13 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
             else:
                 title = html.unescape(re.sub(r'<[^>]+>', '', li_inner)).strip()
                 nav_links.append({'title': title, 'url': None, 'is_current': True})
-        nav_links.reverse()
+        # FC2 各站的 relate_dl 排序不一致：多數為「新 → 舊」需 reverse 取得時間順序，
+        # 但部分站點（例：yaruosippu.blog.fc2.com）原始 HTML 已是「舊 → 新」時間順序，
+        # 此時 reverse 反而會讓「下一話」按鈕變成上一集。
+        # 偵測方式：從標題尾端 `(YYYY/MM/DD)` 抽日期，多數相鄰配對為遞增 → 不 reverse；
+        # 無日期或日期皆同 → 退回既有「reverse」慣例。
+        if not _is_nav_ascending_by_date(nav_links):
+            nav_links.reverse()
 
     return text_content or None, nav_links, page_title
 

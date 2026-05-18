@@ -141,20 +141,27 @@ _BLACK_SPAN_RE = re.compile(
     re.DOTALL,
 )
 
+# 雙向文字控制字元（LRM/RLM、LRE~RLO、LRI~PDI）。部分站點（例：
+# yaruobook.com）會在每行 AA 外包 <U+202D>…<U+202C> 以強制左到右排版，
+# 這些字元不屬 AA 內容、為不可見控制碼，抽取時一律移除。
+_BIDI_RE = re.compile('[\u200e\u200f\u202a-\u202e\u2066-\u2069]')
+
 
 def _strip_tags_keep_color(text: str) -> str:
     """移除 HTML 標籤，但保留 <span style="color:..."> 和 </span>。
 
     黑色（#000, #000000, black）的 span 會被移除（只保留內文）。
+    同時移除雙向文字控制字元（非 AA 內容的不可見控制碼）。
     """
     text = _normalize_color_tags(text)
     text = _BLACK_SPAN_RE.sub(r'\1', text)
-    return re.sub(r'<(?!span\s+style="color:|/span>)[^>]+>', '', text)
+    text = re.sub(r'<(?!span\s+style="color:|/span>)[^>]+>', '', text)
+    return _BIDI_RE.sub('', text)
 
 
 def _strip_all_tags(text: str) -> str:
-    """移除所有 HTML 標籤（不保留任何 span）。"""
-    return re.sub(r'<[^>]+>', '', text)
+    """移除所有 HTML 標籤（不保留任何 span）與雙向文字控制字元。"""
+    return _BIDI_RE.sub('', re.sub(r'<[^>]+>', '', text))
 
 
 _OPEN_COLOR_RE = re.compile(r'<span\s+style="color:[^"]*">')
@@ -389,6 +396,10 @@ def _extract_dt_dd_posts(
             continue
 
         dd_content = post.group(2)
+        # 來源 HTML 的字面換行屬排版（瀏覽器在一般流中折疊為空白），AA 真正
+        # 的換行一律由 <br> 表示。先把 \r\n 折成單一空白，避免長 AA 行在
+        # 來源換行處被誤斷成兩行（例：yaruobook.com 來源把過長行折行）。
+        dd_content = re.sub(r'[\r\n]+', ' ', dd_content)
         dd_text = re.sub(r'<br\s*/?>', '\n', dd_content)
         if is_author:
             dd_text = _strip_tags_keep_color(dd_text)

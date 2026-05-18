@@ -1340,6 +1340,7 @@ _SITE_NAMES = [
     'RPG系AA物語まとめるお',
     '| 隣のAA',
     '－ やらない夫オンリーブログ',
+    'やる夫スレ本棚2号館  |  ',
 ]
 
 _SITE_PREFIX_RE = re.compile(

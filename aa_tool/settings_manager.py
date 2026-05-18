@@ -117,6 +117,7 @@ class AppCache:
     work_history: list = field(default_factory=list)
     editor_font_family: str = "MS PGothic"
     editor_font_size: int = 12
+    editor_line_height: int = 120
     last_open_dir: str = ""
     editor_bg_color: str = "#ffffff"
     work_history_limit: int = 10
@@ -274,6 +275,11 @@ class SettingsManager:
                     'editor_font_size', cache.editor_font_size))
             except (TypeError, ValueError):
                 pass
+            try:
+                cache.editor_line_height = int(data.get(
+                    'editor_line_height', cache.editor_line_height))
+            except (TypeError, ValueError):
+                pass
             cache.last_open_dir = data.get('last_open_dir', '')
             cache.editor_bg_color = data.get(
                 'editor_bg_color', cache.editor_bg_color)
@@ -379,6 +385,7 @@ class SettingsManager:
                 'work_history': work_hist,
                 'editor_font_family': cache.editor_font_family,
                 'editor_font_size': cache.editor_font_size,
+                'editor_line_height': cache.editor_line_height,
                 'last_open_dir': cache.last_open_dir,
                 'editor_bg_color': cache.editor_bg_color,
                 'work_history_limit': cache.work_history_limit,

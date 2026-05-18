@@ -89,6 +89,10 @@ _RIGHT_AA_NOISE_THRESHOLD = 0.34
 # 的 AA 圖（否則「　　「こんにちは」」這種以 `」` 結尾的對話行會被誤判）。
 _TRAILING_CLOSERS = set('」』）)】〕〉》｝}］]')
 
+# 純橫線字元（分隔線／表格線）。一整段非空白內容若只由這些字元組成，是排版
+# 用的分隔線而非 AA 圖，不應觸發右側補空白（例：`─── `）。
+_HORIZONTAL_RULE_CHARS = set('─━═╌╍┄┅┈┉╴╶╾╼-－‐‑‒–—―')
+
 
 def _right_side_has_aa(
     rest: str,
@@ -113,6 +117,10 @@ def _right_side_has_aa(
         i += 1
     tail = rest[i:]
     if not tail:
+        return False
+    # 純橫線分隔線（如 `─── `）不算 AA 圖：去空白後若只剩橫線字元，不補空白。
+    tail_nospace = [c for c in tail if c not in (' ', '　')]
+    if tail_nospace and all(c in _HORIZONTAL_RULE_CHARS for c in tail_nospace):
         return False
     return aa_noise_ratio(tail, symbol_regex) >= _RIGHT_AA_NOISE_THRESHOLD
 

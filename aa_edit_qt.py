@@ -165,6 +165,8 @@ class EditWindow(QMainWindow):
         on_font_change=None,      # (family, size) -> None; 字體變更持久化
         init_font_family: str = DEFAULT_EDITOR_FONT,
         init_font_size: int = DEFAULT_EDITOR_FONT_SIZE,
+        on_line_height_change=None,  # (percent: int) -> None; 行高變更持久化
+        init_line_height: int = LINE_HEIGHT_PERCENT,
         get_last_dir=None,        # () -> str; 取得上次開啟目錄
         on_dir_change=None,       # (dir: str) -> None; 目錄變更通知
         on_bg_change=None,        # (color: str) -> None; 底色變更即時持久化
@@ -202,6 +204,9 @@ class EditWindow(QMainWindow):
         self._on_font_change = on_font_change
         self._font_family = init_font_family or DEFAULT_EDITOR_FONT
         self._font_size = int(init_font_size) if init_font_size else DEFAULT_EDITOR_FONT_SIZE
+        self._on_line_height_change = on_line_height_change
+        self._line_height_percent = (
+            int(init_line_height) if init_line_height else LINE_HEIGHT_PERCENT)
         self._get_last_dir = get_last_dir
         self._on_dir_change = on_dir_change
         self._on_bg_change = on_bg_change
@@ -577,6 +582,26 @@ class EditWindow(QMainWindow):
         self.font_size_spin.valueChanged.connect(self._on_font_size_changed)
         layout.addWidget(self.font_size_spin)
 
+        layout.addSpacing(12)
+
+        self._lbl_line_height = QLabel("行高")
+        self._lbl_line_height.setStyleSheet("color:white; font-weight:bold;")
+        self._lbl_line_height.setToolTip(
+            "行高百分比（對應 CSS line-height），數值越大行距越寬")
+        layout.addWidget(self._lbl_line_height)
+
+        self.line_height_spin = QSpinBox()
+        self.line_height_spin.setRange(80, 300)
+        self.line_height_spin.setSingleStep(5)
+        self.line_height_spin.setValue(self._line_height_percent)
+        self.line_height_spin.setSuffix(" %")
+        self.line_height_spin.setFixedWidth(80)
+        self.line_height_spin.setStyleSheet(
+            "QSpinBox { background:#343638; color:#dce4ee;"
+            " border:1px solid #555; padding:2px 4px; }")
+        self.line_height_spin.valueChanged.connect(self._on_line_height_changed)
+        layout.addWidget(self.line_height_spin)
+
         layout.addStretch()
 
         btn_hide = _make_button("✕", "#6c757d", "#5a6268", width=30)
@@ -624,7 +649,7 @@ class EditWindow(QMainWindow):
         cjk_font = QFont("Microsoft JhengHei", main_font.pointSize())
         fm_cjk = QFontMetricsF(cjk_font)
         fixed_px = max(
-            fm_main.lineSpacing() * LINE_HEIGHT_PERCENT / 100.0,
+            fm_main.lineSpacing() * self._line_height_percent / 100.0,
             fm_cjk.lineSpacing() * 1.05,  # 1.05 為 CJK fallback 上下緣留白
         )
         cursor = QTextCursor(widget.document())
@@ -723,6 +748,18 @@ class EditWindow(QMainWindow):
             return
         self._font_size = int(size)
         self._apply_editor_font()
+
+    def _on_line_height_changed(self, percent: int) -> None:
+        if percent == self._line_height_percent:
+            return
+        self._line_height_percent = int(percent)
+        self._apply_line_height()
+        self._apply_line_height_to(self.orig_view)
+        if self._on_line_height_change is not None:
+            try:
+                self._on_line_height_change(self._line_height_percent)
+            except Exception:
+                pass
 
     def _apply_editor_font(self) -> None:
         new_font = QFont(self._font_family, self._font_size)
@@ -2254,7 +2291,7 @@ class EditWindow(QMainWindow):
         # 優先用目前有焦點的那一個；否則用第一個有選取的
         view = next((w for w in candidates if w.hasFocus()), candidates[0])
 
-        selected = view.textCursor().selectedText().replace(' ', '\n')
+        selected = view.textCursor().selectedText().replace('', '\n')
         if not selected.strip():
             self._set_status("⚠️ 選取範圍內沒有內容", "#ffc107")
             return

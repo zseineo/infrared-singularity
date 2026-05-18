@@ -62,7 +62,7 @@ from aa_tool.url_fetcher import fetch_url as _fetch_url, parse_page_html as _par
 from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 
-APP_VERSION = "1.21"
+APP_VERSION = "1.22"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -688,6 +688,7 @@ class MainWindow(QMainWindow):
         self.work_history: list[dict] = []
         self._editor_font_family: str = "submona"
         self._editor_font_size: int = 12
+        self._editor_line_height: int = 120
         self._last_dir: str = ""
         self._editor_bg_color: str = "#ffffff"
         self._auto_copy: bool = False
@@ -887,6 +888,8 @@ class MainWindow(QMainWindow):
                 on_font_change=self._on_editor_font_changed,
                 init_font_family=self._editor_font_family,
                 init_font_size=self._editor_font_size,
+                on_line_height_change=self._on_editor_line_height_changed,
+                init_line_height=self._editor_line_height,
                 get_last_dir=lambda: self._last_dir,
                 on_dir_change=self._on_last_dir_changed,
                 on_bg_change=self._on_editor_bg_changed,
@@ -1760,6 +1763,7 @@ class MainWindow(QMainWindow):
             work_history=list(self.work_history),
             editor_font_family=self._editor_font_family,
             editor_font_size=self._editor_font_size,
+            editor_line_height=self._editor_line_height,
             last_open_dir=self._last_dir,
             editor_bg_color=self._editor_bg_color,
             work_history_limit=self._work_history_limit,
@@ -1812,6 +1816,8 @@ class MainWindow(QMainWindow):
             self._editor_font_family = cache.editor_font_family
         if cache.editor_font_size:
             self._editor_font_size = int(cache.editor_font_size)
+        if cache.editor_line_height:
+            self._editor_line_height = int(cache.editor_line_height)
         if cache.last_open_dir and os.path.isdir(cache.last_open_dir):
             self._last_dir = cache.last_open_dir
         if cache.editor_bg_color:
@@ -2151,6 +2157,10 @@ class MainWindow(QMainWindow):
     def _on_editor_font_changed(self, family: str, size: int) -> None:
         self._editor_font_family = family
         self._editor_font_size = int(size)
+        self.schedule_save()
+
+    def _on_editor_line_height_changed(self, percent: int) -> None:
+        self._editor_line_height = int(percent)
         self.schedule_save()
 
     def _on_side_state_changed(

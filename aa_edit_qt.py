@@ -640,17 +640,23 @@ class EditWindow(QMainWindow):
             self._apply_line_height_to(self.preview_view)
 
     def _apply_line_height_to(self, widget: QTextEdit) -> None:
-        # 以主字型 × 120% 與 CJK fallback 字型自然高度取 max，套用 FixedHeight。
-        # 單獨使用主字型（MS PGothic）× 120% 時，繁中字會 fallback 到
+        # 以主字型 × 行高% 與 CJK fallback 字型自然高度取 max，套用 FixedHeight。
+        # 單獨使用主字型（MS PGothic）× 行高% 時，繁中字會 fallback 到
         # MingLiU/JhengHei 等較高的字型，仍會擠壓/切頂；取 max 後固定行高能
-        # 完整容納 fallback 字，同時維持純日文行的 120% 視覺比例。
+        # 完整容納 fallback 字，同時維持純日文行的視覺比例。
+        # ⚠️ CJK fallback 下限項也必須隨使用者設定的行高% 等比縮放——否則它是
+        # 固定值（約主字型 140% 高），會把 80~140% 之間的設定整段「夾住」、
+        # 使 spinbox 在這個區間調整完全沒有視覺變化。以 LINE_HEIGHT_PERCENT
+        # （預設 120）為基準縮放，使 percent=120 時與舊行為完全一致。
         main_font = widget.font()
         fm_main = QFontMetricsF(main_font)
         cjk_font = QFont("Microsoft JhengHei", main_font.pointSize())
         fm_cjk = QFontMetricsF(cjk_font)
+        pct = self._line_height_percent
         fixed_px = max(
-            fm_main.lineSpacing() * self._line_height_percent / 100.0,
-            fm_cjk.lineSpacing() * 1.05,  # 1.05 為 CJK fallback 上下緣留白
+            fm_main.lineSpacing() * pct / 100.0,
+            # 1.05 為 CJK fallback 上下緣留白；× pct/預設值 使其隨行高%縮放
+            fm_cjk.lineSpacing() * 1.05 * pct / LINE_HEIGHT_PERCENT,
         )
         cursor = QTextCursor(widget.document())
         cursor.select(QTextCursor.SelectionType.Document)
@@ -659,7 +665,13 @@ class EditWindow(QMainWindow):
             fixed_px,
             QTextBlockFormat.LineHeightTypes.FixedHeight.value,
         )
+        # 行高只是視覺格式，不該成為獨立的 undo entry：用 joinPreviousEditBlock
+        # 把這次 mergeBlockFormat 併入「觸發它的那次編輯」（對話框修正、整份
+        # 文件替換等）。否則使用者按 Ctrl+Z 時，第一次只會 undo 行高（無視覺
+        # 變化、但游標跳到文件尾使捲軸跳到最下方），要按第二次才真正復原內容。
+        cursor.joinPreviousEditBlock()
         cursor.mergeBlockFormat(block_fmt)
+        cursor.endEditBlock()
 
     # ════════════════════════════════════════════════════════════
     #  搜尋

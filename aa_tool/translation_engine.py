@@ -318,6 +318,19 @@ def apply_translation(
     valid_ids = [k for k in trans_map.keys() if k in orig_map]
     valid_ids.sort(key=lambda k: len(orig_map[k]), reverse=True)
 
+    # 每行的最後一個 segment 序號：同一行有多句被翻譯時，只有最後一段的右側
+    # 才可能是 AA 圖，非最後段右側緊接的是同行其他翻譯句，補空白只會在句子
+    # 之間塞入多餘全形空白。由 orig_map（所有提取段）算出每行最大 segment。
+    last_seg_of_line: dict[int, int] = {}
+    for k in orig_map:
+        try:
+            _ln_s, _sg_s = k.split('-', 1)
+            _ln_i, _sg_i = int(_ln_s), int(_sg_s)
+        except (ValueError, IndexError):
+            continue
+        if _sg_i > last_seg_of_line.get(_ln_i, -1):
+            last_seg_of_line[_ln_i] = _sg_i
+
     sorted_glossary = sorted(glossary.items(), key=lambda x: len(x[0]), reverse=True)
 
     # 預先切割行（整個替換過程只切割一次）
@@ -341,6 +354,15 @@ def apply_translation(
         else:
             len_diff = len(original) - len(final_translated)
             padded = final_translated + ('　' * len_diff if len_diff > 0 else '')
+            # 非該行最後一段：右側是同行的其他翻譯句而非 AA 圖，一律不補/不消
+            # 空白，避免在句子之間塞入多餘全形空白（只有最後一段需要對齊 AA）。
+            try:
+                _ln_s, _sg_s = _id.split('-', 1)
+                if last_seg_of_line.get(int(_ln_s), -1) != int(_sg_s):
+                    len_diff = 0
+                    padded = final_translated
+            except (ValueError, IndexError):
+                pass
 
         # 從 ID 解析行號（格式 NNN-S，NNN 為 1-indexed 行號）
         try:

@@ -3,9 +3,12 @@
 支援的網域：
   - 預設格式（article div + relate_dl）
   - himanatokiniyaruo.com（dt[id] / dd 結構 + related-entries）
-  - blog.fc2.com（ently_text div + relate_dl，含 web.archive.org 封存版）
+  - blog.fc2.com（ently_text / entry_text div + relate_dl，含 web.archive.org 封存版、res_h/res_b 變體）
+  - blog105.fc2.com（textar-aa div + relate_dl，FC2 舊版模板，含不帶引號 font color）
+  - blog136.fc2.com（entryblock / AA div + relate_dl，FC2 舊版模板）
   - yaruobook.jp（author-res-dt / author-res 結構 + relatedPostsWrap）
   - yaruo-matome.com（entry-content div + nexe-prev-post ul）
+  - blog.livedoor.jp（textar-aa / span.aa，無關聯記事、尾端嵌入下一話連結）
 """
 from __future__ import annotations
 
@@ -24,28 +27,81 @@ _HEADERS = {
     'Accept-Encoding': 'gzip, deflate',
 }
 
-_ENCODINGS = ['utf-8', 'cp932', 'euc-jp', 'shift_jis']
+# euc_jis_2004 為 euc-jp 的超集，涵蓋 JIS X 0213 機種依存文字（如 Ⅵ、①），
+# 置於 euc-jp 之前；標準 euc-jp 頁面以它解碼結果一致。
+_ENCODINGS = ['utf-8', 'cp932', 'euc_jis_2004', 'euc-jp', 'shift_jis']
+
+_META_CHARSET_RE = re.compile(rb'charset=["\']?([\w-]+)', re.IGNORECASE)
+
+
+def _decode_bytes(page_bytes: bytes, declared_charset: str | None = None) -> str:
+    """將位元組解碼為字串，優先採用宣告的編碼。
+
+    候選順序：HTTP header 宣告 → HTML <meta charset> → 常見日文編碼清單。
+    先逐一嘗試嚴格解碼；全部失敗時（頁面含少量非法位元組）改以**第一順位
+    候選**（通常為 HTTP header 宣告的編碼）寬鬆解碼——可正確處理「宣告
+    euc-jp 但夾雜壞位元組」的 livedoor 等頁面（嚴格解 euc-jp 會因 1~2 個壞
+    位元組失敗，若不指定編碼則所有編碼皆失敗而退回 utf-8 亂碼）。
+    寬鬆解碼不採「替代字元最少」啟發式：cp932 等寬鬆 codec 會把錯誤位元組
+    解成半形片假名而非 U+FFFD，反而騙過該啟發式，故一律信任宣告編碼。
+    """
+    head = page_bytes[:2048]
+    meta_m = _META_CHARSET_RE.search(head)
+    meta_charset = meta_m.group(1).decode('ascii', 'ignore').lower() if meta_m else None
+
+    candidates: list[str] = []
+    for c in (declared_charset, meta_charset):
+        if c and c.lower() not in candidates:
+            candidates.append(c.lower())
+    for c in _ENCODINGS:
+        if c not in candidates:
+            candidates.append(c)
+
+    for enc in candidates:
+        try:
+            return page_bytes.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+
+    # 全部嚴格失敗 → 以第一順位候選寬鬆解碼
+    for enc in candidates:
+        try:
+            return page_bytes.decode(enc, errors='replace')
+        except LookupError:
+            continue
+    return page_bytes.decode('utf-8', errors='replace')
+
+
+def _fetch_raw(url: str, *, timeout: int,
+               extra_headers: dict | None = None) -> tuple[bytes, str | None]:
+    """發送請求，回傳 (解壓後的位元組, HTTP header 宣告的 charset 或 None)。"""
+    headers = dict(_HEADERS)
+    if extra_headers:
+        headers.update(extra_headers)
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+        data = gzip.decompress(raw) if resp.headers.get('Content-Encoding') == 'gzip' else raw
+        cm = re.search(r'charset=([\w-]+)', resp.headers.get('Content-Type', ''), re.IGNORECASE)
+        return data, (cm.group(1) if cm else None)
 
 
 def fetch_url(url: str, *, timeout: int = 20) -> str:
     """發送 HTTP GET 請求，回傳解碼後的 HTML 字串。
 
-    自動處理 gzip 壓縮與日文常見編碼（utf-8 → cp932 → euc-jp → shift_jis）。
+    自動處理 gzip 壓縮與日文常見編碼（優先採用 HTTP header／<meta> 宣告的
+    charset，再退回 utf-8 → cp932 → euc_jis_2004 → euc-jp → shift_jis）。
+    FC2 R-18 年齡閘門（`class="age_verify_box_form"`）偵測到時，
+    自動帶 Cookie: age_check=1 重試以取得真實內容。
     """
-    req = urllib.request.Request(url, headers=_HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw_bytes = resp.read()
-        if resp.headers.get('Content-Encoding') == 'gzip':
-            page_bytes = gzip.decompress(raw_bytes)
-        else:
-            page_bytes = raw_bytes
+    raw, charset = _fetch_raw(url, timeout=timeout)
+    page_html = _decode_bytes(raw, charset)
 
-    for enc in _ENCODINGS:
-        try:
-            return page_bytes.decode(enc)
-        except (UnicodeDecodeError, LookupError):
-            continue
-    return page_bytes.decode('utf-8', errors='replace')
+    if 'age_verify_box_form' in page_html:
+        raw, charset = _fetch_raw(url, timeout=timeout, extra_headers={'Cookie': 'age_check=1'})
+        page_html = _decode_bytes(raw, charset)
+
+    return page_html
 
 
 # ════════════════════════════════════════════════════════════════
@@ -59,10 +115,11 @@ def _normalize_color_tags(text: str) -> str:
     - <span style="...color:VALUE..."> （含混合屬性）
     - <font color="VALUE"> / </font>
     """
-    # <font color="..."> → <span style="color:...">
+    # <font color="VALUE"> / <font color=VALUE> → <span style="color:VALUE">
+    # 支援帶引號與不帶引號兩種格式（舊式 FC2 模板如 blog105.fc2.com 使用不帶引號）
     text = re.sub(
-        r'<font\s+color="([^"]+)"[^>]*>',
-        lambda m: f'<span style="color:{m.group(1)}">',
+        r'<font\s+color=(?:"([^"]+)"|([^"\s>]+))[^>]*>',
+        lambda m: f'<span style="color:{m.group(1) or m.group(2)}">',
         text,
     )
     text = text.replace('</font>', '</span>')
@@ -150,15 +207,20 @@ def _cleanup_unmatched_spans(text: str) -> str:
 
 
 # 貼文標頭行 — 用於在非 dt/dd 結構中分割貼文
-# 支援三種格式：
+# 支援四種格式：
 #   1.「N 名前：NAME[...]」(5ch / FC2 / himana)
 #   2.「N ： NAME ： YYYY/MM/DD(...)」(yaruobook / yaruok 等 FC2 變體)
 #   3.「N ： NAME  YYYY/MM/DD(...)」(yaruyarach.blog.fc2.com 等 — 名稱與日期間僅空白)
+#   4.「N NAME DATE HH:MM:SS ID:XXX」(yaranaioblog.blog.fc2.com 等 — 數字後無 `：`/`名前`)
 # 第 2、3 種共用 regex：名稱與日期之間的分隔符 `(?:[：:]|\[[^\]]*\])` 為可選。
+# 第 4 種無 `：` 錨點，故以「日期＋時間＋ID:」三段連續結構錨定以降低誤判
+# （日期容許 2~4 位年份、`(曜)` 可選；時間 HH:MM:SS、`.ms` 可選）。
 _POST_HEADER_RE = re.compile(
     r'^\s*\d+\s*(?:'
     r'(?:名前|Name)\s*[：:]'
     r'|[：:]\s*.+?\s*(?:[：:]|\[[^\]]*\])?\s*\d{4}[/年]'
+    r'|\s+\S[^\n]*?\s+\d{1,4}/\d{1,2}/\d{1,2}(?:\([^)]*\))?\s+'
+    r'\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\s+ID[：:]'
     r')'
 )
 _COLOR_SPAN_RE = re.compile(r'<span\s+style="color:[^"]*">|</span>')
@@ -166,44 +228,73 @@ _COLOR_SPAN_RE = re.compile(r'<span\s+style="color:[^"]*">|</span>')
 # 從標頭提取投稿者名稱：「N 名前：NAME[...]」→ NAME
 _POSTER_NAME_RE = re.compile(r'(?:名前|Name)\s*[：:]\s*(.+?)(?:\[|投稿日|$)')
 
-# 替代格式 → NAME。分隔符可選（yaruobook.jp 用 `：`、yarucha 用 `[sage]` / `[]`、
-# yaruyarach 名稱與日期間僅以空白分隔）：
-#   「N ： NAME ： YYYY/MM/DD...」 / 「N : NAME [] YYYY/MM/DD...」 / 「N ： NAME  YYYY/MM/DD...」
+# 替代格式 → NAME。名稱與日期之間的分隔符為 `：` / `[...]`（mail 欄，如
+# `[sage]`）/ 空白的**任意連續組合**（zero 個以上）：
+#   「N ： NAME ： YYYY/MM/DD...」 (yaruobook.jp，冒號分隔)
+#   「N : NAME [] YYYY/MM/DD...」 (yarucha，方括號分隔)
+#   「N ： NAME  YYYY/MM/DD...」 (yaruyarach，僅空白分隔)
+#   「N ： NAME [saga]：YYYY/MM/DD...」 (oreyaruoavalon.blog.2nt.com，mail 欄＋冒號)
+# 若僅允許單一可選分隔符，mail 欄會被併入名稱，使同作者因 mail 欄不同
+# （[saga] ↔ [sage]）而比對失配、在「忽略留言」模式下被誤跳過。
 _POSTER_NAME_RE_ALT = re.compile(
-    r'^\s*\d+\s*[：:]\s*(.+?)\s*(?:[：:]|\[[^\]]*\])?\s*\d{4}[/年]'
+    r'^\s*\d+\s*[：:]\s*(.+?)\s*(?:(?:[：:]|\[[^\]]*\])\s*)*\d{4}[/年]'
+)
+
+# 第 4 種格式（數字後無 `：`，名稱與日期僅以空白分隔）→ NAME
+_POSTER_NAME_RE_ALT2 = re.compile(
+    r'^\s*\d+\s+(\S[^\n]*?)\s+\d{1,4}/\d{1,2}/\d{1,2}(?:\([^)]*\))?\s+'
+    r'\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\s+ID[：:]'
 )
 
 
 def _extract_poster_name(header_text: str) -> str:
-    """從標頭抽出投稿者名稱（兩種格式依序嘗試，失敗回傳空字串）。"""
+    """從標頭抽出投稿者名稱（三種格式依序嘗試，失敗回傳空字串）。"""
     m = _POSTER_NAME_RE.search(header_text)
     if not m:
         m = _POSTER_NAME_RE_ALT.search(header_text)
+    if not m:
+        m = _POSTER_NAME_RE_ALT2.search(header_text)
     if not m:
         return ""
     return re.sub(r'\s+', ' ', m.group(1).strip())
 
 
 def _detect_main_author_from_dt(container_html: str) -> str:
-    """掃描 dt 區塊的投稿標頭，回傳第一個出現的作者名稱。"""
+    """掃描 dt 區塊的投稿標頭，回傳第一個非「名無」的作者名稱。
+
+    多數網站的留言者 ID 都含「名無」（名無しさん），自動偵測作者時應略過
+    這類匿名名稱、往下一樓尋找真正的作者；若整串貼文皆為匿名，退回第一個
+    出現的名稱。此略過僅在自動偵測（未指定 author_name）時生效。
+    """
+    first = ""
     for post in re.finditer(r'<dt(?:\s[^>]*)?>(.+?)</dt>', container_html, re.DOTALL):
         dt_text = re.sub(r'<[^>]+>', '', post.group(1))
         dt_text = html.unescape(dt_text).strip()
         name = _extract_poster_name(dt_text)
         if name:
-            return name
-    return ""
+            if '名無' not in name:
+                return name
+            if not first:
+                first = name
+    return first
 
 
 def _detect_main_author_from_lines(text_content: str) -> str:
-    """掃描以「N 名前：…」行分段的內文，回傳第一個出現的作者名稱。"""
+    """掃描以「N 名前：…」行分段的內文，回傳第一個非「名無」的作者名稱。
+
+    略過含「名無」的匿名留言者，往下一樓尋找；皆為匿名時退回第一個名稱。
+    """
+    first = ""
     for line in text_content.split('\n'):
         clean_line = _COLOR_SPAN_RE.sub('', line)
         if _POST_HEADER_RE.search(clean_line):
             name = _extract_poster_name(clean_line)
             if name:
-                return name
-    return ""
+                if '名無' not in name:
+                    return name
+                if not first:
+                    first = name
+    return first
 
 
 _NAME_TRAIL_RE = re.compile(r'[\s.．。・,，、]+$')
@@ -344,29 +435,25 @@ def _is_nav_ascending_by_date(items: list[dict]) -> bool:
 
 def _parse_default(page_html: str, base_url: str, *, author_name: str = "", author_only: bool = False) -> tuple[str | None, list[dict], str]:
     """解析預設格式：<div class="article"> + <dl class="relate_dl">。"""
-    m = re.search(r'<div\s+class="article">', page_html)
-    if not m:
+    articles = list(re.finditer(r'<div\s+class="article">', page_html))
+    if not articles:
         return None, [], ""
 
-    start = m.start()
-    m_relate = re.search(r'<dl\s+class="relate_dl[^"]*">', page_html[start + 1:])
-    m2 = re.search(r'<div\s+class="article">', page_html[start + 1:])
-    candidates = []
-    if m_relate:
-        candidates.append(start + 1 + m_relate.start())
-    if m2:
-        candidates.append(start + 1 + m2.start())
-    end = min(candidates) if candidates else len(page_html)
-    article_html = page_html[start:end]
+    # relate_dl 之後的 <div class="article"> 屬留言／引用區塊，非內文 → 排除
+    m_relate = re.search(r'<dl\s+class="relate_dl[^"]*">', page_html)
+    relate_pos = m_relate.start() if m_relate else len(page_html)
+    content_articles = [a for a in articles if a.start() < relate_pos] or articles
 
-    lines_out = _extract_dt_dd_posts(article_html, author_name=author_name, author_only=author_only)
-    text_content = '\n\n'.join(lines_out) if lines_out else ""
-
-    # ── 平面 <span class="aa"> 變體 fallback（無 dt/dd 結構）──
-    # 例：burakio002.blog97.fc2.com — 內文塞在多個 <span class="aa"> 內，
-    # 以 <br> 分行、貼文之間以 <hr> + 新的 span 分隔；標頭「N 名前：…」
-    # 直接寫在內文中。僅在 dt/dd 抽取失敗時啟用。
-    if not text_content:
+    def _extract_article(article_html: str) -> str:
+        # dt/dd 結構
+        lines_out = _extract_dt_dd_posts(
+            article_html, author_name=author_name, author_only=author_only)
+        if lines_out:
+            return '\n\n'.join(lines_out)
+        # ── 平面 <span class="aa"> 變體 fallback（無 dt/dd 結構）──
+        # 例：burakio002.blog97.fc2.com — 內文塞在多個 <span class="aa"> 內，
+        # 以 <br> 分行、貼文之間以 <hr> + 新的 span 分隔；標頭「N 名前：…」
+        # 直接寫在內文中。
         flat = article_html
         flat = re.sub(r'<script\b.*?</script>', '', flat, flags=re.DOTALL | re.IGNORECASE)
         flat = re.sub(r'<table\b.*?</table>', '', flat, flags=re.DOTALL | re.IGNORECASE)
@@ -389,7 +476,20 @@ def _parse_default(page_html: str, base_url: str, *, author_name: str = "", auth
         # 安全閥：確認存在貼文標頭行才採用，避免把 cruft 當內文
         if out_lines and any(_POST_HEADER_RE.search(_COLOR_SPAN_RE.sub('', ln))
                              for ln in out_lines):
-            text_content = '\n'.join(out_lines)
+            return '\n'.join(out_lines)
+        return ""
+
+    # 逐一掃描 article 容器：首個常為 iframe 廣告等 cruft（例：
+    # oreyaruoavalon.blog.2nt.com 在內文前另有一個 <div class="article">
+    # 廣告區塊），取第一個能抽出內文者。
+    text_content = ""
+    for i, a in enumerate(content_articles):
+        end = relate_pos
+        if i + 1 < len(content_articles):
+            end = min(end, content_articles[i + 1].start())
+        text_content = _extract_article(page_html[a.start():end])
+        if text_content:
+            break
 
     # 頁面標題
     title_m = re.search(r'<title>([^<]+)</title>', page_html)
@@ -529,8 +629,9 @@ def _parse_himanatokiniyaruo(page_html: str, base_url: str, *, author_name: str 
 def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", author_only: bool = False) -> tuple[str | None, list[dict], str]:
     """解析 FC2 Blog 格式（含 web.archive.org 封存版）。
 
-    內文：<div class="ently_text">、<div class="entry_body"> 或 <div class="eBody">，
-          截止於 fc2button-clap div 或 relate_dl。
+    內文：<div class="ently_text">、<div class="entry_text">、<div class="entry_body">、
+          <div class="eBody"> 或 <div class="entryblock">（tonarinoaa.blog136.fc2.com
+          等 FC2 舊版模板），截止於 fc2button-clap div 或 relate_dl。
     標題：<title>...</title>
     關聯：<dl class="relate_dl ..."> 中的 <li class="relate_li">
     """
@@ -538,7 +639,7 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
     title_m = re.search(r'<title>([^<]+)</title>', page_html)
     page_title = html.unescape(title_m.group(1)).strip() if title_m else ""
 
-    # ── 內文 ──（支援三種 FC2 模板：ently_text / entry_body / eBody）
+    # ── 內文 ──（支援多種 FC2 模板：ently_text / entry_text / entry_body / eBody）
     # eBody 變體（例：chronoyaruo.blog.fc2.com）以多個 <div class="aa"> 容納內文、
     # <br> 分行，且續篇貼文另置於 <div class="eBody" id="more"> —— 兩段之間沒有
     # 邊界標記，會一併被 fc2button-clap / relate_dl 終止點涵蓋進來。
@@ -550,18 +651,38 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
         r'|<dl\s+class="relate_dl'
         r'|<!--/ently_text-->'
         r'|<!--/entry_body-->'
+        r'|<!--/entry_text-->'
         r'|<!--/eBody-->'
     )
 
-    def _extract_body(start_idx: int) -> str:
+    # res_h/res_b 結構（例：yaranaioblog.blog.fc2.com）：每則貼文為
+    # <div class="res_h">標頭</div><div class="res_b">內文</div>，來源 HTML 帶
+    # <br>\r\n + 縮排空白。此結構下換行一律由 <br> 與 <div> 邊界決定，
+    # 來源的 \r\n 純屬排版，須移除以免產生空行；行首 ASCII 縮排另於主流程剝除。
+    _res_struct = 'class="res_h"' in page_html
+
+    def _extract_body(start_idx: int, max_end: int | None = None) -> str:
         rest = page_html[start_idx:]
         em = _end_re.search(rest)
-        raw = rest[:em.start()] if em else rest
+        body_end = em.start() if em else len(rest)
+        # 若有下一個容器的起點，以兩者較小值為實際邊界，避免當前容器的終止點
+        # 越過下一個容器（兩容器共享同一 fc2button-clap 終點時會發生）。
+        if max_end is not None:
+            body_end = min(body_end, max_end - start_idx)
+        raw = rest[:body_end]
         # 移除非內文元素：<script>（FC2 計數器/blogroll）、<a>...</a>（導覽連結）
         raw = re.sub(r'<script\b.*?</script>', '', raw, flags=re.DOTALL | re.IGNORECASE)
         raw = re.sub(r'<a\s[^>]*>.*?</a>', '', raw, flags=re.DOTALL)
-        txt = re.sub(r'<br\s*/?>', '\n', raw)
-        txt = _strip_tags_keep_color(txt)
+        if _res_struct:
+            # <br> 與 <div> 開標籤皆視為換行；移除所有來源 \r\n 後再還原，
+            # 確保只有 <br>/<div> 邊界產生換行（res_h、res_b 不會黏成同一行）。
+            raw = re.sub(r'<br\s*/?>', '\x00', raw)
+            raw = re.sub(r'<div\b[^>]*>', '\x00', raw)
+            raw = raw.replace('\r', '').replace('\n', '')
+            txt = _strip_tags_keep_color(raw).replace('\x00', '\n')
+        else:
+            txt = re.sub(r'<br\s*/?>', '\n', raw)
+            txt = _strip_tags_keep_color(txt)
         return html.unescape(txt)
 
     def _has_post_header(txt: str) -> bool:
@@ -569,18 +690,32 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
                    for ln in txt.split('\n'))
 
     containers = list(re.finditer(
-        r'<div\s+class="(?:ently_text|entry_body|eBody)"[^>]*>', page_html))
+        r'<div\s+class="(?:ently_text|entry_text|entry_body|eBody|entryblock|textar-aa)"[^>]*>', page_html))
     if not containers:
         return None, [], page_title
 
-    content_text = None
-    for cm in containers:
-        body = _extract_body(cm.end())
-        if content_text is None:
-            content_text = body  # 預設取第一個容器（fallback）
-        if _has_post_header(body):
-            content_text = body
+    # 兩步策略：
+    # Step 1. 以「下一個容器起點」為上限 bounded 掃描，找出第一個含貼文標頭的容器
+    #         （避免被廣告/スポンサーサイト 區塊騙到：廣告區塊與正文共享同一
+    #          fc2button-clap 終止點，若不設上限，廣告容器的範圍會一路延伸到
+    #          正文，讓 _has_post_header 在廣告容器中誤命中正文的標頭）。
+    # Step 2. 找到正確起點後，改以 **無上限** 抽取，讓終止點自然延伸到
+    #         fc2button-clap / relate_dl，自動涵蓋 eBody id="more" 等連續區段。
+    fallback_text: str | None = None
+    first_real_cm = None
+    for i, cm in enumerate(containers):
+        next_start = containers[i + 1].start() if i + 1 < len(containers) else None
+        bounded = _extract_body(cm.end(), max_end=next_start)
+        if fallback_text is None:
+            fallback_text = bounded
+        if _has_post_header(bounded):
+            first_real_cm = cm
             break
+
+    if first_real_cm is not None:
+        content_text = _extract_body(first_real_cm.end())  # unbounded，涵蓋連續區段
+    else:
+        content_text = fallback_text or _extract_body(containers[0].end())
 
     # 依作者名稱過濾顏色：非作者貼文移除 color span（或完全跳過）
     # 若勾了忽略留言但未指定作者，交由 _filter_color_by_author 自動偵測
@@ -592,6 +727,19 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
     else:
         content_text = _cleanup_unmatched_spans(content_text)
 
+    # HTML 縮排的 tab 字元在 strip tags 後殘留；AA 藝術用全形空格（U+3000）而非 tab，
+    # 可以安全移除所有 ASCII tab。需在 _cleanup_unmatched_spans 之後執行，否則
+    # 孤兒 </span> 可能擋在 tab 前面導致 "^\t+" 行首匹配失效。
+    content_text = content_text.replace('\t', '')
+
+    # res_h/res_b 結構：行首 ASCII 空白為 HTML 來源縮排（AA 對齊用全形空格
+    # U+3000，不受影響），逐行剝除；<div>/<br> 邊界堆出的多餘空行壓回一行。
+    if _res_struct:
+        # 先逐行剝除行首 ASCII 空白（空白-only 行因此變為真正空行），
+        # 再把 <div>/<br> 邊界堆出的多餘空行壓回最多一行。
+        content_text = '\n'.join(ln.lstrip(' ') for ln in content_text.split('\n'))
+        content_text = re.sub(r'\n{3,}', '\n\n', content_text)
+
     lines = content_text.split('\n')
     while lines and not lines[0].strip():
         lines.pop(0)
@@ -600,8 +748,11 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
     text_content = '\n'.join(lines) if lines else None
 
     # ── 關聯連結 ──
+    # 僅匹配 class 恰為 `relate_dl`（可帶空白分隔的額外字樣）的 <dl>，
+    # 排除 `relate_dl2`（部分 FC2 站點如 yaranaioblog 的「前後エントリー」
+    # 區塊，內文之前、僅含上下一話），改取真正的「関連記事」清單。
     nav_links: list[dict] = []
-    relate_m = re.search(r'<dl\s+class="relate_dl[^"]*">(.*?)</dl>', page_html, re.DOTALL)
+    relate_m = re.search(r'<dl\s+class="relate_dl(?:\s[^"]*)?">(.*?)</dl>', page_html, re.DOTALL)
     if relate_m:
         relate_html = relate_m.group(1)
         for li in re.finditer(
@@ -610,6 +761,10 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
         ):
             li_class = li.group(1)
             li_inner = li.group(2)
+            # 移除縮圖／視覺連結 span（如 yaranaioblog 的 `<span class="vislin">`
+            # 內含一個只寫著「v」的 <a>），避免後面誤取它而非真正的標題連結。
+            li_inner = re.sub(
+                r'<span\s+class="vislin">.*?</span>', '', li_inner, flags=re.DOTALL)
             if li_class == 'relate_li':
                 a_m = re.search(r'<a\s+href="([^"]+)"[^>]*>(.*?)</a>', li_inner, re.DOTALL)
                 if a_m:
@@ -896,13 +1051,94 @@ def _parse_yaruo_matome(page_html: str, base_url: str, *,
 
 
 # ════════════════════════════════════════════════════════════════
+#  解析器：livedoor Blog
+# ════════════════════════════════════════════════════════════════
+
+def _parse_livedoor(page_html: str, base_url: str, *,
+                    author_name: str = "",
+                    author_only: bool = False) -> tuple[str | None, list[dict], str]:
+    """解析 livedoor Blog（blog.livedoor.jp）格式。
+
+    內文：<div class="textar-aa"><span class="aa"> … </span>，以 <br> 分行，
+          截止於 <br clear="all">。
+    標題：<h3 class="title"> 內文字（去除 <span class="s"> 分類連結）。
+    關聯：此站無「關聯記事」區塊，僅在最後一則貼文尾端嵌入下一話的
+          <a href=".../archives/N.html">；僅取內文**尾段**的 archives 連結
+          （內文開頭常另有「同作者さんの作品」推薦區塊，須排除），置於
+          當前話之後。
+    """
+    _TAIL_WINDOW = 5000  # 內文尾段範圍：尾端話次連結必落於此，開頭推薦區塊則否
+    # ── 標題 ──
+    title_m = re.search(r'<h3\s+class="title">(.*?)</h3>', page_html, re.DOTALL)
+    if title_m:
+        t = re.sub(r'<span\s+class="s">.*?</span>', '', title_m.group(1), flags=re.DOTALL)
+        page_title = html.unescape(re.sub(r'<[^>]+>', '', t)).strip()
+    else:
+        tm = re.search(r'<title>([^<]+)</title>', page_html)
+        page_title = html.unescape(tm.group(1)).strip() if tm else ""
+
+    # ── 內文容器 ──
+    cm = re.search(r'<div\s+class="textar-aa">', page_html)
+    if not cm:
+        return None, [], page_title
+    rest = page_html[cm.end():]
+    em = re.search(r'<br\s+clear="all"', rest)
+    body_html = rest[:em.start()] if em else rest
+
+    # ── 關聯連結（內文尾段的 archives 連結 = 後續話次）──
+    nav_links: list[dict] = []
+    tail_start = len(body_html) - _TAIL_WINDOW
+    for a in re.finditer(
+        r'<a\s+href="([^"]*/archives/\d+\.html)"[^>]*>(.*?)</a>',
+        body_html, re.DOTALL,
+    ):
+        if a.start() < tail_start:
+            continue  # 開頭「同作者さんの作品」推薦區塊，非後續話次
+        href = urljoin(base_url, a.group(1))
+        if href.rstrip('/') == base_url.rstrip('/'):
+            continue
+        a_title = html.unescape(re.sub(r'<[^>]+>', '', a.group(2))).strip()
+        if a_title:
+            nav_links.append({'title': a_title, 'url': href, 'is_current': False})
+    if nav_links:
+        nav_links.insert(0, {'title': page_title, 'url': None, 'is_current': True})
+
+    # ── 內文抽取（flat：<br>→\n、保留 color span）──
+    raw = re.sub(r'<script\b.*?</script>', '', body_html, flags=re.DOTALL | re.IGNORECASE)
+    raw = re.sub(r'<a\s[^>]*>.*?</a>', '', raw, flags=re.DOTALL)
+    raw = raw.replace('\r', '')
+    # 來源 HTML 每行為 `LINE<br>\n`：<br> 才是真正換行，其後的排版換行須一併
+    # 吸收，否則每行會多出一個空行。<br><br> 等連續換行仍各自保留為空行。
+    txt = re.sub(r'<br\s*/?>[ \t]*\n?', '\n', raw)
+    txt = _strip_tags_keep_color(txt)
+    txt = html.unescape(txt)
+    if author_name or author_only:
+        txt = _filter_color_by_author(txt, author_name, author_only=author_only)
+    else:
+        txt = _cleanup_unmatched_spans(txt)
+    txt = txt.replace('\t', '')
+
+    lines = txt.split('\n')
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    text_content = '\n'.join(lines) if lines else None
+
+    return text_content, nav_links, page_title
+
+
+# ════════════════════════════════════════════════════════════════
 #  公開入口
 # ════════════════════════════════════════════════════════════════
 
 # 網域 → 解析函式的對應表
 _DOMAIN_PARSERS: dict[str, callable] = {
     'himanatokiniyaruo.com': _parse_himanatokiniyaruo,
+    'blog.livedoor.jp': _parse_livedoor,
     'blog.fc2.com': _parse_fc2blog,
+    'blog105.fc2.com': _parse_fc2blog,
+    'blog136.fc2.com': _parse_fc2blog,
     'yaruobook.jp': _parse_yaruobook,
     'yaruobook.net': _parse_yaruobook_net,
     'yaruo-matome.com': _parse_yaruo_matome,

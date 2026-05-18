@@ -1,7 +1,7 @@
 import re
 
 from .constants import BORDER_CHARS, DEFAULT_SYMBOL_REGEX
-from .text_extraction import aa_noise_ratio
+from .text_extraction import _BIDI_CONTROL_RE, aa_noise_ratio
 
 
 # 用 backtick 作為「保留外圍空白」的分隔符。選 backtick 是因為：
@@ -288,6 +288,11 @@ def apply_translation(
             symbol_regex = re.compile(symbol_regex_str or DEFAULT_SYMBOL_REGEX)
         except re.error:
             symbol_regex = re.compile(DEFAULT_SYMBOL_REGEX)
+    # 提取階段會整份移除 Unicode 雙向控制字元，故 `extracted` 的原文不含這些
+    # 隱形字元；但 `source` 仍保有它們，會夾在句中（如 `…かっ‬た。`）使
+    # `original not in line` 失配而無法替換。替換前先把 source 同步清除。
+    source = _BIDI_CONTROL_RE.sub('', source)
+
     # 解析映射表
     orig_map: dict[str, str] = {}
     for line in extracted.split('\n'):

@@ -145,6 +145,8 @@ class AppCache:
     pad_right_aa: bool = False
     # 「補空白」按鈕在每個字元之間插入的全形空白數量（1~3）。
     pad_space_count: int = 2
+    # 網址讀取成功且有正確辨識標題時，自動把標題填入作品名稱框。
+    fetch_auto_fill_title: bool = False
 
 
 class SettingsManager:
@@ -316,6 +318,8 @@ class SettingsManager:
                 'experimental_extraction', cache.experimental_extraction))
             cache.pad_right_aa = bool(data.get(
                 'pad_right_aa', cache.pad_right_aa))
+            cache.fetch_auto_fill_title = bool(data.get(
+                'fetch_auto_fill_title', cache.fetch_auto_fill_title))
             try:
                 v = int(data.get('pad_space_count', cache.pad_space_count))
                 if v in (1, 2, 3):
@@ -392,6 +396,7 @@ class SettingsManager:
                 'experimental_extraction': cache.experimental_extraction,
                 'pad_right_aa': cache.pad_right_aa,
                 'pad_space_count': cache.pad_space_count,
+                'fetch_auto_fill_title': cache.fetch_auto_fill_title,
             }
             self._atomic_write_json(cache_file, data)
 

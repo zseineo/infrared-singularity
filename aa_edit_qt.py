@@ -1038,14 +1038,22 @@ class EditWindow(QMainWindow):
         self._set_status("已消除選取範圍的空白", "#0f0")
 
     def _reverse_glossary_replace(self) -> None:
-        """Alt+E：選取範圍內的「替代文字」還原回「原文」。"""
+        """Alt+E：選取範圍內的術語雙向替換。
+
+        - 若整段選取剛好等於單一術語（精確匹配）：是「原文」→ 替換為「替代文字」；
+          是「替代文字」→ 還原為「原文」。「原文」判定優先 —— 避免選取的原文
+          剛好是其他術語的替代文字、而被反向規則誤搶（修正 Alt+E 回報 bug）。
+        - 否則（多詞／句子選取）：以子字串掃描，還原優先（替代→原文），
+          沒有可還原內容才套用（原文→替代）。
+        兩個方向擇一執行。
+        """
         if self._glossary_provider is None:
             self._set_status("⚠️ 無法取得術語表", "#ffc107")
             return
         target = self._active_edit_widget()
         cursor = target.textCursor()
         if not cursor.hasSelection():
-            self._set_status("⚠️ 請先選取要反向替代的文字", "#ffc107")
+            self._set_status("⚠️ 請先選取要替換的文字", "#ffc107")
             return
         glossary_str = self._glossary_provider() or ""
         glossary = parse_glossary(glossary_str)
@@ -1053,13 +1061,44 @@ class EditWindow(QMainWindow):
             self._set_status("⚠️ 術語表為空", "#ffc107")
             return
         selected = cursor.selectedText().replace('\u2029', '\n')
-        new_text = apply_reverse_glossary_to_text(selected, glossary)
-        if new_text == selected:
-            self._set_status("ℹ️ 選取範圍中沒有可還原的術語", "#17a2b8")
+        stripped = selected.strip()
+
+        # 反向 map（替代文字 → 原文），衝突時取最長原文
+        rev_map: dict[str, str] = {}
+        for orig, repl in glossary.items():
+            if not repl:
+                continue
+            if repl not in rev_map or len(orig) > len(rev_map[repl]):
+                rev_map[repl] = orig
+
+        # A. 整段選取剛好等於單一術語 → 以「精確 dict 查找」決定方向。
+        #    「原文」判定優先：選取的原文若同時是別條術語的替代文字，
+        #    仍視為原文做正向替換（修正反向規則用子字串誤搶的 bug）。
+        if stripped and stripped in glossary:
+            cursor.insertText(selected.replace(stripped, glossary[stripped]))
+            self._apply_line_height()
+            self._set_status("✅ 已套用術語（原文 → 替代文字）", "#0f0")
             return
-        cursor.insertText(new_text)
-        self._apply_line_height()
-        self._set_status("✅ 已反向替代", "#0f0")
+        if stripped and stripped in rev_map:
+            cursor.insertText(selected.replace(stripped, rev_map[stripped]))
+            self._apply_line_height()
+            self._set_status("✅ 已還原術語（替代文字 → 原文）", "#0f0")
+            return
+
+        # B. 多詞／句子選取 → 子字串掃描，還原優先
+        new_text = apply_reverse_glossary_to_text(selected, glossary)
+        if new_text != selected:
+            cursor.insertText(new_text)
+            self._apply_line_height()
+            self._set_status("✅ 已還原術語（替代文字 → 原文）", "#0f0")
+            return
+        new_text = apply_glossary_to_text(selected, glossary)
+        if new_text != selected:
+            cursor.insertText(new_text)
+            self._apply_line_height()
+            self._set_status("✅ 已套用術語（原文 → 替代文字）", "#0f0")
+            return
+        self._set_status("ℹ️ 選取範圍中沒有可替換的術語", "#17a2b8")
 
     def _pad_spaces(self) -> None:
         target = self._active_edit_widget()

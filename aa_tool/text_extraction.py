@@ -59,6 +59,12 @@ def _postprocess_text(text: str, korean_mode: bool = False,
     return text
 
 
+# Unicode 雙向控制 / 隱形格式字元（LRM/RLM/LRE/RLE/PDF/LRO/RLO/LRI/RLI/FSI/PDI）。
+# 部分來源（如某些網站複製貼上）會夾帶這些不可見字元，夾在句中時會把候選
+# 邊界擴展硬生生切斷（例：`…特化してい‬る。` 中的 U+202C 把 `る。` 隔開）。
+# 提取前一律整份移除，不影響可見文字。
+_BIDI_CONTROL_RE = re.compile('[‎‏‪-‮⁦-⁩]')
+
 # 2ch/5ch 發文者行：形如「4402 ： ◆GESU1/dEaE ： 2021/05/06(木) 23:19:36 ID:nGcM5Umt」
 # 特徵：含 ID:xxxxxx（trip code），這組標記對發文者行幾乎是唯一判別
 _POSTER_LINE_RE = re.compile(r'ID:[A-Za-z0-9+/.]{6,}')
@@ -102,8 +108,10 @@ _DICE_NOTATION_FW_RE = re.compile(r'(【\d+D\d+)：(\d+】)')
 # 連續 ≥2 平假名 anchor（平假名出現於 AA 圖機率低，2 char 仍是強信號）。
 # 允許 `ー`（U+30FC 長音符號）、`～`(U+FF5E)、`〜`(U+301C) 夾於平假名之間，
 # 捕捉「だーかーらー」「で～も～ね～」這類拉長口吻。排除 ゝゞ 疊字標記。
+# **要求 ≥2 個真平假名**（首尾皆為真平假名，`ー～〜` 只能夾在中間不計數）—
+# 避免「へーー三」這類「1 個真平假名 + 多個長音符號」被誤判為平假名 run。
 _HIRAGANA_RUN_RE = re.compile(
-    r'[ぁ-゜ゟ][ぁ-゜ゟー～〜]+')
+    r'[ぁ-゜ゟ][ぁ-゜ゟー～〜]*[ぁ-゜ゟ]')
 # 連續 ≥3 片假名 anchor（片假名常出現於 AA 圖作為視覺元素，2 char run 如
 # `トミ`、`ニヽ`、`トー` 在 AA 中假陽性多；真實日文片假名詞幾乎都 ≥3 char：
 # `コスト`、`ヒーロー`、`コンピューター`、`チョロ`、`カット`）。需要 2-char
@@ -203,7 +211,13 @@ _SPACED_OUT_RE = re.compile(
 # `::::` 邊框與 `..:.:` 點線，會把 `0:i`、`7:.`、`ii7:` 這類碎片誤判為選項格式。
 # 真實日文安価/投票格式幾乎都用全形分隔符。
 _NUMBER_OPTION_RE = re.compile(
-    r'[0-9０-９]+(?:[～~][0-9０-９]+)?[：．]')
+    r'[0-9０-９①-⑳]+(?:[～~][0-9０-９①-⑳]+)?[：．]')
+
+# 數字範圍前綴：候選以「數字～數字」開頭、無分隔符（如「⑦～⑨出来る」）。
+# 安価/投票格式偶爾以圈號數字（①-⑳）標多選項合併（⑦⑧⑨皆導向同一結果）。
+# 命中時與 `_NUMBER_OPTION_RE` 同等視為數字選項信號（+3 並列入 strong_jp）。
+_NUMBER_RANGE_RE = re.compile(
+    r'^[0-9０-９①-⑳]+[～~][0-9０-９①-⑳]+')
 
 # 連續 ≥3 個相同小字假名（ぁぃぅぇぉっゃゅょゎゕゖ）— AA 圖裝飾特徵（如「ぃぃぃ」）。
 # 真實日文罕用 3+ 連續小字假名；普通字假名（如「ねええ」的 え）排除在此規則外。
@@ -245,9 +259,9 @@ _REPEAT_HIRA_RE = re.compile(r'([ぁ-゜ゟ])\1{2,}')
 
 # 邊界擴展用的 valid char set（與 base_regex 字元集對齊，但排除半形片假名與 AA 標點）
 _VALID_CHAR_RE = re.compile(
-    r'[：＋a-zA-ZＡ-Ｚａ-ｚ0-9０-９'
+    r'[：＋+a-zA-ZＡ-Ｚａ-ｚ0-9０-９①-⑳'
     r'぀-ゟ゠-ヿ一-鿿'
-    r'々〆〤○〇←→↑↓＆【】（）「」『』！？、。…，．？！,.\-―ーッ%％"“”‘’～〜]')
+    r'々〆〤○〇★☆←→↑↓＆【】（）「」『』！？、。…，．？！,.\-―ーッ%％"“”‘’～〜]')
 
 _PARTICLES = set('のはをにがでとへやかもだねよわ')
 
@@ -435,7 +449,8 @@ def _score_candidate(text: str, line: str, start: int, end: int,
         s += 2
     # 數字選項 pattern — 安価/投票格式（「１０：ご主人様」「１～３：ママぁ」）。
     # 使用者觀察：選項後通常不接 AA 圖，是強對話信號，給較高 bonus。
-    has_num_option = bool(_NUMBER_OPTION_RE.search(text))
+    has_num_option = bool(_NUMBER_OPTION_RE.search(text)
+                          or _NUMBER_RANGE_RE.match(text))
     if has_num_option:
         s += 3
     # 句末標點 bonus。全形 `！？` 是強口語/對話信號（+2）；半形 `!?` 在 AA 圖
@@ -481,6 +496,12 @@ def _score_candidate(text: str, line: str, start: int, end: int,
         s -= 4
     elif density > 0.4:
         s -= 1
+    # 候選「自身」AA 噪聲密度懲罰：候選文字本身含過多 AA 噪聲字元（symbol_regex
+    # 命中 / 半形片假名 / AA 標點）時，即使有 has_run 等強信號也幾乎肯定是 AA
+    # 碎片（如「丈ｒうっ.o.,.」這類錨點假名混入點線雜訊）。此懲罰不受 strong_jp
+    # 豁免 — strong_jp 豁免的是「鄰近」AA 噪聲，候選自身內部噪聲是更直接的證據。
+    if len(text) >= 4 and aa_noise_ratio(text, symbol_regex) > 0.4:
+        s -= 5
     # 註：曾評估「整行 AA 比例懲罰」，但實測無效 — AA 圖常用 content-class 字元
     # （latin `i`/`l`、漢字 `彡`/`从`）當裝飾「柱子」，會把整行比例稀釋（如
     # `|i:i:i|` 中的 `i` 算 content），導致純 AA 行的比例反而比合法短句行還低。
@@ -807,6 +828,8 @@ def extract_text(
     symbol_regex = _compile_regex(symbol_regex_str, DEFAULT_SYMBOL_REGEX)
     custom_regexes = _compile_custom_filters(filter_str)
 
+    # 移除 Unicode 雙向控制/隱形格式字元（不影響可見文字、不改變行數）
+    source = _BIDI_CONTROL_RE.sub('', source)
     lines = source.split('\n')
     extracted: list[tuple[str, int]] = []
 
@@ -949,6 +972,7 @@ def analyze_extraction(
     use_experimental = experimental and not korean_mode
 
     report: list[str] = []
+    text = _BIDI_CONTROL_RE.sub('', text)
     lines = text.split('\n')
     if use_experimental:
         report.append("【實驗性日文提取演算法啟用】錨點掃描＋分數制過濾")
@@ -1235,6 +1259,16 @@ def get_chapter_display(text_first_lines: str) -> tuple[str, str] | None:
         n = f"{a}-{b}"
         return (n, f"第{n}話")
 
+    # 第N話 … そのZ — 話＋分篇複合（如「第28話 … その２」→ 28-2）
+    _trans_fw = str.maketrans('０１２３４５６７８９', '0123456789')
+    match = re.search(
+        r'第\s*([０-９\d]+)\s*話.*?その\s*([０-９\d]+)', text_first_lines)
+    if match:
+        a = str(int(match.group(1).translate(_trans_fw)))
+        b = str(int(match.group(2).translate(_trans_fw)))
+        n = f"{a}-{b}"
+        return (n, f"第{n}話その{b}")
+
     # 第N話 — 阿拉伯數字
     match = re.search(r'第\s*(\d+)\s*話', text_first_lines)
     if match:
@@ -1285,22 +1319,42 @@ def get_chapter_display(text_first_lines: str) -> tuple[str, str] | None:
         n = str(int(num_str))
         return (n, f"第{n}話")
 
+    # 裸漢數字話（無「第」前綴）— 例：「三話」「十二話」，同樣限定第一行
+    match = re.search(r'([〇零一二三四五六七八九十百千]+)\s*話', first_line)
+    if match:
+        num = _kanji_to_int(match.group(1))
+        if num is not None:
+            return (str(num), f"第{num}話")
+
     return None
 
 
-# 已知的站名前綴 — 出現在標題最前方時應被忽略
-_SITE_NAME_PREFIXES = [
+# 已知站名 — 可出現在標題開頭（前綴）或末尾（後綴），兩者都會被去除。
+# 新增站名直接加入此列表即可。
+_SITE_NAMES = [
     '安価でやるお！',
     'やる夫達のいる日常',
     'やる夫まとめくす',
     'やる夫短編集',
+    'やる夫スレ本棚  | ',
+    'RPG系AA物語まとめるお',
+    '| 隣のAA',
+    '－ やらない夫オンリーブログ',
 ]
 
 _SITE_PREFIX_RE = re.compile(
-    r'^(?:' + '|'.join(re.escape(s) for s in _SITE_NAME_PREFIXES) + r')\s*'
+    r'^(?:' + '|'.join(re.escape(s) for s in _SITE_NAMES) + r')[\s　]*'
 )
+_SITE_SUFFIX_RE = re.compile(
+    r'[\s　]+(?:' + '|'.join(re.escape(s) for s in _SITE_NAMES) + r')$'
+)
+# dash 系尾綴：「 - 站名」「 — 站名」等形式
+_SITE_DASH_SUFFIX_RE = re.compile(r'[\s　]+[-—–][\s　]+.+$')
 
 
 def extract_work_title(title: str) -> str:
-    """從頁面標題中去除站名前綴，回傳作品名稱部分。"""
-    return _SITE_PREFIX_RE.sub('', title).strip()
+    """從頁面標題中去除已知站名（前綴／後綴）與 dash 尾綴，回傳作品名稱部分。"""
+    t = _SITE_DASH_SUFFIX_RE.sub('', title)
+    t = _SITE_PREFIX_RE.sub('', t)
+    t = _SITE_SUFFIX_RE.sub('', t)
+    return t.strip(' 　\t')

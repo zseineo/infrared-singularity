@@ -20,14 +20,88 @@ from __future__ import annotations
 
 import re
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QPoint, QRect, QSize, Qt, QTimer
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit,
+    QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from aa_tool.qt_helpers import make_button
+
+
+class FlowLayout(QLayout):
+    """簡易 flow layout：子元件由左至右排列、寬度不足時自動換行。
+
+    用於「展開標題按鈕」面板：每顆按鈕依文字長度取 sizeHint，逐列填滿。
+    （Qt 無內建 flow layout，此為官方範例的精簡版。）
+    """
+
+    def __init__(self, parent=None, margin: int = 0, spacing: int = 4) -> None:
+        super().__init__(parent)
+        if parent is not None:
+            self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+        self._items: list = []
+
+    def addItem(self, item) -> None:  # noqa: N802
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int):  # noqa: N802
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int):  # noqa: N802
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):  # noqa: N802
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return self._do_layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def _do_layout(self, rect: QRect, test_only: bool) -> int:
+        x = rect.x()
+        y = rect.y()
+        line_height = 0
+        spacing = self.spacing()
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width() + spacing
+            if next_x - spacing > rect.right() and line_height > 0:
+                x = rect.x()
+                y = y + line_height + spacing
+                next_x = x + hint.width() + spacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y()
 
 
 # 標題正規化：去掉網站尾綴、外圍 tag、話數資訊，保留作品名稱主體。
@@ -65,7 +139,12 @@ def _normalize_title_for_filter(raw_title: str) -> str:
     if earliest < len(t):
         t = t[:earliest]
     t = _TITLE_TRAILING_TAGS_RE.sub("", t)
-    return t.strip(' 　\t')
+    t = t.strip(' 　\t')
+    # 只保留第一個空白（半形或全形）之前的部分，使前後篇等歸為同一作品
+    m = re.search(r'[ 　\t]', t)
+    if m:
+        t = t[:m.start()]
+    return t
 
 
 class UrlFetchWindow(QWidget):
@@ -258,6 +337,17 @@ class UrlFetchWindow(QWidget):
                     if screen_obj is not None else 1280)
         self.hist_search.setFixedWidth(max(160, screen_w // 4))
         search_row.addWidget(self.hist_search, 0)
+        # 展開標題按鈕的切換鈕（位於搜尋框與標題按鈕之間）
+        self.title_expand_btn = QPushButton("⊞")
+        self.title_expand_btn.setFixedSize(24, 24)
+        self.title_expand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.title_expand_btn.setToolTip("展開／收合完整標題按鈕")
+        self.title_expand_btn.setStyleSheet(
+            "QPushButton { background:#3a3f44; color:#ddd;"
+            " border:1px solid #555; border-radius:3px; }"
+            "QPushButton:hover { background:#4a5057; color:#fff; }")
+        self.title_expand_btn.clicked.connect(self._toggle_title_expand)
+        search_row.addWidget(self.title_expand_btn, 0)
         # 標題快速篩選按鈕區
         self.title_btn_row = QHBoxLayout()
         self.title_btn_row.setContentsMargins(0, 0, 0, 0)
@@ -274,6 +364,31 @@ class UrlFetchWindow(QWidget):
         self.hist_inner_layout.addStretch()
         self.hist_scroll.setWidget(self.hist_inner)
         hist_outer.addWidget(self.hist_scroll, 1)
+
+        # 展開標題按鈕面板：hist_frame 的浮層子元件，預設隱藏，
+        # 開啟時佔 hist_frame 右下、從中央起算的空間。
+        self._hist_frame = hist_frame
+        self.title_expand_panel = QWidget(hist_frame)
+        self.title_expand_panel.setObjectName("titleExpandPanel")
+        self.title_expand_panel.setStyleSheet(
+            "#titleExpandPanel { background:#2b2f33; border:1px solid #555;"
+            " border-radius:4px; }")
+        self.title_expand_panel.hide()
+        exp_outer = QVBoxLayout(self.title_expand_panel)
+        exp_outer.setContentsMargins(4, 4, 4, 4)
+        exp_outer.setSpacing(2)
+        exp_lbl = QLabel("完整標題篩選")
+        exp_lbl.setFont(self.ui_small_font)
+        exp_lbl.setStyleSheet("color:#aaa; border:none;")
+        exp_outer.addWidget(exp_lbl)
+        self.title_expand_scroll = QScrollArea()
+        self.title_expand_scroll.setWidgetResizable(True)
+        self.title_expand_scroll.setStyleSheet("border:none;")
+        self.title_expand_inner = QWidget()
+        self.title_expand_flow = FlowLayout(
+            self.title_expand_inner, margin=2, spacing=4)
+        self.title_expand_scroll.setWidget(self.title_expand_inner)
+        exp_outer.addWidget(self.title_expand_scroll, 1)
 
         layout.addWidget(hist_frame, 1)
 
@@ -366,6 +481,21 @@ class UrlFetchWindow(QWidget):
         self._history_filter = (text or "").strip().lower()
         self._refresh_history()
 
+    def _unique_normalized_titles(self) -> list[str]:
+        """取出 url_history 中唯一的正規化標題（依當前讀取順序，最新優先）。"""
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for entry in reversed(self._url_history):
+            if not isinstance(entry, dict):
+                continue
+            raw = entry.get('title') or ''
+            norm = _normalize_title_for_filter(raw)
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            normalized.append(norm)
+        return normalized
+
     def _rebuild_title_filter_buttons(self) -> None:
         """依當前 url_history 重新產生「標題快速篩選按鈕」。
 
@@ -383,19 +513,7 @@ class UrlFetchWindow(QWidget):
             if w is not None:
                 w.deleteLater()
 
-        # 取出唯一正規化標題（依當前讀取順序，最新優先）
-        seen: set[str] = set()
-        normalized: list[str] = []
-        for entry in reversed(self._url_history):
-            if not isinstance(entry, dict):
-                continue
-            raw = entry.get('title') or ''
-            norm = _normalize_title_for_filter(raw)
-            if not norm or norm in seen:
-                continue
-            seen.add(norm)
-            normalized.append(norm)
-
+        normalized = self._unique_normalized_titles()
         if not normalized:
             return
 
@@ -407,7 +525,8 @@ class UrlFetchWindow(QWidget):
             screen_obj = QApplication.primaryScreen()
             panel_w = (screen_obj.availableGeometry().width()
                        if screen_obj is not None else 1280)
-        used = self.hist_search.width() + 40  # 左右 padding + 列邊界
+        # 左右 padding + 列邊界 + 展開鈕（24）與其 spacing
+        used = self.hist_search.width() + 40 + 24 + spacing
         avail = max(0, panel_w - used)
         max_btns = max(0, (avail + spacing) // (btn_w + spacing))
         if max_btns <= 0:
@@ -432,11 +551,77 @@ class UrlFetchWindow(QWidget):
                 lambda checked=False, t=title: self.hist_search.setText(t))
             self.title_btn_row.addWidget(btn)
 
+    # ──────────────────── 展開標題按鈕面板 ────────────────────
+
+    def _toggle_title_expand(self) -> None:
+        """切換「完整標題篩選」浮層面板的顯示。"""
+        if self.title_expand_panel.isVisible():
+            self.title_expand_panel.hide()
+            self.title_expand_btn.setText("⊞")
+            return
+        self._rebuild_expanded_title_buttons()
+        self._position_title_expand_panel()
+        self.title_expand_panel.show()
+        self.title_expand_panel.raise_()
+        self.title_expand_btn.setText("⊟")
+
+    def _position_title_expand_panel(self) -> None:
+        """把展開面板從切換按鈕右緣同高處展開，覆蓋到 hist_frame 右下角。"""
+        frame = self._hist_frame
+        fw, fh = frame.width(), frame.height()
+        if fw <= 0 or fh <= 0:
+            return
+        btn = self.title_expand_btn
+        origin = btn.mapTo(frame, QPoint(btn.width() + 2, 0))
+        x = max(0, origin.x())
+        y = max(0, origin.y())
+        self.title_expand_panel.setGeometry(
+            x, y, max(0, fw - x - 4), max(0, fh - y - 4))
+
+    def _rebuild_expanded_title_buttons(self) -> None:
+        """重建展開面板中的完整標題按鈕（flow layout、不截斷標題）。"""
+        # 清掉舊按鈕
+        while self.title_expand_flow.count() > 0:
+            item = self.title_expand_flow.takeAt(0)
+            if item is None:
+                break
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+        btn_font = QFont(self.ui_small_font)
+        btn_font.setPointSize(max(1, btn_font.pointSize() - 1))
+
+        for title in self._unique_normalized_titles():
+            btn = QPushButton(title)
+            btn.setFont(btn_font)
+            btn.setFixedHeight(26)
+            btn.setSizePolicy(QSizePolicy.Policy.Minimum,
+                              QSizePolicy.Policy.Fixed)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(
+                "QPushButton { background:#3a3f44; color:#ddd;"
+                " border:1px solid #555; border-radius:3px; padding:2px 8px; }"
+                "QPushButton:hover { background:#4a5057; color:#fff; }")
+            btn.clicked.connect(
+                lambda checked=False, t=title: self._on_expanded_title_clicked(t))
+            self.title_expand_flow.addWidget(btn)
+
+    def _on_expanded_title_clicked(self, title: str) -> None:
+        """點擊展開面板中的標題：填入搜尋框並收合面板。"""
+        self.hist_search.setText(title)
+        self.title_expand_panel.hide()
+        self.title_expand_btn.setText("⊞")
+
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         super().resizeEvent(event)
         # 視窗大小改變時重新計算可塞入的按鈕數量
         if hasattr(self, 'title_btn_row'):
             self._rebuild_title_filter_buttons()
+        # 展開面板若開著，跟著重新定位
+        if (hasattr(self, 'title_expand_panel')
+                and self.title_expand_panel.isVisible()):
+            self._position_title_expand_panel()
 
     def _refresh_history(self):
         self._rebuild_title_filter_buttons()

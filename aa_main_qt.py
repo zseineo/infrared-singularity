@@ -62,7 +62,7 @@ from aa_tool.url_fetcher import fetch_url as _fetch_url, parse_page_html as _par
 from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 
-APP_VERSION = "1.20"
+APP_VERSION = "1.21"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -674,6 +674,7 @@ class MainWindow(QMainWindow):
         self._experimental_extraction: bool = False
         self._pad_right_aa: bool = False
         self._glossary_translation_only: bool = False
+        self._fetch_auto_fill_title: bool = False
 
         # ── 應用狀態 ──
         self.url_history: list[dict] = []
@@ -1166,6 +1167,8 @@ class MainWindow(QMainWindow):
             match_lbl.setText("")
 
     def check_chapter_number(self) -> None:
+        if self._fetch_auto_fill_title:
+            return
         text = self._translate_panel.source_text.toPlainText()[:200]
         result = _check_chapter_number(text)
         if result is not None:
@@ -1568,8 +1571,13 @@ class MainWindow(QMainWindow):
                 full_text = (display_title + "\n\n" + text_content
                              if display_title else text_content)
                 self._translate_panel.source_text.setPlainText(full_text)
-                QTimer.singleShot(50, self.check_chapter_number)
+                if self._fetch_auto_fill_title:
+                    self._translate_panel.doc_num.clear()
+                else:
+                    QTimer.singleShot(50, self.check_chapter_number)
                 self._update_work_title(display_title)
+                if display_title and self._fetch_auto_fill_title:
+                    self._translate_panel.doc_title.setText(display_title)
                 self._last_fetched_title = display_title
                 self.url_related_links = nav_links
                 self.current_url = raw_url
@@ -1675,8 +1683,13 @@ class MainWindow(QMainWindow):
                     full_text = (display_title + "\n\n" + text_content
                                  if display_title else text_content)
                     self._translate_panel.source_text.setPlainText(full_text)
-                    QTimer.singleShot(50, self.check_chapter_number)
+                    if self._fetch_auto_fill_title:
+                        self._translate_panel.doc_num.clear()
+                    else:
+                        QTimer.singleShot(50, self.check_chapter_number)
                     self._update_work_title(display_title)
+                    if display_title and self._fetch_auto_fill_title:
+                        self._translate_panel.doc_title.setText(display_title)
                     self._last_fetched_title = display_title
                     self.url_related_links = nav_links
                     self.current_url = next_url
@@ -1764,6 +1777,7 @@ class MainWindow(QMainWindow):
             pad_right_aa=self._pad_right_aa,
             glossary_translation_only=self._glossary_translation_only,
             pad_space_count=self._pad_space_count,
+            fetch_auto_fill_title=self._fetch_auto_fill_title,
         )
 
     def _apply_cache(self, cache: AppCache) -> None:
@@ -1820,6 +1834,7 @@ class MainWindow(QMainWindow):
         self._experimental_extraction = bool(cache.experimental_extraction)
         self._pad_right_aa = bool(cache.pad_right_aa)
         self._glossary_translation_only = bool(cache.glossary_translation_only)
+        self._fetch_auto_fill_title = bool(cache.fetch_auto_fill_title)
         try:
             v = int(cache.pad_space_count)
             self._pad_space_count = v if v in (1, 2, 3) else 2
@@ -1832,6 +1847,7 @@ class MainWindow(QMainWindow):
     def load_cache(self) -> None:
         cache = self.settings_mgr.load_cache()
         self._apply_cache(cache)
+        self._apply_doc_num_state()
 
     def open_settings_dialog(self) -> None:
         from aa_settings_dialog_qt import SettingsDialog
@@ -1851,6 +1867,7 @@ class MainWindow(QMainWindow):
             experimental_extraction=self._experimental_extraction,
             pad_right_aa=self._pad_right_aa,
             glossary_translation_only=self._glossary_translation_only,
+            fetch_auto_fill_title=self._fetch_auto_fill_title,
             orig_cache_path=self._orig_cache_path(),
             on_apply=self._on_settings_applied,
             on_clear_url_history=self._on_clear_url_history_from_settings,
@@ -1883,6 +1900,9 @@ class MainWindow(QMainWindow):
             'pad_right_aa', self._pad_right_aa))
         self._glossary_translation_only = bool(values.get(
             'glossary_translation_only', self._glossary_translation_only))
+        self._fetch_auto_fill_title = bool(values.get(
+            'fetch_auto_fill_title', self._fetch_auto_fill_title))
+        self._apply_doc_num_state()
         if self._batch_window is not None:
             self._batch_window.glossary_auto_search = self._glossary_auto_search
         # 立即修剪作者歷史以符合新上限
@@ -1890,6 +1910,14 @@ class MainWindow(QMainWindow):
             self.work_history = self.work_history[:self._work_history_limit]
         self.save_cache()
         self.show_status("✅ 設定已套用", "#0f0")
+
+    def _apply_doc_num_state(self) -> None:
+        """依 _fetch_auto_fill_title 設定切換話數欄位的啟用狀態。"""
+        p = self._translate_panel
+        enabled = not self._fetch_auto_fill_title
+        p.doc_num.setEnabled(enabled)
+        if not enabled:
+            p.doc_num.clear()
 
     def _on_clear_url_history_from_settings(self, keep_n: int) -> int:
         """從設定視窗清除 URL 歷史，保留最近 keep_n 筆。回傳清除後筆數。"""
@@ -2274,6 +2302,12 @@ class MainWindow(QMainWindow):
         if not url:
             return
         title = self._translate_panel.get_doc_title().strip()
+        # 自動填入模式下，doc_title 是程式自動填的，不算「使用者手填」，
+        # 不寫入歷史；保留該 URL 既有的 work_title 戳印值（若有）。
+        if self._fetch_auto_fill_title:
+            _entry = next((h for h in self.url_history
+                           if isinstance(h, dict) and h.get('url') == url), None)
+            title = (_entry.get('work_title') or '').strip() if _entry else ''
         author = (self._author_name or '').strip()
         try:
             self.settings_mgr.stamp_url_history_meta(url, title, author)

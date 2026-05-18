@@ -63,6 +63,7 @@ class SettingsDialog(QDialog):
         experimental_extraction: bool,
         pad_right_aa: bool,
         glossary_translation_only: bool,
+        fetch_auto_fill_title: bool,
         orig_cache_path: str,
         on_apply: Callable[[dict], None],
         on_clear_url_history: Callable[[int], int],
@@ -79,7 +80,7 @@ class SettingsDialog(QDialog):
                        glossary_auto_search, diff_save_mode, embed_font_in_html,
                        embed_font_name, editor_default_wysiwyg, korean_mode,
                        experimental_extraction, pad_right_aa,
-                       glossary_translation_only)
+                       glossary_translation_only, fetch_auto_fill_title)
         self._refresh_cache_size()
 
     def _build_ui(self, auto_copy: bool, wh_limit: int, fh_limit: int,
@@ -87,7 +88,8 @@ class SettingsDialog(QDialog):
                   diff_save_mode: bool, embed_font_in_html: bool,
                   embed_font_name: str, editor_default_wysiwyg: bool,
                   korean_mode: bool, experimental_extraction: bool,
-                  pad_right_aa: bool, glossary_translation_only: bool) -> None:
+                  pad_right_aa: bool, glossary_translation_only: bool,
+                  fetch_auto_fill_title: bool) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(10)
@@ -130,6 +132,16 @@ class SettingsDialog(QDialog):
             "（對話框替換也走此路徑。）\n"
             "關閉時（預設）僅當右側出現對話框邊框字元（| │ ｜ ┃）才補空白、且不吃空白。")
         root.addWidget(self.pad_right_aa_cb)
+
+        self.fetch_auto_fill_title_cb = QCheckBox(
+            "網址讀取成功時，自動填入作品名稱框")
+        self.fetch_auto_fill_title_cb.setFont(_ui_font(12))
+        self.fetch_auto_fill_title_cb.setChecked(fetch_auto_fill_title)
+        self.fetch_auto_fill_title_cb.setToolTip(
+            "開啟後，網址讀取成功且頁面有可辨識的標題時，\n"
+            "會自動把解析出的作品名稱填入首頁「標題」欄位。\n"
+            "若該 URL 已有手動戳印的作品名稱，戳印值仍會優先覆蓋。")
+        root.addWidget(self.fetch_auto_fill_title_cb)
 
         self.glossary_auto_search_cb = QCheckBox("批次搜尋：點擊術語按鈕時自動搜尋")
         self.glossary_auto_search_cb.setFont(_ui_font(12))
@@ -242,25 +254,16 @@ class SettingsDialog(QDialog):
         self.orig_spin.setValue(max(1, int(oc_limit)))
         self.orig_spin.setFont(_ui_font(11))
         row3.addWidget(self.orig_spin)
-        row3.addStretch()
-        root.addLayout(row3)
-
-        # ── 原文暫存資訊 ──
-        clear_row = QHBoxLayout()
-        cache_lbl = QLabel("原文暫存檔：")
-        cache_lbl.setFont(_ui_font(11, bold=True))
-        clear_row.addWidget(cache_lbl)
-        self.size_label = QLabel("大小：—")
+        btn_clear = _make_btn("清除暫存", "#dc3545", "#c82333",
+                              font=_ui_font(11), width=80)
+        btn_clear.clicked.connect(self._on_clear_cache)
+        row3.addWidget(btn_clear)
+        self.size_label = QLabel("（—）")
         self.size_label.setFont(_ui_font(11))
         self.size_label.setStyleSheet("color:#888;")
-        clear_row.addWidget(self.size_label)
-        clear_row.addSpacing(12)
-        btn_clear = _make_btn("清除暫存", "#dc3545", "#c82333",
-                              font=_ui_font(11), width=100)
-        btn_clear.clicked.connect(self._on_clear_cache)
-        clear_row.addWidget(btn_clear)
-        clear_row.addStretch()
-        root.addLayout(clear_row)
+        row3.addWidget(self.size_label)
+        row3.addStretch()
+        root.addLayout(row3)
 
         root.addStretch()
 
@@ -280,9 +283,9 @@ class SettingsDialog(QDialog):
     def _refresh_cache_size(self) -> None:
         try:
             size = os.path.getsize(self._orig_cache_path)
-            self.size_label.setText(f"大小：{_format_size(size)}")
+            self.size_label.setText(f"（{_format_size(size)}）")
         except OSError:
-            self.size_label.setText("大小：（檔案不存在）")
+            self.size_label.setText("（檔案不存在）")
 
     def _on_clear_cache(self) -> None:
         ret = QMessageBox.question(
@@ -334,6 +337,7 @@ class SettingsDialog(QDialog):
             'pad_right_aa': self.pad_right_aa_cb.isChecked(),
             'glossary_translation_only':
                 self.glossary_translation_only_cb.isChecked(),
+            'fetch_auto_fill_title': self.fetch_auto_fill_title_cb.isChecked(),
         }
         try:
             self._on_apply(values)

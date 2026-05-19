@@ -62,7 +62,7 @@ from aa_tool.url_fetcher import fetch_url as _fetch_url, parse_page_html as _par
 from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 
-APP_VERSION = "1.24"
+APP_VERSION = "1.25"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -673,6 +673,7 @@ class MainWindow(QMainWindow):
         self._korean_mode: bool = False
         self._experimental_extraction: bool = False
         self._pad_right_aa: bool = False
+        self._glossary_avoid_aa: bool = False
         self._glossary_translation_only: bool = False
         self._fetch_auto_fill_title: bool = False
 
@@ -916,6 +917,7 @@ class MainWindow(QMainWindow):
                 default_wysiwyg_provider=lambda: self._editor_default_wysiwyg,
                 translation_only_provider=lambda: self._glossary_translation_only,
                 pad_right_aa_provider=lambda: self._pad_right_aa,
+                glossary_avoid_aa_provider=lambda: self._glossary_avoid_aa,
                 url_for_text_provider=self._find_url_for_text,
             )
             # 替換 placeholder
@@ -1216,7 +1218,8 @@ class MainWindow(QMainWindow):
             append_mode=append_mode,
             translation_only=self._glossary_translation_only,
             pad_right_aa=self._pad_right_aa,
-            symbol_regex_str=self.current_symbol_regex)
+            symbol_regex_str=self.current_symbol_regex,
+            glossary_avoid_aa=self._glossary_avoid_aa)
         title = self._translate_panel.get_doc_title().strip() or "未命名"
         num = self._translate_panel.get_doc_num().strip()
         safe_title = _re_mod.sub(r'[\\/:*?"<>|]', '_', title)
@@ -1944,6 +1947,7 @@ class MainWindow(QMainWindow):
             korean_mode=self._korean_mode,
             experimental_extraction=self._experimental_extraction,
             pad_right_aa=self._pad_right_aa,
+            glossary_avoid_aa=self._glossary_avoid_aa,
             glossary_translation_only=self._glossary_translation_only,
             pad_space_count=self._pad_space_count,
             fetch_auto_fill_title=self._fetch_auto_fill_title,
@@ -2009,6 +2013,7 @@ class MainWindow(QMainWindow):
         self._korean_mode = bool(cache.korean_mode)
         self._experimental_extraction = bool(cache.experimental_extraction)
         self._pad_right_aa = bool(cache.pad_right_aa)
+        self._glossary_avoid_aa = bool(cache.glossary_avoid_aa)
         self._glossary_translation_only = bool(cache.glossary_translation_only)
         self._fetch_auto_fill_title = bool(cache.fetch_auto_fill_title)
         self._gemini_gem_url = str(cache.gemini_gem_url or "")
@@ -2048,6 +2053,7 @@ class MainWindow(QMainWindow):
             korean_mode=self._korean_mode,
             experimental_extraction=self._experimental_extraction,
             pad_right_aa=self._pad_right_aa,
+            glossary_avoid_aa=self._glossary_avoid_aa,
             glossary_translation_only=self._glossary_translation_only,
             fetch_auto_fill_title=self._fetch_auto_fill_title,
             orig_cache_path=self._orig_cache_path(),
@@ -2080,6 +2086,8 @@ class MainWindow(QMainWindow):
             'experimental_extraction', self._experimental_extraction))
         self._pad_right_aa = bool(values.get(
             'pad_right_aa', self._pad_right_aa))
+        self._glossary_avoid_aa = bool(values.get(
+            'glossary_avoid_aa', self._glossary_avoid_aa))
         self._glossary_translation_only = bool(values.get(
             'glossary_translation_only', self._glossary_translation_only))
         self._fetch_auto_fill_title = bool(values.get(

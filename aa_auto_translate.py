@@ -54,6 +54,7 @@ class AutoConfig:
     korean_mode: bool
     experimental: bool
     pad_right_aa: bool
+    glossary_avoid_aa: bool
     work_title: str
 
 
@@ -76,6 +77,7 @@ def load_config(base_dir: str) -> AutoConfig:
         korean_mode=c.korean_mode,
         experimental=c.experimental_extraction,
         pad_right_aa=c.pad_right_aa,
+        glossary_avoid_aa=c.glossary_avoid_aa,
         work_title=c.doc_title,
     )
 
@@ -264,7 +266,8 @@ def run_auto_translate(
                 result_text = translation_engine.apply_translation(
                     text_content, extracted, translated, cfg.glossary,
                     pad_right_aa=cfg.pad_right_aa,
-                    symbol_regex_str=cfg.symbol_regex)
+                    symbol_regex_str=cfg.symbol_regex,
+                    glossary_avoid_aa=cfg.glossary_avoid_aa)
                 out_path = os.path.join(out_dir, _safe_filename(page_title, i))
                 html_io.write_html_file(out_path, result_text)
                 result.done.append(out_path)

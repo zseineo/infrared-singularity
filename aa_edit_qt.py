@@ -179,6 +179,7 @@ class EditWindow(QMainWindow):
         default_wysiwyg_provider=None,  # () -> bool；對應主程式「進入編輯器時預設 WYSIWYG」設定
         translation_only_provider=None,  # () -> bool；對應主程式「術語表只套用於譯文部分」設定
         pad_right_aa_provider=None,  # () -> bool；對應主程式「替換翻譯時偵測右側 AA 圖補空白」設定
+        glossary_avoid_aa_provider=None,  # () -> bool；對應主程式「套用術語表時避免套用到 AA 圖」設定
         url_for_text_provider=None,  # (text: str) -> str | None；以指紋查 url_history 取得對應網址
     ) -> None:
         super().__init__()
@@ -222,6 +223,7 @@ class EditWindow(QMainWindow):
         self._default_wysiwyg_provider = default_wysiwyg_provider
         self._translation_only_provider = translation_only_provider
         self._pad_right_aa_provider = pad_right_aa_provider
+        self._glossary_avoid_aa_provider = glossary_avoid_aa_provider
         self._url_for_text_provider = url_for_text_provider
 
         # Alt+4 局部重套用：保留 provider 取得的「完整」提取結果與翻譯文字，
@@ -919,6 +921,24 @@ class EditWindow(QMainWindow):
         label = orig_raw if len(pairs) == 1 else f"{len(pairs)} 組"
         self._set_status(f"✅ 已替換 {total} 處：{label}", "#0f0")
 
+    def _glossary_avoid_aa_settings(self) -> 'tuple[bool, str | None]':
+        """回傳 (是否避免套用術語到 AA 圖, symbol_regex 字串)；供術語表套用共用。"""
+        avoid_aa = False
+        if self._glossary_avoid_aa_provider is not None:
+            try:
+                avoid_aa = bool(self._glossary_avoid_aa_provider())
+            except Exception:
+                avoid_aa = False
+        symbol_regex_str = None
+        if avoid_aa and self._extract_regex_provider is not None:
+            try:
+                provided = self._extract_regex_provider()
+                if provided and len(provided) >= 3:
+                    symbol_regex_str = provided[2]
+            except Exception:
+                symbol_regex_str = None
+        return avoid_aa, symbol_regex_str
+
     def _reapply_glossary(self) -> None:
         """向主程式請求目前術語表，收到後套用到編輯內容。"""
         if self._glossary_provider is not None:
@@ -948,7 +968,15 @@ class EditWindow(QMainWindow):
         if self._preview_active:
             self._sync_preview_to_editor()
         current_text = self.editor.toPlainText()
-        new_text = apply_glossary_to_text(current_text, glossary)
+        avoid_aa, srs = self._glossary_avoid_aa_settings()
+        sym = None
+        if avoid_aa and srs:
+            try:
+                sym = re.compile(srs)
+            except re.error:
+                sym = None
+        new_text = apply_glossary_to_text(
+            current_text, glossary, avoid_aa=avoid_aa, symbol_regex=sym)
         if new_text == current_text:
             self._set_status("術語表已套用（無變更）", "#0f0")
             return
@@ -2108,8 +2136,10 @@ class EditWindow(QMainWindow):
                 pad_right_aa = bool(self._pad_right_aa_provider())
             except Exception:
                 pad_right_aa = False
+        glossary_avoid_aa, _ = self._glossary_avoid_aa_settings()
         symbol_regex_str = None
-        if pad_right_aa and self._extract_regex_provider is not None:
+        if (pad_right_aa or glossary_avoid_aa) \
+                and self._extract_regex_provider is not None:
             try:
                 provided = self._extract_regex_provider()
                 if provided and len(provided) >= 3:
@@ -2124,11 +2154,13 @@ class EditWindow(QMainWindow):
                 self._side_ai_baseline,
                 glossary,
                 translation_only=translation_only,
-                pad_right_aa=pad_right_aa, symbol_regex_str=symbol_regex_str)
+                pad_right_aa=pad_right_aa, symbol_regex_str=symbol_regex_str,
+                glossary_avoid_aa=glossary_avoid_aa)
             new_full = apply_translation(
                 self._original_text, new_extracted, new_ai, glossary,
                 translation_only=translation_only,
-                pad_right_aa=pad_right_aa, symbol_regex_str=symbol_regex_str)
+                pad_right_aa=pad_right_aa, symbol_regex_str=symbol_regex_str,
+                glossary_avoid_aa=glossary_avoid_aa)
         except Exception as e:
             self._set_status(f"❌ 套用失敗：{e}", "#dc3545")
             return

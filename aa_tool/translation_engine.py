@@ -2,7 +2,7 @@ import re
 import unicodedata
 
 from .constants import BORDER_CHARS, DEFAULT_SYMBOL_REGEX
-from .text_extraction import _BIDI_CONTROL_RE, aa_noise_ratio
+from .text_extraction import _BIDI_CONTROL_RE, _local_aa_density, aa_noise_ratio
 
 
 def _disp_width(text: str) -> int:
@@ -203,12 +203,51 @@ def _replace_with_padding(
         return line.replace(original, translated)
 
 
-def apply_glossary_to_text(text: str, glossary: dict[str, str]) -> str:
+# 全形＋半形片假名（含長音 ー）；用於 glossary_avoid_aa 的「緊鄰片假名」判定。
+_KATAKANA_RE = re.compile(r'[ァ-ヺ・ー゠ｦ-ﾟ]')
+# 片假名形式的敬稱 — 名字後接這些時不算「誤切更長片假名詞」，不應排除套用。
+_KATAKANA_HONORIFICS = ('サン', 'チャン', 'クン', 'サマ', 'タン', 'ニキ', 'ネキ')
+# glossary_avoid_aa：命中位置左右視窗 AA 噪聲密度 >= 此值 → 視為落在 AA 圖上。
+_GLOSSARY_AA_DENSITY_TH = 0.5
+
+
+def _glossary_hit_on_aa(line: str, start: int, end: int, key: str,
+                        symbol_regex: 're.Pattern') -> bool:
+    """判斷術語表的這次命中位置是否疑似落在 AA 圖上（experimental）。
+
+    規則 A — 周圍 AA 噪聲密度：命中位置左右視窗（`_local_aa_density`）的 AA
+      噪聲密度 >= `_GLOSSARY_AA_DENSITY_TH` → 視為 AA 圖（例：`::::アム::::`
+      中的 `アム`，周圍全是 `:` 等 AA 字元）。
+    規則 B — 緊鄰片假名：`key` 本身含片假名，且命中後緊鄰（前一字或後一字）
+      仍是片假名 → 疑似把一個更長的片假名詞硬切成術語碎片。但後方緊接片假名
+      敬稱（`サン` 等）時排除（屬正常的「名字＋敬稱」）。
+    """
+    if _local_aa_density(line, start, end, symbol_regex) >= _GLOSSARY_AA_DENSITY_TH:
+        return True
+    if _KATAKANA_RE.search(key):
+        before = line[start - 1] if start > 0 else ''
+        after = line[end] if end < len(line) else ''
+        if before and _KATAKANA_RE.match(before):
+            return True
+        if after and _KATAKANA_RE.match(after):
+            tail = line[end:end + 4]
+            if not any(tail.startswith(h) for h in _KATAKANA_HONORIFICS):
+                return True
+    return False
+
+
+def apply_glossary_to_text(text: str, glossary: dict[str, str], *,
+                           avoid_aa: bool = False,
+                           symbol_regex: 're.Pattern | None' = None) -> str:
     """對任意文本套用術語表（含 Auto-Padding 與邊框判定）。
 
     使用單輪掃描：把所有術語組成一條交替正則（長度遞減），
     re.sub 一次跑完，避免多輪替換時「短 LHS 命中長 LHS 替換結果」
     造成後續規則覆蓋前面成果的問題。
+
+    `avoid_aa=True`（實驗性）時，略過 `_glossary_hit_on_aa` 判定為「疑似落在
+    AA 圖上」的命中，保留原文不替換；`symbol_regex` 供該判定使用，None 時退回
+    `DEFAULT_SYMBOL_REGEX`。
     """
     if not glossary:
         return text
@@ -217,11 +256,18 @@ def apply_glossary_to_text(text: str, glossary: dict[str, str]) -> str:
     term_map = {k: v for k, v in sorted_items}
     pattern = re.compile('|'.join(re.escape(k) for k, _ in sorted_items))
 
+    sym: 're.Pattern | None' = None
+    if avoid_aa:
+        sym = symbol_regex or re.compile(DEFAULT_SYMBOL_REGEX)
+
     lines = text.split('\n')
     for i, line in enumerate(lines):
         def repl(m, _line=line):
             jp = m.group(0)
             tw = term_map[jp]
+            if avoid_aa and _glossary_hit_on_aa(
+                    _line, m.start(), m.end(), jp, sym):
+                return jp  # 疑似 AA 圖，保留原文不套用
             len_diff = len(jp) - len(tw)
             rest = _line[m.end():]
             if len_diff > 0 and any(c in rest for c in BORDER_CHARS):
@@ -289,6 +335,7 @@ def apply_translation(
     translation_only: bool = False,
     pad_right_aa: bool = False,
     symbol_regex_str: 'str | None' = None,
+    glossary_avoid_aa: bool = False,
 ) -> str:
     """執行翻譯替換：將提取的原文替換為翻譯文，套用術語表並自動補全形空白。
 
@@ -306,15 +353,18 @@ def apply_translation(
             判定，門檻見 `_RIGHT_AA_NOISE_THRESHOLD`）也會在譯文較短時補等量
             全形空白，盡量讓右側 AA 圖維持原位置。
         symbol_regex_str: AA 符號正則字串（通常為主程式的 `symbol_regex`）；
-            僅在 `pad_right_aa=True` 時使用，None / 編譯失敗時退回
-            `DEFAULT_SYMBOL_REGEX`。
+            在 `pad_right_aa=True` 或 `glossary_avoid_aa=True` 時使用，
+            None / 編譯失敗時退回 `DEFAULT_SYMBOL_REGEX`。
+        glossary_avoid_aa: 實驗性。為 True 時，全域術語覆蓋階段會略過「疑似落在
+            AA 圖上」的命中（見 `_glossary_hit_on_aa`），避免術語表把 AA 圖中
+            剛好等於某術語 key 的片假名碎片誤替換掉。
 
     Returns:
         替換後的完整文本
     """
-    # 右側 AA 圖偵測用的 symbol regex（僅在 pad_right_aa 啟用時編譯）
+    # AA 圖偵測用的 symbol regex（pad_right_aa 或 glossary_avoid_aa 啟用時編譯）
     symbol_regex: 're.Pattern | None' = None
-    if pad_right_aa:
+    if pad_right_aa or glossary_avoid_aa:
         try:
             symbol_regex = re.compile(symbol_regex_str or DEFAULT_SYMBOL_REGEX)
         except re.error:
@@ -414,6 +464,8 @@ def apply_translation(
     # 全域術語覆蓋：未被提取的原文部分也套用術語表
     # translation_only=True 時跳過此步，僅譯文部分套用術語表
     if not translation_only:
-        source = apply_glossary_to_text(source, glossary)
+        source = apply_glossary_to_text(
+            source, glossary,
+            avoid_aa=glossary_avoid_aa, symbol_regex=symbol_regex)
 
     return source

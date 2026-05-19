@@ -62,6 +62,7 @@ class SettingsDialog(QDialog):
         korean_mode: bool,
         experimental_extraction: bool,
         pad_right_aa: bool,
+        glossary_avoid_aa: bool,
         glossary_translation_only: bool,
         fetch_auto_fill_title: bool,
         orig_cache_path: str,
@@ -80,6 +81,7 @@ class SettingsDialog(QDialog):
                        glossary_auto_search, diff_save_mode, embed_font_in_html,
                        embed_font_name, editor_default_wysiwyg, korean_mode,
                        experimental_extraction, pad_right_aa,
+                       glossary_avoid_aa,
                        glossary_translation_only, fetch_auto_fill_title)
         self._refresh_cache_size()
 
@@ -88,7 +90,8 @@ class SettingsDialog(QDialog):
                   diff_save_mode: bool, embed_font_in_html: bool,
                   embed_font_name: str, editor_default_wysiwyg: bool,
                   korean_mode: bool, experimental_extraction: bool,
-                  pad_right_aa: bool, glossary_translation_only: bool,
+                  pad_right_aa: bool, glossary_avoid_aa: bool,
+                  glossary_translation_only: bool,
                   fetch_auto_fill_title: bool) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
@@ -132,6 +135,19 @@ class SettingsDialog(QDialog):
             "（對話框替換也走此路徑。）\n"
             "關閉時（預設）僅當右側出現對話框邊框字元（| │ ｜ ┃）才補空白、且不吃空白。")
         root.addWidget(self.pad_right_aa_cb)
+
+        self.glossary_avoid_aa_cb = QCheckBox(
+            "🧪 套用術語表時：避免套用到 AA 圖")
+        self.glossary_avoid_aa_cb.setFont(_ui_font(12))
+        self.glossary_avoid_aa_cb.setChecked(glossary_avoid_aa)
+        self.glossary_avoid_aa_cb.setToolTip(
+            "實驗性功能：全域套用術語表時，略過疑似落在 AA 圖上的命中，避免術語表\n"
+            "把 AA 圖中剛好等於某術語 key 的片假名碎片誤替換掉。判定方式：\n"
+            "  • 命中位置左右的 AA 噪聲密度偏高 → 視為 AA 圖（如 ::::アム:::: 中的 アム）。\n"
+            "  • 術語 key 含片假名，且命中後緊鄰仍是片假名 → 疑似切到更長的片假名詞\n"
+            "    （片假名敬稱 サン 等除外）。\n"
+            "只影響全域術語覆蓋；提取出的譯文部分仍照常套用術語表。")
+        root.addWidget(self.glossary_avoid_aa_cb)
 
         self.fetch_auto_fill_title_cb = QCheckBox(
             "網址讀取成功時，自動填入作品名稱框")
@@ -335,6 +351,7 @@ class SettingsDialog(QDialog):
             'experimental_extraction':
                 self.experimental_extraction_cb.isChecked(),
             'pad_right_aa': self.pad_right_aa_cb.isChecked(),
+            'glossary_avoid_aa': self.glossary_avoid_aa_cb.isChecked(),
             'glossary_translation_only':
                 self.glossary_translation_only_cb.isChecked(),
             'fetch_auto_fill_title': self.fetch_auto_fill_title_cb.isChecked(),

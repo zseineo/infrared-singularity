@@ -144,6 +144,9 @@ class AppCache:
     # 實驗性：替換翻譯時，若被替換原文的「右側」殘留內容像 AA 圖（沿用實驗提取
     # 演算法的 AA 噪聲判定）且譯文較短，則於譯文後補等量全形空白。預設關閉。
     pad_right_aa: bool = False
+    # 實驗性：套用術語表時，略過疑似落在 AA 圖上的命中，避免術語表把 AA 圖中
+    # 剛好等於某術語 key 的片假名碎片誤替換掉。預設關閉。
+    glossary_avoid_aa: bool = False
     # 「補空白」按鈕在每個字元之間插入的全形空白數量（1~3）。
     pad_space_count: int = 2
     # 網址讀取成功且有正確辨識標題時，自動把標題填入作品名稱框。
@@ -335,6 +338,8 @@ class SettingsManager:
                 'experimental_extraction', cache.experimental_extraction))
             cache.pad_right_aa = bool(data.get(
                 'pad_right_aa', cache.pad_right_aa))
+            cache.glossary_avoid_aa = bool(data.get(
+                'glossary_avoid_aa', cache.glossary_avoid_aa))
             cache.fetch_auto_fill_title = bool(data.get(
                 'fetch_auto_fill_title', cache.fetch_auto_fill_title))
             cache.gemini_gem_url = str(data.get(
@@ -426,6 +431,7 @@ class SettingsManager:
                 'korean_mode': cache.korean_mode,
                 'experimental_extraction': cache.experimental_extraction,
                 'pad_right_aa': cache.pad_right_aa,
+                'glossary_avoid_aa': cache.glossary_avoid_aa,
                 'pad_space_count': cache.pad_space_count,
                 'fetch_auto_fill_title': cache.fetch_auto_fill_title,
                 'gemini_gem_url': cache.gemini_gem_url,

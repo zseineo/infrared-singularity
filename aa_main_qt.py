@@ -62,7 +62,7 @@ from aa_tool.url_fetcher import fetch_url as _fetch_url, parse_page_html as _par
 from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 
-APP_VERSION = "1.23"
+APP_VERSION = "1.24"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -680,6 +680,13 @@ class MainWindow(QMainWindow):
         self.url_history: list[dict] = []
         self.url_related_links: list[dict] = []
         self.current_url: str = ""
+        # 自動翻譯（aa_auto_translate）設定，由 cache 載入／回存
+        self._gemini_gem_url: str = ""
+        self._gemini_profile_dir: str = ""
+        self._gemini_max_per_session: int = 3
+        self._gemini_selectors: dict = {}
+        self._auto_translate_out_dir: str = ""
+        self._auto_translate_running: bool = False
         self._author_only: bool = False
         self._author_name: str = ""
         # URL 讀取後暫存的標題（line 1），供「提取日文」時跳過標題行之用
@@ -829,6 +836,13 @@ class MainWindow(QMainWindow):
         btn_open.setFixedHeight(44)
         btn_open.clicked.connect(self.import_html)
         hl.addWidget(btn_open)
+
+        btn_auto = _make_btn("⚡ 自動翻譯", "#d63384", "#b02a6f",
+                             font=_ui_font(12), width=120)
+        btn_auto.setFixedHeight(44)
+        btn_auto.setToolTip("連續多話全自動翻譯（操控網頁版 Gemini）")
+        btn_auto.clicked.connect(self.open_auto_translate_dialog)
+        hl.addWidget(btn_auto)
 
         return w
 
@@ -1466,6 +1480,132 @@ class MainWindow(QMainWindow):
         show_toast(self, message, color=bg, duration=dur)
 
     # ════════════════════════════════════════════════════════════
+    #  自動翻譯（連續多話，操控網頁版 Gemini）
+    # ════════════════════════════════════════════════════════════
+
+    def open_auto_translate_dialog(self) -> None:
+        """開啟「自動翻譯（連續多話）」設定對話框。"""
+        if self._auto_translate_running:
+            self.show_status("⚠️ 自動翻譯正在執行中…", "#f39c12")
+            return
+        from PyQt6.QtWidgets import (
+            QDialog, QDialogButtonBox, QFormLayout, QSpinBox)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("⚡ 自動翻譯（連續多話）")
+        form = QFormLayout(dlg)
+
+        url_edit = QLineEdit(self.current_url)
+        url_edit.setMinimumWidth(440)
+        form.addRow("起始網址：", url_edit)
+
+        count_spin = QSpinBox()
+        count_spin.setRange(1, 999)
+        count_spin.setValue(5)
+        form.addRow("連續話數：", count_spin)
+
+        gem_edit = QLineEdit(self._gemini_gem_url)
+        gem_edit.setPlaceholderText("https://gemini.google.com/gem/...")
+        form.addRow("Gemini Gem 網址：", gem_edit)
+
+        out_row = QWidget()
+        out_hl = QHBoxLayout(out_row)
+        out_hl.setContentsMargins(0, 0, 0, 0)
+        out_edit = QLineEdit(self._auto_translate_out_dir or self._last_dir)
+        btn_browse = QPushButton("瀏覽…")
+        out_hl.addWidget(out_edit, 1)
+        out_hl.addWidget(btn_browse)
+        form.addRow("輸出資料夾：", out_row)
+
+        def _browse() -> None:
+            d = QFileDialog.getExistingDirectory(
+                dlg, "選擇輸出資料夾", out_edit.text() or os.getcwd())
+            if d:
+                out_edit.setText(d)
+        btn_browse.clicked.connect(_browse)
+
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        form.addRow(bb)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        start_url = url_edit.text().strip()
+        gem_url = gem_edit.text().strip()
+        out_dir = out_edit.text().strip()
+        count = count_spin.value()
+        if not start_url:
+            self.show_status("⚠️ 請填入起始網址", "#f39c12")
+            return
+        if not gem_url:
+            self.show_status("⚠️ 請填入 Gemini Gem 網址", "#f39c12")
+            return
+        if not out_dir:
+            self.show_status("⚠️ 請選擇輸出資料夾", "#f39c12")
+            return
+
+        self._gemini_gem_url = gem_url
+        self._auto_translate_out_dir = out_dir
+        self.save_cache()
+        self._start_auto_translate(start_url, count, out_dir, gem_url)
+
+    def _start_auto_translate(self, start_url: str, count: int,
+                               out_dir: str, gem_url: str) -> None:
+        """在背景執行緒跑自動翻譯，進度回報至狀態列。"""
+        self._auto_translate_running = True
+        self.show_status("⏳ 自動翻譯啟動中（請在彈出的瀏覽器完成登入）…",
+                         "#17a2b8", duration=0)
+
+        def _progress(msg: str) -> None:
+            self._invoke_on_main.emit(
+                lambda m=msg: self.show_status(m, "#17a2b8", duration=0))
+
+        def _bg() -> None:
+            from aa_auto_translate import run_auto_translate
+            try:
+                result = run_auto_translate(
+                    start_url, count, out_dir,
+                    base_dir=os.path.dirname(os.path.abspath(__file__)),
+                    gem_url=gem_url,
+                    profile_dir=self._gemini_profile_dir or None,
+                    progress=_progress)
+            except Exception as e:  # noqa: BLE001 — 背景執行緒須吞例外回報 UI
+                self._invoke_on_main.emit(
+                    lambda err=e: self._auto_translate_done(None, str(err)))
+                return
+            self._invoke_on_main.emit(
+                lambda r=result: self._auto_translate_done(r, None))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _auto_translate_done(self, result, error: 'str | None') -> None:
+        self._auto_translate_running = False
+        if error is not None:
+            self.show_status(f"❌ 自動翻譯失敗：{error}", "#dc3545")
+            QMessageBox.critical(self, "自動翻譯失敗", error)
+            return
+        lines = [f"成功翻譯 {len(result.done)} 話。"]
+        for p in result.done:
+            lines.append(f"  ✅ {p}")
+        if result.failed:
+            lines.append(f"失敗 {len(result.failed)} 話：")
+            lines += [f"  ❌ {u} — {why}" for u, why in result.failed]
+        if result.quota_paused:
+            lines.append("")
+            lines.append("⏸️ 因撞到 Gemini 額度上限而暫停。")
+            lines.append("待額度恢復後，用下列網址當起始網址接續：")
+            lines.append(result.pending_url)
+        ok = not result.failed and not result.quota_paused
+        self.show_status(
+            f"✅ 自動翻譯結束：成功 {len(result.done)} 話",
+            "#28a745" if ok else "#f39c12")
+        QMessageBox.information(self, "自動翻譯完成", "\n".join(lines))
+
+    # ════════════════════════════════════════════════════════════
     #  Wiki 角色日中對照抓取（非 modal QDialog）
     # ════════════════════════════════════════════════════════════
 
@@ -1807,6 +1947,11 @@ class MainWindow(QMainWindow):
             glossary_translation_only=self._glossary_translation_only,
             pad_space_count=self._pad_space_count,
             fetch_auto_fill_title=self._fetch_auto_fill_title,
+            gemini_gem_url=self._gemini_gem_url,
+            gemini_profile_dir=self._gemini_profile_dir,
+            gemini_max_per_session=self._gemini_max_per_session,
+            gemini_selectors=self._gemini_selectors,
+            auto_translate_out_dir=self._auto_translate_out_dir,
         )
 
     def _apply_cache(self, cache: AppCache) -> None:
@@ -1866,6 +2011,12 @@ class MainWindow(QMainWindow):
         self._pad_right_aa = bool(cache.pad_right_aa)
         self._glossary_translation_only = bool(cache.glossary_translation_only)
         self._fetch_auto_fill_title = bool(cache.fetch_auto_fill_title)
+        self._gemini_gem_url = str(cache.gemini_gem_url or "")
+        self._gemini_profile_dir = str(cache.gemini_profile_dir or "")
+        self._gemini_max_per_session = max(1, int(
+            cache.gemini_max_per_session or 3))
+        self._gemini_selectors = dict(cache.gemini_selectors or {})
+        self._auto_translate_out_dir = str(cache.auto_translate_out_dir or "")
         try:
             v = int(cache.pad_space_count)
             self._pad_space_count = v if v in (1, 2, 3) else 2

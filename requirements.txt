@@ -1,1 +1,4 @@
 PyQt6>=6.5
+# 自動翻譯（aa_auto_translate.py / aa_tool/gemini_web.py）用於操控網頁版 Gemini。
+# 安裝後需另跑一次：playwright install chromium
+playwright>=1.40

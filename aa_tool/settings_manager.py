@@ -148,6 +148,17 @@ class AppCache:
     pad_space_count: int = 2
     # 網址讀取成功且有正確辨識標題時，自動把標題填入作品名稱框。
     fetch_auto_fill_title: bool = False
+    # ── 自動翻譯（aa_auto_translate.py / gemini_web.py）──
+    # gemini_gem_url：使用者固定用來翻譯 AA 的 Gemini Gem 網址。
+    # gemini_profile_dir：Playwright 持久化瀏覽器 profile 目錄（空 = 用 %TEMP% 預設）。
+    # gemini_max_per_session：同一對話 session 最多翻譯幾次，超過自動開新對話。
+    # gemini_selectors：DOM 選擇器覆寫（Gemini 改版時可在此手動修正）。
+    # auto_translate_out_dir：自動翻譯輸出資料夾（記住上次選擇）。
+    gemini_gem_url: str = ""
+    gemini_profile_dir: str = ""
+    gemini_max_per_session: int = 3
+    gemini_selectors: dict = field(default_factory=dict)
+    auto_translate_out_dir: str = ""
 
 
 class SettingsManager:
@@ -326,6 +337,19 @@ class SettingsManager:
                 'pad_right_aa', cache.pad_right_aa))
             cache.fetch_auto_fill_title = bool(data.get(
                 'fetch_auto_fill_title', cache.fetch_auto_fill_title))
+            cache.gemini_gem_url = str(data.get(
+                'gemini_gem_url', cache.gemini_gem_url))
+            cache.gemini_profile_dir = str(data.get(
+                'gemini_profile_dir', cache.gemini_profile_dir))
+            try:
+                cache.gemini_max_per_session = int(data.get(
+                    'gemini_max_per_session', cache.gemini_max_per_session))
+            except (TypeError, ValueError):
+                pass
+            sel = data.get('gemini_selectors', cache.gemini_selectors)
+            cache.gemini_selectors = sel if isinstance(sel, dict) else {}
+            cache.auto_translate_out_dir = str(data.get(
+                'auto_translate_out_dir', cache.auto_translate_out_dir))
             try:
                 v = int(data.get('pad_space_count', cache.pad_space_count))
                 if v in (1, 2, 3):
@@ -404,6 +428,11 @@ class SettingsManager:
                 'pad_right_aa': cache.pad_right_aa,
                 'pad_space_count': cache.pad_space_count,
                 'fetch_auto_fill_title': cache.fetch_auto_fill_title,
+                'gemini_gem_url': cache.gemini_gem_url,
+                'gemini_profile_dir': cache.gemini_profile_dir,
+                'gemini_max_per_session': cache.gemini_max_per_session,
+                'gemini_selectors': cache.gemini_selectors,
+                'auto_translate_out_dir': cache.auto_translate_out_dir,
             }
             self._atomic_write_json(cache_file, data)
 

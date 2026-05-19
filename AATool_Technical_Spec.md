@@ -8,13 +8,15 @@
     *   `aa_batch_search_qt.py` — PyQt6 批次搜尋視窗 (`BatchSearchWindow`)，嵌入主視窗的 `QStackedWidget`
     *   `aa_wiki_name_dialog_qt.py` — PyQt6 Wiki 角色日中對照抓取 Dialog (`WikiNameDialog`)，非 modal 獨立對話框
     *   `aa_qt_font_test.py` — PyQt6 字型引擎驗證小工具（獨立測試用）
-    *   `aa_tool/` — 純邏輯模組（無 UI 依賴）：`constants`、`font_measure`（Protocol）、`html_io`、`settings_manager`、`text_extraction`、`translation_engine`、`bubble_alignment`、`url_fetcher`、`wiki_name_fetcher`、`qt_helpers`、`dark_theme.qss`
-*   **技術棧**: Python 3, **PyQt6** (UI 框架), `re`, `math`, `os`, `html`, `urllib.request`, `threading`, `gzip`, `json`, `subprocess`
+    *   `aa_auto_translate.py` — 連續多話自動翻譯協調器（CLI 入口，亦由主視窗 GUI 呼叫）。詳見 §4.13
+    *   `aa_tool/` — 純邏輯模組（無 UI 依賴）：`constants`、`font_measure`（Protocol）、`html_io`、`settings_manager`、`text_extraction`、`translation_engine`、`bubble_alignment`、`url_fetcher`、`wiki_name_fetcher`、`gemini_web`、`qt_helpers`、`dark_theme.qss`
+*   **技術棧**: Python 3, **PyQt6** (UI 框架), `re`, `math`, `os`, `html`, `urllib.request`, `threading`, `gzip`, `json`, `subprocess`；自動翻譯另需 **Playwright**（操控網頁版 Gemini，見 §4.13）
 *   **狀態存儲機制**:
     *   `aa_settings_cache.json` — 暫存 UI 狀態 (原文、過濾規則、術語表、話數、預覽暫存、URL 記錄、背景/文字色、各開關狀態、作品+作者歷史 `work_history`、韓文提取模式開關 `korean_mode`、實驗性日文提取演算法開關 `experimental_extraction`、實驗性「替換翻譯時偵測文字右側 AA 圖並補空白」開關 `pad_right_aa` 等)，確保關閉重開後不丟失資料。**正則表達式不從暫存讀取**，由 `AA_Settings.json` 管理（韓文模式啟用時改用 `DEFAULT_BASE_REGEX_KO` 常數，亦不從暫存讀取）。
     *   `AA_Settings.json` — 正式設定檔。寫入順序固定為 `base_regex`、`invalid_regex`、`symbol_regex`、`filter`、`glossary`、`glossary_temp`（regex 在前、文字內容在後，方便人工編輯時優先看到 regex）。讀取使用 `data.get(key)`，不依賴順序。`save_regex_to_settings()` 也會以同一順序重建 dict 寫回。
     *   `aa_original_cache.json` — 原文暫存。**索引為「投稿標頭指紋」**（日期 + 時間 + 作者 ID，例：`2023/04/02(日) 20:54:38.52 ID:5UkYdPSV`），由 `MainWindow._compute_author_fingerprint()` 從原文第一則投稿標頭抽出（伺服器產生，翻譯流程不會動到，跨檔名改名仍能命中）。值為 `{text, ts, extracted?, translation?}`；**上限由 `aa_settings_cache.json` 的 `original_cache_limit` 控制（預設 50）**，超過時以時間戳保留最新。編輯器儲存／翻譯按鈕按下時寫入（參見 §4.3）；若原文算不出指紋（罕見：純翻譯結果或舊格式投稿）則略過寫入。`import_html` 或從批次搜尋開啟檔案時，`_load_cache_entry_for_file()` 讀該 HTML 的 `<pre>` 內容算出指紋作為 key 查找：`text` 作為比對原文；`extracted`（提取狀態）與 `translation`（翻譯內容）若存在則同步還原至主面板 `extracted_text` / `ai_text` 欄位，使 Alt+4 局部重套用面板開啟時可直接顯示上次的狀態。**舊資料相容**：先以指紋為 key 直接查；查無時掃過 values，比對舊版的 `author_key` 欄位（前一版以檔名 basename 為 key、entry 內存 `author_key` 作備援指紋），或從 `entry['text']` 即時重算指紋。舊 cache 不需強制 migration 即可命中。
     *   `aa_settings_cache.json` 新增 key：`work_history_limit`（作者歷史上限，預設 10）、`fetch_history_limit`（URL 讀取紀錄上限，預設 50）、`original_cache_limit`（`aa_original_cache.json` 上限，預設 50；舊版只有 `fetch_history_limit` 共用，讀取時若新欄位缺失則沿用 `fetch_history_limit` 作為遷移值）、`glossary_auto_search`（批次搜尋術語按鈕是否自動搜尋，預設 True）、`editor_default_wysiwyg`（進入編輯器時是否自動切換成所見即所得模式，預設 False）、`embed_font_name`（儲存 HTML 時要內嵌的字型名稱，可選 `"monapo"` / `"Saitamaar"` / `"textar"`，預設 `"monapo"`）；皆由 ⚙ 設定視窗（詳見 §4.12）調整並持久化。
+    *   `aa_settings_cache.json` 自動翻譯相關 key（詳見 §4.13）：`gemini_gem_url`（翻譯用的 Gemini Gem 網址）、`gemini_profile_dir`（Playwright 持久化瀏覽器 profile 目錄，空＝用 `%TEMP%/aa_gemini_profile`）、`gemini_max_per_session`（同一對話 session 最多翻譯次數，預設 3）、`gemini_selectors`（DOM 選擇器覆寫 dict，Gemini 改版時手動修正用）、`auto_translate_out_dir`（自動翻譯輸出資料夾，記住上次選擇）。對應 `AppCache` 欄位；`MainWindow` 以 `_gemini_*` / `_auto_translate_out_dir` 屬性載入並於 `_gather_cache()` 回存，避免被一般 `save_cache()` 洗掉。
     *   `aa_crash.log` — 啟動期錯誤日誌（append 模式）。`aa_tool/crash_logger.py` 的 `install_crash_logger()` 於 `main()` 最前面呼叫一次，安裝三層攔截：(1) `faulthandler.enable(file=...)` 捕 C 層 segfault（PyQt6 widget 生命期問題等）並 dump 所有執行緒的 C 堆疊；(2) `sys.excepthook` 記錄未捕捉的 Python 例外；(3) `qInstallMessageHandler` 記錄 Qt 的 WARNING / CRITICAL / FATAL 訊息（DEBUG/INFO 過濾）。閃退時打開檔案即可看到最後一次 session 的 trace。此外 `log_info(msg)` 公開函式可寫入 INFO 層級診斷訊息（不受 Qt 過濾影響），供字型載入等啟動流程使用。
 *   **字體設計**:
     *   專案中有**兩個獨立的「選擇字型」功能**，命名上必須清楚區分以免混淆：
@@ -387,6 +389,24 @@
     *   **進入編輯器時預設開啟「所見即所得」模式**（對應 `editor_default_wysiwyg`，預設 False）：開啟後，每次 `MainWindow.show_edit_panel()` 切換到編輯面板時，若 `EditWindow._preview_active` 為 False 會自動呼叫 `_toggle_preview()` 進入 Alt+3 WYSIWYG 模式（替換翻譯、開啟 HTML、批次開檔等所有路徑都生效）。對應 `MainWindow._editor_default_wysiwyg`。
     *   **網址讀取成功時自動填入作品名稱框**（對應 `aa_settings_cache.json.fetch_auto_fill_title`，預設 False）：開啟後，直接讀取或上/下一話讀取成功、且 `extract_work_title(page_title)`（`aa_tool/text_extraction.py`）能萃取出非空標題時，自動將標題填入 `TranslatePanel.doc_title`。`extract_work_title` 依序：(1) 去除 dash 系尾綴（`[\s　]+[-—–][\s　]+.+$`），(2) 去除已知站名**前綴**，(3) 去除已知站名**後綴**；站名表為 `_SITE_NAMES` 列表（目前含：安価でやるお！、やる夫達のいる日常、やる夫まとめくす、やる夫短編集、やる夫スレ本棚、RPG系AA物語まとめるお），新增站名直接加入此列表即可。URL 本身無法可靠推斷日文站名，故不做 URL→站名的對應；填入時機在 `_apply_url_history_meta` 之前，因此若該 URL 已有手動戳印的 `work_title`，戳印值仍會在後續覆蓋。**自動填入的作品名稱不寫入 `url_history` 的 `work_title`**：自動填入模式下，`doc_title` 由程式自動帶入，不算「使用者手填」，故 `_stamp_current_url_history()` 在 `_fetch_auto_fill_title=True` 時不以 `doc_title` 戳印 `work_title`，改為保留該 URL 既有的 `work_title` 戳印值（找不到條目則為空）。唯有設定關閉、使用者親手填入標題時，存檔才會把標題戳入歷史。開啟此設定時：(1) 話數欄位（`doc_num`）**永久 disabled**（灰底不可輸入，`_apply_doc_num_state()` 在設定套用與 cache 載入時各呼叫一次），(2) `check_chapter_number()` **直接 return**（含 `source_text.textChanged` 觸發的那次），(3) 每次讀取 `_apply()` 中 `doc_num.clear()`，確保存檔時 `_prepare_translation()` 的 `name_base` 只含 `safe_title`，不附加 `_話數` 尾綴。關閉設定時：`doc_num` 重新 enable，話數自動偵測恢復正常。對應 `MainWindow._fetch_auto_fill_title` + `MainWindow._apply_doc_num_state()`。
 *   **套用流程**：按「確定」呼叫 `MainWindow._on_settings_applied(values)` → 寫回 instance 屬性（含 `_glossary_auto_search`）→ 立即修剪 in-memory `work_history` 以符合新上限（`url_history` 不修剪，無上限）→ 同步給已開啟的 `BatchSearchWindow` → `save_cache()` 持久化。「取消」不套用任何變更。清除 URL 紀錄為獨立動作（「清除紀錄」按鈕），不依附「確定」觸發。
+
+### 4.13 連續多話自動翻譯 (`aa_auto_translate.py` + `aa_tool/gemini_web.py`)
+把原本人工的「提取 → 貼網頁版 Gemini → 貼回 → 替換存檔 → 下一話」五步串成全自動流程，連續翻 N 話。翻譯這一步用 **Playwright 操控網頁版 Gemini 的 Gem**（沿用使用者已調校的翻譯 Gem，不接 API）；其餘步驟全部重用 `aa_tool/` 既有純函式。
+
+*   **`aa_tool/gemini_web.py` — `GeminiWebSession`**：管理一個持久化 Playwright 瀏覽器操控 Gemini Gem。
+    *   `open()`：啟動瀏覽器（`launch_persistent_context`，profile 存 `gemini_profile_dir`，登入狀態長期保留）、開啟 Gem、`_ensure_logged_in()` 輪詢等待輸入框；未登入時提示使用者在瀏覽器手動登入一次。
+    *   `translate(prompt_text)`：填入文字 → 送出 → `_wait_generation_done()`（等停止鈕消失＋回覆文字連續數次穩定）→ 回傳最新回覆。
+    *   **Session 輪替**：`translate()` 內部計數，每 session 最多 `max_per_session`（預設 3）次送出，達上限自動 `_open_new_chat()` 重開對話、計數歸零——避免單一對話上下文過長使翻譯品質下降。計數以「實際送出次數」計（含分段）。
+    *   **額度上限偵測**：回覆命中 `QUOTA_PHRASES` 即丟 `GeminiQuotaExceeded`（非翻譯失敗，呼叫端須暫停）。
+    *   **DOM 選擇器**集中於 `DEFAULT_SELECTORS`（input / send / stop / response，各為候選列表），可由 `gemini_selectors` 設定覆寫——Gemini 前端改版時的唯一維護點。
+    *   例外階層：`GeminiWebError`（通用）、`GeminiNotLoggedIn`、`GeminiQuotaExceeded`。
+*   **`aa_auto_translate.py` — 協調器**：
+    *   `load_config(base_dir)` → `AutoConfig`：從 `AA_Settings.json` / `aa_settings_cache.json` 載入提取／替換參數，與 `aa_main_qt.extract_text()` 行為一致（韓文模式改用 `DEFAULT_BASE_REGEX_KO`、術語表合併 `glossary`＋`glossary_temp`）。
+    *   `run_auto_translate(start_url, count, out_dir, ...)` → `AutoResult`：主迴圈每話 ＝ `_fetch_and_parse`（含 `%TEMP%/aa_url_cache` 快取，沿用主程式格式）→ `_extract`（`extract_text`＋`extract_single_kana`＋`format_extraction_output`）→ `_translate`（行數超過 `MAX_LINES_PER_REQUEST`＝80 時分段送出後合併）→ `validate_ai_text` 驗證（有警告重試一次）→ `apply_translation` → `write_html_file`（檔名 `_safe_filename()`）→ `_next_chapter_url`（取 `is_current` 的下一筆，邏輯同 `_fetch_adjacent_chapter`）。
+    *   **錯誤韌性**：抓取/解析失敗 → 無法得知下一話，中斷整批；翻譯/替換失敗 → 記錄並跳過、繼續下一話；`GeminiQuotaExceeded` → 暫停，保留已完成進度，`AutoResult.pending_url` 記未完成話的網址供接續。
+    *   CLI 入口：`python aa_auto_translate.py --url <網址> --count <話數> --out <資料夾> [--gem-url ...]`。
+*   **GUI 入口**（`aa_main_qt.py`）：`_build_action_bar()` 的「⚡ 自動翻譯」按鈕 → `open_auto_translate_dialog()`（QDialog 收集起始網址／話數／Gem 網址／輸出資料夾）→ `_start_auto_translate()` 在背景執行緒呼叫 `run_auto_translate`，進度經 `_invoke_on_main` 回報狀態列，結束時 `_auto_translate_done()` 彈 `QMessageBox` 總結。Gemini 設定持久化於 `_gemini_*` 屬性（見 §1）。
+*   **相依**：需 `pip install playwright` 並 `playwright install chromium`；`gemini_web` 對 playwright 採延遲匯入，未安裝時不影響其他功能。
 
 ## 5. UI 介面關聯變數
 UI widget 屬於 `TranslatePanel`（除特別註明外）：

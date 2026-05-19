@@ -264,6 +264,7 @@ def run_auto_translate(
     gem_url: str | None = None,
     profile_dir: str | None = None,
     headless: bool = False,
+    max_per_session: int | None = None,
     until_last: bool = False,
     stop_event=None,
     progress: Callable[[str], None] | None = None,
@@ -298,7 +299,9 @@ def run_auto_translate(
     url = start_url
     session = GeminiWebSession(
         gem_url, profile_dir,
-        max_per_session=cache.gemini_max_per_session,
+        max_per_session=(max_per_session
+                         if max_per_session is not None
+                         else cache.gemini_max_per_session),
         selectors=cache.gemini_selectors or None,
         headless=headless, log=log)
 
@@ -413,6 +416,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Gemini Gem 網址（預設讀設定 gemini_gem_url）")
     parser.add_argument("--profile-dir", default=None,
                         help="Playwright 瀏覽器 profile 目錄")
+    parser.add_argument("--max-per-session", type=int, default=None,
+                        help="同一對話最多送幾次後開新對話（覆寫設定）")
     parser.add_argument("--headless", action="store_true",
                         help="無頭模式（首次登入請勿用，需看得到視窗手動登入）")
     args = parser.parse_args(argv)
@@ -421,7 +426,8 @@ def main(argv: list[str] | None = None) -> int:
         result = run_auto_translate(
             args.url, args.count, args.out,
             gem_url=args.gem_url, profile_dir=args.profile_dir,
-            headless=args.headless, until_last=args.until_last)
+            headless=args.headless, until_last=args.until_last,
+            max_per_session=args.max_per_session)
     except (ValueError, GeminiWebError) as e:
         print(f"❌ {e}", file=sys.stderr)
         return 1

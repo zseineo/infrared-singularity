@@ -9,6 +9,7 @@
     *   `aa_wiki_name_dialog_qt.py` — PyQt6 Wiki 角色日中對照抓取 Dialog (`WikiNameDialog`)，非 modal 獨立對話框
     *   `aa_qt_font_test.py` — PyQt6 字型引擎驗證小工具（獨立測試用）
     *   `aa_auto_translate.py` — 連續多話自動翻譯協調器（CLI 入口，亦由主視窗 GUI 呼叫）。詳見 §4.13
+    *   `aa_auto_translate_qt.py` — 自動翻譯面板 `AutoTranslatePanel`（嵌入主視窗 QStackedWidget index 4）。詳見 §4.13
     *   `aa_tool/` — 純邏輯模組（無 UI 依賴）：`constants`、`font_measure`（Protocol）、`html_io`、`settings_manager`、`text_extraction`、`translation_engine`、`bubble_alignment`、`url_fetcher`、`wiki_name_fetcher`、`gemini_web`、`qt_helpers`、`dark_theme.qss`
 *   **技術棧**: Python 3, **PyQt6** (UI 框架), `re`, `math`, `os`, `html`, `urllib.request`, `threading`, `gzip`, `json`, `subprocess`；自動翻譯另需 **Playwright**（操控網頁版 Gemini，見 §4.13）
 *   **狀態存儲機制**:
@@ -42,11 +43,12 @@
 *   **Step 5**: 進入全螢幕或內嵌預覽視窗，在最終文本上進行微調（自動對話框、選區上色、對齊等），完成後點擊儲存匯出為 `.html`。
 
 ## 3. 主要模式 (Application Modes)
-主視窗以 `QStackedWidget` 管理四個面板，由 `MainWindow` 以 `show_translate_panel()` / `show_edit_panel()` / `show_batch_panel()` / `open_url_fetch_qt()` 切換：
+主視窗以 `QStackedWidget` 管理五個面板，由 `MainWindow` 以 `show_translate_panel()` / `show_edit_panel()` / `show_batch_panel()` / `open_url_fetch_qt()` / `show_auto_translate_panel()` 切換：
 *   **index 0 — `TranslatePanel`**（翻譯主面板，預設）
 *   **index 1 — `EditWindow`**（HTML 編輯，來自 `aa_edit_qt.py`，內嵌）
 *   **index 2 — `BatchSearchWindow`**（批次搜尋，來自 `aa_batch_search_qt.py`，內嵌）
 *   **index 3 — `UrlFetchWindow`**（網址讀取，來自 `aa_url_fetch_qt.py`，內嵌）
+*   **index 4 — `AutoTranslatePanel`**（自動翻譯，來自 `aa_auto_translate_qt.py`，內嵌）
 
 進入 sub-panel（edit/batch/url_fetch）時會顯示頂部 `nav_bar` 返回按鈕；所有面板均為 in-process，不開獨立視窗（詳見 4.5）。
 
@@ -410,7 +412,8 @@
     *   **審查偵測**（`_looks_censored`）：原文一定行數以上（≥ `_CENSOR_SOURCE_MIN_LINES`＝4），但回覆極短（≤ `_CENSOR_REPLY_MAX_LINES`＝4 行）且幾乎沒有 `ID|文` 結構 → 視為審查命中，丟 `CensoredResponse`。協調器把該話記入 `failed`、繼續下一話。
     *   **錯誤韌性**：抓取/解析失敗 → 無法得知下一話，中斷整批；翻譯/替換失敗（含 `GeminiStuck`、`CensoredResponse`、其他通用例外）→ 記錄並跳過、繼續下一話；`GeminiQuotaExceeded` → 暫停，保留已完成進度，`AutoResult.pending_url` 記未完成話的網址供接續；`StopRequested` → 中止，`AutoResult.stopped=True`。
     *   CLI 入口：`python aa_auto_translate.py --url <網址> --count <話數> --out <資料夾> [--gem-url ...] [--until-last]`。
-*   **GUI 入口**（`aa_main_qt.py`）：`TranslatePanel._build_toolbar()` 的「⚡ 自動翻譯」按鈕（Wiki 對照左側）→ `open_auto_translate_dialog()`（QDialog 收集起始網址／話數＋「翻譯到最後一話」勾選／Gem 網址／輸出資料夾，皆持久化於 cache 並下次自動帶入）→ `_start_auto_translate()` 建立 `threading.Event` 作為 stop_event、在背景執行緒呼叫 `run_auto_translate`，進度經 `_invoke_on_main` 回報狀態列與**頁面頂部常駐橫幅** `_build_auto_banner()`（含「■ 停止」鈕 → `_stop_auto_translate()` 設 stop_event）；結束時 `_auto_translate_done()` 隱藏橫幅並彈 `QMessageBox` 總結。Gemini 設定與 `auto_translate_count` / `auto_translate_until_last` 持久化於 `_gemini_*` / `_auto_translate_*` 屬性（見 §1）。
+*   **GUI 入口**（`aa_main_qt.py` + `aa_auto_translate_qt.py`）：`TranslatePanel._build_toolbar()` 的「自動翻譯」按鈕（**位於「編輯模式」右側，樣式比照「批次搜尋」**）→ `show_auto_translate_panel()` 切換到 stack index 4 的 `AutoTranslatePanel`。面板分上下兩部分：上半 QFormLayout 收集起始網址／話數＋「翻譯到最後一話」勾選／Gem 網址／**每 N 次送出後換新對話**（持久化於 `gemini_max_per_session`）／輸出資料夾，下半為唯讀 `QPlainTextEdit` 即時顯示執行 Log。按下「▶ 開始自動翻譯」呼叫 `_main.start_auto_translate_from_panel(params)` → 持久化參數 → `_start_auto_translate()` 建立 `threading.Event` 作為 stop_event、在背景執行緒呼叫 `run_auto_translate(..., max_per_session=...)`，進度經 `_invoke_on_main` 同時送到（1）頁面頂部常駐橫幅 `_build_auto_banner()`（含「■ 停止」鈕 → `_stop_auto_translate()` 設 stop_event；用於跨面板可見）與（2）面板的 Log QPlainTextEdit。結束時 `_auto_translate_done()` 隱藏橫幅、`panel.set_running(False)`、把總結附加進面板 Log，並彈 `QMessageBox` 總結。Gemini 設定與 `auto_translate_count` / `auto_translate_until_last` 持久化於 `_gemini_*` / `_auto_translate_*` 屬性（見 §1）。
+*   **模型確認**（Gemini 2025 改版後預設模型選項消失）：`GeminiWebSession._log_current_model()` 在 `open()` 完成登入後、以及每次 session 輪替（達上限或卡住重試）後各 log 一次。它走 `selectors['model_indicator']` 的候選列表讀目前模型字串（如 `"2.5 Pro"`），命中後檢查是否含 `pro`，並在 Log 顯示；讀不到時顯示警告請使用者於瀏覽器確認。選擇器集中可由 `gemini_selectors` 覆寫。
 *   **相依**：需 `pip install playwright` 並 `playwright install chromium`；`gemini_web` 對 playwright 採延遲匯入，未安裝時不影響其他功能。
 
 ## 5. UI 介面關聯變數

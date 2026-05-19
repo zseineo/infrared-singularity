@@ -61,8 +61,9 @@ from aa_tool.translation_engine import (
 from aa_tool.url_fetcher import fetch_url as _fetch_url, parse_page_html as _parse_page_html
 from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
+from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.25"
+APP_VERSION = "1.26"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -254,12 +255,13 @@ class TranslatePanel(QWidget):
         btn_resume_edit.clicked.connect(self._main.resume_edit_panel)
         row.addWidget(btn_resume_edit)
 
-        row.addStretch()
-
-        btn_auto = _make_btn("⚡ 自動翻譯", "#d63384", "#b02a6f", font=_ui_font(12))
+        btn_auto = _make_btn("自動翻譯", "#d63384", "#b02a6f",
+                             font=_ui_font(11), width=90)
         btn_auto.setToolTip("連續多話全自動翻譯（操控網頁版 Gemini）")
-        btn_auto.clicked.connect(self._main.open_auto_translate_dialog)
+        btn_auto.clicked.connect(self._main.show_auto_translate_panel)
         row.addWidget(btn_auto)
+
+        row.addStretch()
 
         btn_wiki = _make_btn("📖 Wiki 對照", "#6f42c1", "#5a32a3", font=_ui_font(12))
         btn_wiki.setToolTip("從 Wiki 角色列表頁抓取中日文對照")
@@ -767,6 +769,11 @@ class MainWindow(QMainWindow):
         # 網址讀取面板（lazy init）
         self._url_fetch_placeholder = QWidget()
         self.stack.addWidget(self._url_fetch_placeholder)  # index 3
+
+        # 自動翻譯面板（lazy init）
+        self._auto_window: AutoTranslatePanel | None = None
+        self._auto_placeholder = QWidget()
+        self.stack.addWidget(self._auto_placeholder)  # index 4
 
         # ── 底部動作列 ──
         self._action_bar = self._build_action_bar()
@@ -1520,112 +1527,69 @@ class MainWindow(QMainWindow):
     #  自動翻譯（連續多話，操控網頁版 Gemini）
     # ════════════════════════════════════════════════════════════
 
-    def open_auto_translate_dialog(self) -> None:
-        """開啟「自動翻譯（連續多話）」設定對話框。"""
+    def show_auto_translate_panel(self) -> None:
+        """切換到自動翻譯面板（index 4）。"""
+        if self._auto_window is None:
+            self._auto_window = AutoTranslatePanel(self)
+            self.stack.removeWidget(self._auto_placeholder)
+            self.stack.insertWidget(4, self._auto_window)
+        else:
+            # 切回面板時若不在執行中，重新從目前狀態同步欄位（current_url 等可能變了）
+            if not self._auto_translate_running:
+                self._auto_window.refresh_from_main()
+        self._auto_window.set_running(self._auto_translate_running)
+        self._nav_label.setText("自動翻譯")
+        self._update_work_title("自動翻譯")
+        self.stack.setCurrentIndex(4)
+        self._nav_bar.show()
+        self._action_bar.hide()
+
+    def start_auto_translate_from_panel(self, params: dict) -> None:
+        """從 AutoTranslatePanel 的「開始」按鈕進來。"""
         if self._auto_translate_running:
             self.show_status("⚠️ 自動翻譯正在執行中…", "#f39c12")
             return
-        from PyQt6.QtWidgets import (
-            QDialog, QDialogButtonBox, QFormLayout, QSpinBox)
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("⚡ 自動翻譯（連續多話）")
-        form = QFormLayout(dlg)
-
-        url_edit = QLineEdit(self.current_url)
-        url_edit.setMinimumWidth(440)
-        form.addRow("起始網址：", url_edit)
-
-        count_row = QWidget()
-        count_hl = QHBoxLayout(count_row)
-        count_hl.setContentsMargins(0, 0, 0, 0)
-        count_spin = QSpinBox()
-        count_spin.setRange(1, 999)
-        count_spin.setValue(self._auto_translate_count or 5)
-        count_spin.setSuffix(" 話")
-        until_last = QCheckBox("翻譯到最後一話")
-        until_last.setChecked(self._auto_translate_until_last)
-        until_last.toggled.connect(lambda chk: count_spin.setEnabled(not chk))
-        count_spin.setEnabled(not until_last.isChecked())
-        count_hl.addWidget(count_spin)
-        count_hl.addSpacing(8)
-        count_hl.addWidget(until_last)
-        count_hl.addStretch()
-        form.addRow("連續話數：", count_row)
-
-        gem_edit = QLineEdit(self._gemini_gem_url)
-        gem_edit.setPlaceholderText("https://gemini.google.com/gem/...")
-        form.addRow("Gemini Gem 網址：", gem_edit)
-
-        out_row = QWidget()
-        out_hl = QHBoxLayout(out_row)
-        out_hl.setContentsMargins(0, 0, 0, 0)
-        out_edit = QLineEdit(self._auto_translate_out_dir or self._last_dir)
-        btn_browse = QPushButton("瀏覽…")
-        out_hl.addWidget(out_edit, 1)
-        out_hl.addWidget(btn_browse)
-        form.addRow("輸出資料夾：", out_row)
-
-        def _browse() -> None:
-            d = QFileDialog.getExistingDirectory(
-                dlg, "選擇輸出資料夾", out_edit.text() or os.getcwd())
-            if d:
-                out_edit.setText(d)
-        btn_browse.clicked.connect(_browse)
-
-        bb = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok
-            | QDialogButtonBox.StandardButton.Cancel)
-        bb.accepted.connect(dlg.accept)
-        bb.rejected.connect(dlg.reject)
-        form.addRow(bb)
-
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        start_url = url_edit.text().strip()
-        gem_url = gem_edit.text().strip()
-        out_dir = out_edit.text().strip()
-        count = count_spin.value()
-        run_until_last = until_last.isChecked()
-        if not start_url:
-            self.show_status("⚠️ 請填入起始網址", "#f39c12")
-            return
-        if not gem_url:
-            self.show_status("⚠️ 請填入 Gemini Gem 網址", "#f39c12")
-            return
-        if not out_dir:
-            self.show_status("⚠️ 請選擇輸出資料夾", "#f39c12")
-            return
-
-        self._gemini_gem_url = gem_url
-        self._auto_translate_out_dir = out_dir
-        self._auto_translate_count = count
-        self._auto_translate_until_last = run_until_last
+        # 持久化到 cache（下次打開面板自動帶入）
+        self._gemini_gem_url = params["gem_url"]
+        self._auto_translate_out_dir = params["out_dir"]
+        self._auto_translate_count = params["count"]
+        self._auto_translate_until_last = params["until_last"]
+        self._gemini_max_per_session = params["max_per_session"]
         self.save_cache()
-        self._start_auto_translate(start_url, count, out_dir, gem_url,
-                                    run_until_last)
+        self._start_auto_translate(
+            params["start_url"], params["count"], params["out_dir"],
+            params["gem_url"], params["until_last"],
+            params["max_per_session"])
 
     def _start_auto_translate(self, start_url: str, count: int,
                                out_dir: str, gem_url: str,
-                               until_last: bool) -> None:
-        """在背景執行緒跑自動翻譯，進度回報至橫幅與狀態列。"""
+                               until_last: bool,
+                               max_per_session: int) -> None:
+        """在背景執行緒跑自動翻譯，進度同步至橫幅、狀態列與面板 Log。"""
         self._auto_translate_running = True
         self._auto_stop_event = threading.Event()
         self._auto_banner_stop_btn.setEnabled(True)
         self._auto_banner_stop_btn.setText("■ 停止")
         self._auto_banner_label.setText("⚡ 自動翻譯啟動中（請在彈出的瀏覽器完成登入）…")
         self._auto_banner.show()
+        if self._auto_window is not None:
+            self._auto_window.set_running(True)
+            self._auto_window.append_log(
+                f"=== 啟動自動翻譯：count={count} until_last={until_last} "
+                f"max_per_session={max_per_session} ===")
         self.show_status("⏳ 自動翻譯啟動中…", "#17a2b8")
 
         def _progress(msg: str) -> None:
             def _apply(m=msg) -> None:
-                # 進度同時更新橫幅（單行截斷）與狀態列 toast
+                # 橫幅：單行短訊
                 short = m.strip().replace("\n", " ")
                 if len(short) > 120:
                     short = short[:117] + "…"
                 if self._auto_banner_label is not None:
                     self._auto_banner_label.setText(f"⚡ {short}")
+                # 面板 Log：原文整段
+                if self._auto_window is not None:
+                    self._auto_window.append_log(m)
             self._invoke_on_main.emit(_apply)
 
         stop_event = self._auto_stop_event
@@ -1638,6 +1602,7 @@ class MainWindow(QMainWindow):
                     base_dir=os.path.dirname(os.path.abspath(__file__)),
                     gem_url=gem_url,
                     profile_dir=self._gemini_profile_dir or None,
+                    max_per_session=max_per_session,
                     until_last=until_last,
                     stop_event=stop_event,
                     progress=_progress)
@@ -1664,7 +1629,11 @@ class MainWindow(QMainWindow):
         self._auto_translate_running = False
         self._auto_stop_event = None
         self._auto_banner.hide()
+        if self._auto_window is not None:
+            self._auto_window.set_running(False)
         if error is not None:
+            if self._auto_window is not None:
+                self._auto_window.append_log(f"❌ 自動翻譯失敗：{error}")
             self.show_status(f"❌ 自動翻譯失敗：{error}", "#dc3545")
             QMessageBox.critical(self, "自動翻譯失敗", error)
             return
@@ -1700,7 +1669,11 @@ class MainWindow(QMainWindow):
             color = "#f39c12"
             head = "⚠️ 自動翻譯結束（含失敗或暫停）"
         self.show_status(f"{head}：成功 {len(result.done)} 話", color)
-        QMessageBox.information(self, "自動翻譯完成", "\n".join(lines))
+        summary = "\n".join(lines)
+        if self._auto_window is not None:
+            self._auto_window.append_log("──────── 總結 ────────")
+            self._auto_window.append_log(summary)
+        QMessageBox.information(self, "自動翻譯完成", summary)
 
     # ════════════════════════════════════════════════════════════
     #  Wiki 角色日中對照抓取（非 modal QDialog）

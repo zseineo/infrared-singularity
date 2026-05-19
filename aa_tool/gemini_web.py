@@ -64,6 +64,17 @@ DEFAULT_SELECTORS: dict[str, list[str]] = {
         ".model-response-text",
         "model-response",
     ],
+    # 目前模型指示器（用來在 Log 顯示「正在使用哪個模型」供使用者確認，例如 2.5 Pro）。
+    # Gemini 2025 改版後預設模型選項消失，需要這條線索讓使用者確認確實是 Pro。
+    "model_indicator": [
+        "bard-mode-switcher button",
+        "bard-mode-switcher",
+        "button[data-test-id*='model']",
+        "button[aria-label*='model']",
+        "button[aria-label*='模型']",
+        "[class*='model-switcher'] button",
+        "[class*='mode-switcher']",
+    ],
 }
 
 # 額度上限訊息關鍵字（命中即視為撞額度，全小寫比對）。
@@ -163,6 +174,7 @@ class GeminiWebSession:
         self._page = pages[0] if pages else self._context.new_page()
         self._open_new_chat()
         self._ensure_logged_in(login_timeout)
+        self._log_current_model()
 
     def close(self) -> None:
         """關閉瀏覽器與 Playwright。"""
@@ -202,6 +214,7 @@ class GeminiWebSession:
             self._log(f"已達 session 上限（{self.max_per_session} 次），開啟新對話")
             self._open_new_chat()
             self._ensure_logged_in(60)
+            self._log_current_model()
 
         reply = self._send_and_collect(prompt_text)
         if not reply.strip():
@@ -209,6 +222,7 @@ class GeminiWebSession:
                 f"⏳ Gemini 卡住超過 {_GEN_TIMEOUT}s 無回應，開新對話重試一次…")
             self._open_new_chat()
             self._ensure_logged_in(60)
+            self._log_current_model()
             reply = self._send_and_collect(prompt_text)
             if not reply.strip():
                 raise GeminiStuck(
@@ -232,10 +246,41 @@ class GeminiWebSession:
     # ── 內部：對話管理 ──
 
     def _open_new_chat(self) -> None:
-        """重新導向 Gem URL 開啟全新對話，重置送出計數。"""
+        """重新導向 Gem URL 開啟全新對話，重置送出計數（不讀模型，呼叫端自行決定何時 log）。"""
         self._page.goto(self.gem_url, wait_until="domcontentloaded")
         self._send_count = 0
         self._session_index += 1
+
+    def _log_current_model(self) -> None:
+        """讀取並 log 目前使用的模型；Gemini 改版後預設模型選項消失，這項顯示供使用者確認。"""
+        try:
+            self._page.wait_for_timeout(400)
+        except Exception:
+            pass
+        model = self._read_current_model()
+        if model:
+            note = "" if "pro" in model.lower() else "  ⚠️ 未偵測到 Pro 字樣，請確認"
+            self._log(f"目前使用模型：{model}{note}")
+        else:
+            self._log("⚠️ 無法讀取模型名稱（Gemini 可能改版），請在瀏覽器確認是否為 Pro")
+
+    def _read_current_model(self) -> str:
+        """讀取頁面上顯示的目前模型名稱（例如 '2.5 Pro'）。讀不到回空字串。"""
+        for sel in self.selectors.get("model_indicator", []):
+            try:
+                loc = self._page.locator(sel)
+                if loc.count() == 0:
+                    continue
+                text = (loc.first.inner_text() or "").strip()
+            except Exception:
+                continue
+            # 模型字串通常很短（如 "2.5 Pro"、"Gemini 2.5 Pro"），過長視為命中錯元素。
+            if 1 <= len(text) <= 60 and any(
+                kw in text.lower() for kw in
+                ("pro", "flash", "ultra", "gemini", "2.5", "3.0", "3.1")
+            ):
+                return text
+        return ""
 
     def _ensure_logged_in(self, timeout: int) -> None:
         """輪詢等待輸入框出現；逾時且仍在登入頁則丟 GeminiNotLoggedIn。"""

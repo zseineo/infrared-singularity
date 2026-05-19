@@ -162,6 +162,8 @@ class AppCache:
     gemini_max_per_session: int = 3
     gemini_selectors: dict = field(default_factory=dict)
     auto_translate_out_dir: str = ""
+    auto_translate_count: int = 5
+    auto_translate_until_last: bool = False
 
 
 class SettingsManager:
@@ -356,6 +358,13 @@ class SettingsManager:
             cache.auto_translate_out_dir = str(data.get(
                 'auto_translate_out_dir', cache.auto_translate_out_dir))
             try:
+                cache.auto_translate_count = max(1, int(data.get(
+                    'auto_translate_count', cache.auto_translate_count)))
+            except (TypeError, ValueError):
+                pass
+            cache.auto_translate_until_last = bool(data.get(
+                'auto_translate_until_last', cache.auto_translate_until_last))
+            try:
                 v = int(data.get('pad_space_count', cache.pad_space_count))
                 if v in (1, 2, 3):
                     cache.pad_space_count = v
@@ -439,6 +448,8 @@ class SettingsManager:
                 'gemini_max_per_session': cache.gemini_max_per_session,
                 'gemini_selectors': cache.gemini_selectors,
                 'auto_translate_out_dir': cache.auto_translate_out_dir,
+                'auto_translate_count': cache.auto_translate_count,
+                'auto_translate_until_last': cache.auto_translate_until_last,
             }
             self._atomic_write_json(cache_file, data)
 

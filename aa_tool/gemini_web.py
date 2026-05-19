@@ -31,6 +31,10 @@ class GeminiQuotaExceeded(GeminiWebError):
     """
 
 
+class GeminiStuck(GeminiWebError):
+    """Gemini 卡住超過 10 分鐘仍無回應；通常重開對話可解。"""
+
+
 # ── DOM 選擇器（集中管理，Gemini 改版時改這裡）──
 # 每一項為「候選 selector 列表」，依序嘗試，取第一個命中的元素。
 DEFAULT_SELECTORS: dict[str, list[str]] = {
@@ -185,7 +189,9 @@ class GeminiWebSession:
         """送出一段文字給 Gem，回傳生成完成後的最新回覆純文字。
 
         達到 ``max_per_session`` 時自動開啟新對話再送出（計數歸零）。
-        偵測到額度上限時丟出 :class:`GeminiQuotaExceeded`。
+        偵測到額度上限時丟 :class:`GeminiQuotaExceeded`。
+        若 10 分鐘無回應，自動重開一個新對話再送一次；仍無回應丟
+        :class:`GeminiStuck`。
         """
         if self._page is None:
             raise GeminiWebError("session 尚未 open()")
@@ -197,23 +203,31 @@ class GeminiWebSession:
             self._open_new_chat()
             self._ensure_logged_in(60)
 
+        reply = self._send_and_collect(prompt_text)
+        if not reply.strip():
+            self._log(
+                f"⏳ Gemini 卡住超過 {_GEN_TIMEOUT}s 無回應，開新對話重試一次…")
+            self._open_new_chat()
+            self._ensure_logged_in(60)
+            reply = self._send_and_collect(prompt_text)
+            if not reply.strip():
+                raise GeminiStuck(
+                    f"Gemini 卡住超過 {_GEN_TIMEOUT}s 且重開新對話後仍無回應")
+        self._check_quota(reply)
+        return reply
+
+    def _send_and_collect(self, prompt_text: str) -> str:
+        """填入 → 送出 → 等待生成完成 → 取最新回覆。內部計數已遞增。"""
         self._send_count += 1
         self._log(f"session #{self._session_index} 第 "
                   f"{self._send_count}/{self.max_per_session} 次送出")
-
         editor = self._require("input")
         editor.click()
         editor.fill(prompt_text)
-
         prev_count = self._response_count()
         self._click_send()
         self._wait_generation_done(prev_count)
-
-        reply = self._latest_response_text()
-        self._check_quota(reply)
-        if not reply.strip():
-            raise GeminiWebError("Gemini 回覆為空（可能生成被中斷或選擇器失效）")
-        return reply
+        return self._latest_response_text()
 
     # ── 內部：對話管理 ──
 

@@ -87,7 +87,7 @@
        - `_KATAKANA_RUN_RE` ≥**3** 連續片假名 (`[゠-ーヿ]{3,}`) — 片假名常被 AA 圖借作視覺元素（`トミ`／`ニヽ`／`トー` 等 2-char 假陽性多）；真實日文片假名詞幾乎都 ≥3 char（`コスト`／`ヒーロー`／`コンピューター`／`チョロ`／`カット`）。**排除 ヽ(U+30FD) ヾ(U+30FE) 疊字標記**（保留 ー U+30FC 長音）：避免「ヾミミ」這類 AA 裝飾觸發 anchor。短於 3 char 的合法片假名片段交由 `_SHORT_UTT_RE` 涵蓋（含日文句末標點）。
        - `_KANJI_PARTICLE_RE` 漢字 + 助詞 (`[一-鿿々][のはをにがでとへやかもだねよわ]`) — 漢字部分允許 `々`（疊字標記）；助詞集除格助詞外，加入句末助詞 `ね/よ/わ`，捕捉「歳ね」「だね」「ですよ」這類句末。
        - `_OKURIGANA_RE` 送り仮名：漢字+1 平假名+漢字 (`[一-鿿々][ぁ-ゟ][一-鿿々]`)，涵蓋「頑張れ御貴族様」這類「動詞活用形 + 後接漢字」的 kanji-heavy 構造（無連續假名、無格助詞時的最後防線）。
-       - `_SHORT_UTT_RE` 短句：≥1 假名 + 日文句末標點 (`[ぁ-゜ゟ゠-ーヿ]+[！？。、…]`)，捕捉如「え！？」「あ。」「いや、」這類短語。**整體匹配 `_SHORT_UTT_RE` 或 `_HIRAGANA_RUN_RE`** 的候選允許長度 2（特例放寬，捕捉「ま！」「さぁ」這類 2-char 完整句／純假名感嘆），其他類型維持 ≥3。短的純假名 run 在 AA 圖中極少出現；若混入 AA 噪聲會被局部 AA 密度懲罰擋下。
+       - `_SHORT_UTT_RE` 短句：≥1 假名（含 ≥1 平假名）+ 日文句末標點，假名與全形 `！？` 之間允許夾 `…`（捕捉「え……？」）。捕捉如「え！？」「あ。」「いや、」「え……？」這類短語。`_KATA_UTT_RE` 純片假名短句（≥2 片假名 + `！？`，如「クソ！」）另列為錨點；其最短型「恰 2 片假名 + 標點」(`_SHORT_KATA_UTT_RE`) 須位於括號區間 (`_in_bracket_region`) 內才保留，避免放掉 AA 純片假名碎片。**整體匹配 `_SHORT_UTT_RE` 或 `_HIRAGANA_RUN_RE`** 的候選允許長度 2（特例放寬，捕捉「ま！」「さぁ」這類 2-char 完整句／純假名感嘆），其他類型維持 ≥3。短的純假名 run 在 AA 圖中極少出現；若混入 AA 噪聲會被局部 AA 密度懲罰擋下。
        - `_NUMBER_OPTION_RE` 數字選項：全/半形數字＋圈號數字 `①-⑳`（可帶範圍 `～`）+ `：`/`．` 分隔，捕捉「１０：ご主人様」「１～３：ママぁ」這類安価/投票格式。命中時分數 `+3` 並列入 `strong_jp` 信號（使用者觀察：選項後通常不接 AA 圖）。`_NUMBER_RANGE_RE` 數字範圍前綴（候選以「數字～數字」開頭、無分隔符，如「⑦～⑨出来る」）同等視為數字選項信號。
     3. **邊界擴展** (`_expand_boundary`)：從錨點向兩側貪心擴張。`_VALID_CHAR_RE` 含日文假名/漢字、全/半形英數字、圈號數字 `①-⑳`、`＋`/`+`、`★☆` 及常見日文標點。遇 `_VALID_CHAR_RE` 不命中字元、半形片假名 (`ｦ-ﾟ`)、AA 慣用標點 (`_AA_PUNCT_CHARS = {〔〕㌻㍉〟〝丶ヽヾ}`，**不含 `々〆`** — 兩者為合法日文用法，例「後々響く」「〆切」) 或空白即停。`_merge_overlapping` 合併相鄰/重疊區間。
     4. **分數過濾** (`_score_candidate`)：
@@ -98,15 +98,17 @@
        - `+2` 命中 `_OKURIGANA_RE`（漢字+平假名+漢字 模式 = 動詞活用 + 後接漢字的強日文信號）
        - `+3` 命中 `_NUMBER_OPTION_RE`（數字選項格式 = 安価/投票對話強信號；同時列入 `strong_jp` 信號）
        - `+2` 含 `！？` (口語/對話強信號) 或 `+1` 含 `。、…`
+       - `+2` 候選位於對話框邊框 (`_is_dialogue_box_bounded`，左/右框字元含 `＜<│|｜┃`／`＞>│|｜┃`) 內，列入 `strong_jp`
+       - `+2` 候選前方為「【說話者】───」名牌前綴 (`_NAME_TAG_PREFIX_RE`)，列入 `strong_jp` — 名牌後的對話不因破折號 `───` 被計入局部 AA 密度而誤殺
        - `-4` 局部 AA 密度 > 0.6 **且非「強日文信號」**；若有強信號（≥2 助詞、或長度≥8 的假名 run、或含 `！？。`）只扣 `-1`
        - `-5` 候選「自身」AA 噪聲密度 > 0.4（`aa_noise_ratio`，候選文字本身的 symbol_regex 命中／半形片假名／AA 標點佔比）。此懲罰**不受 `strong_jp` 豁免** — `strong_jp` 豁免的是「鄰近」AA 噪聲，候選自身內部噪聲是更直接的 AA 碎片證據（例「丈ｒうっ.o.,.」）
        - `-2` 長度 ≥ 5 且字元類別跳轉率 > 0.5（hira/kata/kanji/latin/digit/punct 之間）**且無強日文信號**——避免「き、貴様ぁ！」這類含 `！？` 的短句因類別頻繁跳轉被誤殺
        - `-3` 命中 `_REPEAT_KATAKANA_RE = ([゠-ヺー-ヿ])\1{2,}`（連續 ≥3 個相同片假名 — AA 圖邊框/裝飾特徵，如「ニニニ」「ンンン」；少數擬聲詞如「ガガガ！」由 `！？` `+2` bonus 補償通過門檻）。**排除 `・`(U+30FB 中黑點)**：「そんな・・・」這類三連中黑點是日文省略號變體，屬合法標點而非 AA 裝飾。
        - `-3` 命中 `_REPEAT_SMALL_HIRA_RE = ([ぁぃぅぇぉっゃゅょゎゕゖ])\1{2,}`（連續 ≥3 個相同小字假名 — 「ぃぃぃ」這類 AA 裝飾；普通字假名如「ねええ」的 え 不在此規則內）。
        - 通過門檻：`score >= 2`
-    5. **短候選孤立過濾** (`_is_strong_short_candidate`)：對 ≤ 3 char 的候選，若無「強短信號」（含 `！？` ／命中 `_OKURIGANA_RE` ／ ≥2 個助詞 ／命中 `_NUMBER_OPTION_RE`），必須同行另有 ≥ 5 char 的伴隨候選才保留。AA 圖中常見孤立短碎片如「へ、」「して」「んん」「ーへ、」等，周圍多是空白而非 AA 噪聲，靠局部 AA 密度檢查無法區分；改以「同行是否有實質日文對話」作為信賴指標。例：「さぁ 燃料をくべましょう」中的「さぁ」(len 2) 因有 9-char 伴隨而保留；「／／／ ｨへ、ヾ」中的「へ、」因孤立而剔除。「え！？」「ま！」這類有 `！？` 強信號的短句即使孤立也保留。
+    5. **短候選孤立過濾** (`_is_strong_short_candidate`)：對 ≤ 3 char 的候選，若無「強短信號」（含 `！？` ／命中 `_OKURIGANA_RE` ／ ≥2 種不同助詞 ／命中 `_NUMBER_OPTION_RE` ／整段為 ≥3 真平假名 run 如「まだだ」），且非行尾對話 (`_is_right_edge_dialogue`)、非對話框內 (`_is_dialogue_box_bounded`)，必須同行另有 ≥ 5 char 的伴隨候選才保留。AA 圖中常見孤立短碎片如「へ、」「して」「んん」「ーへ、」等，周圍多是空白而非 AA 噪聲，靠局部 AA 密度檢查無法區分；改以「同行是否有實質日文對話」作為信賴指標。例：「さぁ 燃料をくべましょう」中的「さぁ」(len 2) 因有 9-char 伴隨而保留；「／／／ ｨへ、ヾ」中的「へ、」因孤立而剔除。「え！？」「ま！」這類有 `！？` 強信號的短句即使孤立也保留。
     6. 通過後再走原有的 `_postprocess_text` / `author_name` / `_complete_brackets` / 自訂 filter 流程。
-    韓文模式 (`korean_mode=True`) 強制忽略此 flag — 韓文無假名錨點概念。`extract_single_kana()` 獨立邏輯不受此 flag 影響。`analyze_extraction(..., experimental=True)` 同步輸出錨點 / 候選 / 分數 / 後處理報告。設計目標：解決「AA 圖中夾雜少量合法字元被誤提取」（例：`,ｘf〔 ア亥ｱｱ,､rf7父く三}h` 的 `rf7父く三`、`i7从V`、`ムV心`），同時保留 `え！？` 短句、`（俺の快適な食生活の為に` 漢字密集句、「シ　ロ　ウ　殿　は…」拉長念法等難例。對應 function: `_find_spaced_out`、`_find_anchors`、`_expand_boundary`、`_merge_overlapping`、`_local_aa_density`、`_class_transitions`、`_score_candidate`、`_extract_experimental_line`。**測試案例**：[testcase/base.txt](testcase/base.txt)（合法對話）、[testcase/failcase.txt](testcase/failcase.txt)（短句／漢字密集／拉長念法／久 boundary 字元 `々`）。
+    韓文模式 (`korean_mode=True`) 強制忽略此 flag — 韓文無假名錨點概念。`extract_single_kana()` 獨立邏輯不受此 flag 影響。`analyze_extraction(..., experimental=True)` 同步輸出錨點 / 候選 / 分數 / 後處理報告。設計目標：解決「AA 圖中夾雜少量合法字元被誤提取」（例：`,ｘf〔 ア亥ｱｱ,､rf7父く三}h` 的 `rf7父く三`、`i7从V`、`ムV心`），同時保留 `え！？` 短句、`（俺の快適な食生活の為に` 漢字密集句、「シ　ロ　ウ　殿　は…」拉長念法等難例。對應 function: `_find_spaced_out`、`_find_anchors`、`_expand_boundary`、`_merge_overlapping`、`_local_aa_density`、`aa_noise_ratio`、`_class_transitions`、`_score_candidate`、`_is_strong_short_candidate`、`_is_dialogue_box_bounded`、`_is_right_edge_dialogue`、`_in_bracket_region`、`_extract_experimental_line`。**測試案例**：[testcase/base.txt](testcase/base.txt)（合法對話）、[testcase/failcase.txt](testcase/failcase.txt)（短句／漢字密集／拉長念法／久 boundary 字元 `々`）。
 *   **單字特別提取（`extract_single_kana()`，獨立邏輯）**: 對應 `aa_tool/text_extraction.py: extract_single_kana(source, filter_str)`。完全獨立於主提取邏輯（不套用 `base_regex` / `invalid_regex` / `symbol_regex` / 後處理 / 括號補完），**只受自訂過濾規則影響**。掃描原文中連續三字元符合下列條件的 Token 並提取中間字元：
     *   第一字元：空白（` ` / `　`）、點（`.` / `．`）、破折號（`-` / `－` / `‐` / `—` / `―`）、長音符號（`ー` / `ｰ`）、省略號（`…`），半形/全形皆可
     *   第二字元：ア/あ、ハ/は、ン/ん、オ/お、で（共五種字元）
@@ -399,14 +401,16 @@
     *   `translate(prompt_text)`：填入文字 → 送出 → `_wait_generation_done()`（等停止鈕消失＋回覆文字連續數次穩定）→ 回傳最新回覆。
     *   **Session 輪替**：`translate()` 內部計數，每 session 最多 `max_per_session`（預設 3）次送出，達上限自動 `_open_new_chat()` 重開對話、計數歸零——避免單一對話上下文過長使翻譯品質下降。計數以「實際送出次數」計（含分段）。
     *   **額度上限偵測**：回覆命中 `QUOTA_PHRASES` 即丟 `GeminiQuotaExceeded`（非翻譯失敗，呼叫端須暫停）。
+    *   **卡住偵測**：`translate()` 拆成 `_send_and_collect()`；若送出後等待生成完成（`_GEN_TIMEOUT`＝10 分鐘）後回覆仍為空，自動 `_open_new_chat()` 重開新對話並再送一次；仍無回應丟 `GeminiStuck`。協調器將其當作該話失敗處理（跳過）。
     *   **DOM 選擇器**集中於 `DEFAULT_SELECTORS`（input / send / stop / response，各為候選列表），可由 `gemini_selectors` 設定覆寫——Gemini 前端改版時的唯一維護點。
-    *   例外階層：`GeminiWebError`（通用）、`GeminiNotLoggedIn`、`GeminiQuotaExceeded`。
+    *   例外階層：`GeminiWebError`（通用）、`GeminiNotLoggedIn`、`GeminiQuotaExceeded`、`GeminiStuck`。
 *   **`aa_auto_translate.py` — 協調器**：
     *   `load_config(base_dir)` → `AutoConfig`：從 `AA_Settings.json` / `aa_settings_cache.json` 載入提取／替換參數，與 `aa_main_qt.extract_text()` 行為一致（韓文模式改用 `DEFAULT_BASE_REGEX_KO`、術語表合併 `glossary`＋`glossary_temp`）。
-    *   `run_auto_translate(start_url, count, out_dir, ...)` → `AutoResult`：主迴圈每話 ＝ `_fetch_and_parse`（含 `%TEMP%/aa_url_cache` 快取，沿用主程式格式）→ `_extract`（`extract_text`＋`extract_single_kana`＋`format_extraction_output`）→ `_translate`（行數超過 `MAX_LINES_PER_REQUEST`＝80 時分段送出後合併）→ `validate_ai_text` 驗證（有警告重試一次）→ `apply_translation` → `write_html_file`（檔名 `_safe_filename()`）→ `_next_chapter_url`（取 `is_current` 的下一筆，邏輯同 `_fetch_adjacent_chapter`）。
-    *   **錯誤韌性**：抓取/解析失敗 → 無法得知下一話，中斷整批；翻譯/替換失敗 → 記錄並跳過、繼續下一話；`GeminiQuotaExceeded` → 暫停，保留已完成進度，`AutoResult.pending_url` 記未完成話的網址供接續。
-    *   CLI 入口：`python aa_auto_translate.py --url <網址> --count <話數> --out <資料夾> [--gem-url ...]`。
-*   **GUI 入口**（`aa_main_qt.py`）：`_build_action_bar()` 的「⚡ 自動翻譯」按鈕 → `open_auto_translate_dialog()`（QDialog 收集起始網址／話數／Gem 網址／輸出資料夾）→ `_start_auto_translate()` 在背景執行緒呼叫 `run_auto_translate`，進度經 `_invoke_on_main` 回報狀態列，結束時 `_auto_translate_done()` 彈 `QMessageBox` 總結。Gemini 設定持久化於 `_gemini_*` 屬性（見 §1）。
+    *   `run_auto_translate(start_url, count, out_dir, *, until_last=False, stop_event=None, ...)` → `AutoResult`：主迴圈每話 ＝ `_fetch_and_parse`（含 `%TEMP%/aa_url_cache` 快取；**source 前置 `display_title + "\n\n"` 與手動流程的 setPlainText 對齊**，確保 ID 行號一致）→ `_extract`（`extract_text` 以 `display_title` 為 `skip_title`，含 `extract_single_kana`＋`format_extraction_output`）→ `_translate`（行數超過 `MAX_LINES_PER_REQUEST`＝800 時分段送出後合併；切點固定在整行邊界，永遠不會把單一 ID 切開）→ `validate_ai_text` 驗證（有警告重試一次）→ `_looks_censored` 偵測審查 → `apply_translation` → `write_html_file`（檔名 `_safe_filename()`）→ `_next_chapter_url`（取 `is_current` 的下一筆，邏輯同 `_fetch_adjacent_chapter`）。`until_last=True` 時忽略 count 一路翻到沒有下一話；`stop_event` 在話與話之間及分段之間被檢查，設定後丟 `StopRequested`。
+    *   **審查偵測**（`_looks_censored`）：原文一定行數以上（≥ `_CENSOR_SOURCE_MIN_LINES`＝4），但回覆極短（≤ `_CENSOR_REPLY_MAX_LINES`＝4 行）且幾乎沒有 `ID|文` 結構 → 視為審查命中，丟 `CensoredResponse`。協調器把該話記入 `failed`、繼續下一話。
+    *   **錯誤韌性**：抓取/解析失敗 → 無法得知下一話，中斷整批；翻譯/替換失敗（含 `GeminiStuck`、`CensoredResponse`、其他通用例外）→ 記錄並跳過、繼續下一話；`GeminiQuotaExceeded` → 暫停，保留已完成進度，`AutoResult.pending_url` 記未完成話的網址供接續；`StopRequested` → 中止，`AutoResult.stopped=True`。
+    *   CLI 入口：`python aa_auto_translate.py --url <網址> --count <話數> --out <資料夾> [--gem-url ...] [--until-last]`。
+*   **GUI 入口**（`aa_main_qt.py`）：`TranslatePanel._build_toolbar()` 的「⚡ 自動翻譯」按鈕（Wiki 對照左側）→ `open_auto_translate_dialog()`（QDialog 收集起始網址／話數＋「翻譯到最後一話」勾選／Gem 網址／輸出資料夾，皆持久化於 cache 並下次自動帶入）→ `_start_auto_translate()` 建立 `threading.Event` 作為 stop_event、在背景執行緒呼叫 `run_auto_translate`，進度經 `_invoke_on_main` 回報狀態列與**頁面頂部常駐橫幅** `_build_auto_banner()`（含「■ 停止」鈕 → `_stop_auto_translate()` 設 stop_event）；結束時 `_auto_translate_done()` 隱藏橫幅並彈 `QMessageBox` 總結。Gemini 設定與 `auto_translate_count` / `auto_translate_until_last` 持久化於 `_gemini_*` / `_auto_translate_*` 屬性（見 §1）。
 *   **相依**：需 `pip install playwright` 並 `playwright install chromium`；`gemini_web` 對 playwright 採延遲匯入，未安裝時不影響其他功能。
 
 ## 5. UI 介面關聯變數

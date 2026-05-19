@@ -256,6 +256,11 @@ class TranslatePanel(QWidget):
 
         row.addStretch()
 
+        btn_auto = _make_btn("⚡ 自動翻譯", "#d63384", "#b02a6f", font=_ui_font(12))
+        btn_auto.setToolTip("連續多話全自動翻譯（操控網頁版 Gemini）")
+        btn_auto.clicked.connect(self._main.open_auto_translate_dialog)
+        row.addWidget(btn_auto)
+
         btn_wiki = _make_btn("📖 Wiki 對照", "#6f42c1", "#5a32a3", font=_ui_font(12))
         btn_wiki.setToolTip("從 Wiki 角色列表頁抓取中日文對照")
         btn_wiki.clicked.connect(self._main.open_wiki_name_dialog)
@@ -687,7 +692,10 @@ class MainWindow(QMainWindow):
         self._gemini_max_per_session: int = 3
         self._gemini_selectors: dict = {}
         self._auto_translate_out_dir: str = ""
+        self._auto_translate_count: int = 5
+        self._auto_translate_until_last: bool = False
         self._auto_translate_running: bool = False
+        self._auto_stop_event = None  # threading.Event，執行中時設定
         self._author_only: bool = False
         self._author_name: str = ""
         # URL 讀取後暫存的標題（line 1），供「提取日文」時跳過標題行之用
@@ -730,6 +738,11 @@ class MainWindow(QMainWindow):
         self._nav_bar = self._build_nav_bar()
         root.addWidget(self._nav_bar)
         self._nav_bar.hide()
+
+        # ── 自動翻譯進度橫幅（執行中顯示在所有面板頂部） ──
+        self._auto_banner = self._build_auto_banner()
+        root.addWidget(self._auto_banner)
+        self._auto_banner.hide()
 
         # ── QStackedWidget ──
         self.stack = QStackedWidget()
@@ -779,6 +792,34 @@ class MainWindow(QMainWindow):
         if not self._dark_title_applied:
             _apply_dark_title_bar(self)
             self._dark_title_applied = True
+
+    def _build_auto_banner(self) -> QWidget:
+        """執行自動翻譯時顯示於頁面頂部的常駐橫幅（含進度與停止鈕）。"""
+        w = QWidget()
+        w.setStyleSheet("background:#d63384;")
+        hl = QHBoxLayout(w)
+        hl.setContentsMargins(12, 6, 10, 6)
+        hl.setSpacing(10)
+
+        icon = QLabel("⚡")
+        icon.setFont(_ui_font(14, bold=True))
+        icon.setStyleSheet("color:white;")
+        hl.addWidget(icon)
+
+        self._auto_banner_label = QLabel("自動翻譯進行中…")
+        self._auto_banner_label.setFont(_ui_font(12, bold=True))
+        self._auto_banner_label.setStyleSheet("color:white;")
+        hl.addWidget(self._auto_banner_label, 1)
+
+        btn_stop = _make_btn("■ 停止", "#dc3545", "#b02a37",
+                             font=_ui_font(11, bold=True), width=80)
+        btn_stop.setFixedHeight(28)
+        btn_stop.setToolTip("停止自動翻譯（當前話可能未完成）")
+        btn_stop.clicked.connect(self._stop_auto_translate)
+        hl.addWidget(btn_stop)
+        self._auto_banner_stop_btn = btn_stop
+
+        return w
 
     def _build_nav_bar(self) -> QWidget:
         w = QWidget()
@@ -837,13 +878,6 @@ class MainWindow(QMainWindow):
         btn_open.setFixedHeight(44)
         btn_open.clicked.connect(self.import_html)
         hl.addWidget(btn_open)
-
-        btn_auto = _make_btn("⚡ 自動翻譯", "#d63384", "#b02a6f",
-                             font=_ui_font(12), width=120)
-        btn_auto.setFixedHeight(44)
-        btn_auto.setToolTip("連續多話全自動翻譯（操控網頁版 Gemini）")
-        btn_auto.clicked.connect(self.open_auto_translate_dialog)
-        hl.addWidget(btn_auto)
 
         return w
 
@@ -1502,10 +1536,22 @@ class MainWindow(QMainWindow):
         url_edit.setMinimumWidth(440)
         form.addRow("起始網址：", url_edit)
 
+        count_row = QWidget()
+        count_hl = QHBoxLayout(count_row)
+        count_hl.setContentsMargins(0, 0, 0, 0)
         count_spin = QSpinBox()
         count_spin.setRange(1, 999)
-        count_spin.setValue(5)
-        form.addRow("連續話數：", count_spin)
+        count_spin.setValue(self._auto_translate_count or 5)
+        count_spin.setSuffix(" 話")
+        until_last = QCheckBox("翻譯到最後一話")
+        until_last.setChecked(self._auto_translate_until_last)
+        until_last.toggled.connect(lambda chk: count_spin.setEnabled(not chk))
+        count_spin.setEnabled(not until_last.isChecked())
+        count_hl.addWidget(count_spin)
+        count_hl.addSpacing(8)
+        count_hl.addWidget(until_last)
+        count_hl.addStretch()
+        form.addRow("連續話數：", count_row)
 
         gem_edit = QLineEdit(self._gemini_gem_url)
         gem_edit.setPlaceholderText("https://gemini.google.com/gem/...")
@@ -1541,6 +1587,7 @@ class MainWindow(QMainWindow):
         gem_url = gem_edit.text().strip()
         out_dir = out_edit.text().strip()
         count = count_spin.value()
+        run_until_last = until_last.isChecked()
         if not start_url:
             self.show_status("⚠️ 請填入起始網址", "#f39c12")
             return
@@ -1553,19 +1600,35 @@ class MainWindow(QMainWindow):
 
         self._gemini_gem_url = gem_url
         self._auto_translate_out_dir = out_dir
+        self._auto_translate_count = count
+        self._auto_translate_until_last = run_until_last
         self.save_cache()
-        self._start_auto_translate(start_url, count, out_dir, gem_url)
+        self._start_auto_translate(start_url, count, out_dir, gem_url,
+                                    run_until_last)
 
     def _start_auto_translate(self, start_url: str, count: int,
-                               out_dir: str, gem_url: str) -> None:
-        """在背景執行緒跑自動翻譯，進度回報至狀態列。"""
+                               out_dir: str, gem_url: str,
+                               until_last: bool) -> None:
+        """在背景執行緒跑自動翻譯，進度回報至橫幅與狀態列。"""
         self._auto_translate_running = True
-        self.show_status("⏳ 自動翻譯啟動中（請在彈出的瀏覽器完成登入）…",
-                         "#17a2b8", duration=0)
+        self._auto_stop_event = threading.Event()
+        self._auto_banner_stop_btn.setEnabled(True)
+        self._auto_banner_stop_btn.setText("■ 停止")
+        self._auto_banner_label.setText("⚡ 自動翻譯啟動中（請在彈出的瀏覽器完成登入）…")
+        self._auto_banner.show()
+        self.show_status("⏳ 自動翻譯啟動中…", "#17a2b8")
 
         def _progress(msg: str) -> None:
-            self._invoke_on_main.emit(
-                lambda m=msg: self.show_status(m, "#17a2b8", duration=0))
+            def _apply(m=msg) -> None:
+                # 進度同時更新橫幅（單行截斷）與狀態列 toast
+                short = m.strip().replace("\n", " ")
+                if len(short) > 120:
+                    short = short[:117] + "…"
+                if self._auto_banner_label is not None:
+                    self._auto_banner_label.setText(f"⚡ {short}")
+            self._invoke_on_main.emit(_apply)
+
+        stop_event = self._auto_stop_event
 
         def _bg() -> None:
             from aa_auto_translate import run_auto_translate
@@ -1575,6 +1638,8 @@ class MainWindow(QMainWindow):
                     base_dir=os.path.dirname(os.path.abspath(__file__)),
                     gem_url=gem_url,
                     profile_dir=self._gemini_profile_dir or None,
+                    until_last=until_last,
+                    stop_event=stop_event,
                     progress=_progress)
             except Exception as e:  # noqa: BLE001 — 背景執行緒須吞例外回報 UI
                 self._invoke_on_main.emit(
@@ -1585,8 +1650,20 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=_bg, daemon=True).start()
 
+    def _stop_auto_translate(self) -> None:
+        """由橫幅停止鈕觸發；通知背景執行緒結束。"""
+        if not self._auto_translate_running:
+            return
+        if self._auto_stop_event is not None:
+            self._auto_stop_event.set()
+        self._auto_banner_stop_btn.setEnabled(False)
+        self._auto_banner_stop_btn.setText("停止中…")
+        self._auto_banner_label.setText("⏹️ 停止指令已送出，等待當前動作結束…")
+
     def _auto_translate_done(self, result, error: 'str | None') -> None:
         self._auto_translate_running = False
+        self._auto_stop_event = None
+        self._auto_banner.hide()
         if error is not None:
             self.show_status(f"❌ 自動翻譯失敗：{error}", "#dc3545")
             QMessageBox.critical(self, "自動翻譯失敗", error)
@@ -1595,17 +1672,34 @@ class MainWindow(QMainWindow):
         for p in result.done:
             lines.append(f"  ✅ {p}")
         if result.failed:
-            lines.append(f"失敗 {len(result.failed)} 話：")
+            lines.append(f"失敗／跳過 {len(result.failed)} 話：")
             lines += [f"  ❌ {u} — {why}" for u, why in result.failed]
+        if result.reached_end:
+            lines.append("")
+            lines.append("🏁 已翻到最後一話。")
         if result.quota_paused:
             lines.append("")
             lines.append("⏸️ 因撞到 Gemini 額度上限而暫停。")
             lines.append("待額度恢復後，用下列網址當起始網址接續：")
             lines.append(result.pending_url)
-        ok = not result.failed and not result.quota_paused
-        self.show_status(
-            f"✅ 自動翻譯結束：成功 {len(result.done)} 話",
-            "#28a745" if ok else "#f39c12")
+        if result.stopped:
+            lines.append("")
+            lines.append("⏹️ 已手動停止。")
+            if result.pending_url:
+                lines.append("要接續，用下列網址當起始網址：")
+                lines.append(result.pending_url)
+        ok = (not result.failed and not result.quota_paused
+              and not result.stopped)
+        if result.stopped:
+            color = "#6c757d"
+            head = "⏹️ 已停止"
+        elif ok:
+            color = "#28a745"
+            head = "✅ 自動翻譯完成"
+        else:
+            color = "#f39c12"
+            head = "⚠️ 自動翻譯結束（含失敗或暫停）"
+        self.show_status(f"{head}：成功 {len(result.done)} 話", color)
         QMessageBox.information(self, "自動翻譯完成", "\n".join(lines))
 
     # ════════════════════════════════════════════════════════════
@@ -1956,6 +2050,8 @@ class MainWindow(QMainWindow):
             gemini_max_per_session=self._gemini_max_per_session,
             gemini_selectors=self._gemini_selectors,
             auto_translate_out_dir=self._auto_translate_out_dir,
+            auto_translate_count=self._auto_translate_count,
+            auto_translate_until_last=self._auto_translate_until_last,
         )
 
     def _apply_cache(self, cache: AppCache) -> None:
@@ -2022,6 +2118,12 @@ class MainWindow(QMainWindow):
             cache.gemini_max_per_session or 3))
         self._gemini_selectors = dict(cache.gemini_selectors or {})
         self._auto_translate_out_dir = str(cache.auto_translate_out_dir or "")
+        try:
+            self._auto_translate_count = max(1, int(
+                cache.auto_translate_count or 5))
+        except (TypeError, ValueError):
+            self._auto_translate_count = 5
+        self._auto_translate_until_last = bool(cache.auto_translate_until_last)
         try:
             v = int(cache.pad_space_count)
             self._pad_space_count = v if v in (1, 2, 3) else 2

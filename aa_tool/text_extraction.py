@@ -141,8 +141,14 @@ _KANJI_RE = re.compile(r'[一-鿿々]')
 # 對話框邊框字元（左/右）：用於 `_is_dialogue_box_bounded` 偵測候選是否
 # 位於 ｜…| / ＜…│ / │…＞ 等對話框內。命中即列入 strong_jp（免疫密度懲罰）
 # 並 +2 分，讓對話框內的合法日文不會因為鄰近邊框導致密度過高被誤殺。
-_DIALOGUE_LEFT_MARKERS = set('＜<│|｜')
-_DIALOGUE_RIGHT_MARKERS = set('＞>│|｜')
+_DIALOGUE_LEFT_MARKERS = set('＜<│|｜┃')
+_DIALOGUE_RIGHT_MARKERS = set('＞>│|｜┃')
+
+# 名牌（speaker tag）前綴：候選前方為「【說話者】」名牌（後可接破折號連接號），
+# 是強烈的對話信號（如「【響】───だってさ」）。命中時 +2 並列入 strong_jp，
+# 讓名牌後的對話不因破折號 `───` 被計入局部 AA 密度而誤殺。
+_NAME_TAG_PREFIX_RE = re.compile(
+    r'【[^【】]{1,16}】[\s　─━―ー\-‐—–−〜~]*$')
 
 # 半形片假名 — AA 圖最大宗的噪聲來源
 _HALFWIDTH_KANA_CHARS = set(chr(c) for c in range(0xFF66, 0xFFA0))
@@ -166,8 +172,16 @@ _JP_END_PUNCT = set('！？。、…')
 # ゝゞ 疊字標記）。
 _SHORT_UTT_RE = re.compile(
     r'(?=[ぁ-゜ゟ゠-ーヿ]*[ぁ-゜ゟ])'
-    r'(?:[ぁ-゜ゟ゠-ーヿ]+[！？]'
+    r'(?:[ぁ-゜ゟ゠-ーヿ]+[…]*[！？]'
     r'|[ぁ-゜ゟ゠-ーヿ]{2,}[、。…])')
+
+# 純片假名短句 anchor：≥2 片假名 + 全形 `！？`（如「クソ！」「ヤダ！」）。
+# `_SHORT_UTT_RE` 因 lookahead 要求含真平假名而排除純片假名短句，但括號內的
+# 連續喊叫（如「（クソ！　クソ！　クソッタレッ！！）」）應被逐段提取。
+# 為避免放掉 AA 圖中的純片假名碎片：恰好 2 片假名 + 標點的最短型（`_SHORT_KATA_UTT_RE`）
+# 須位於括號區間內才保留（見 `_extract_experimental_line` 的 bracket 閘）。
+_KATA_UTT_RE = re.compile(r'[゠-ーヿ]{2,}[！？]')
+_SHORT_KATA_UTT_RE = re.compile(r'^[゠-ーヿ]{2}[！？]+$')
 
 # 平假名 + 真片假名（非 ー）+ 平假名 — 「こンっ」這類片假名單字夾在平假名間。
 # 真實日文罕見此模式（片假名詞會整串寫，不會單字夾入平假名）；AA 圖則常見。
@@ -295,6 +309,8 @@ def _find_anchors(line: str) -> list[tuple[int, int]]:
     for m in _KATA_STUTTER_RE.finditer(line):
         anchors.append((m.start(), m.end()))
     for m in _KATA_PARTICLE_RE.finditer(line):
+        anchors.append((m.start(), m.end()))
+    for m in _KATA_UTT_RE.finditer(line):
         anchors.append((m.start(), m.end()))
     anchors.sort()
     return anchors
@@ -473,6 +489,11 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     is_box_bounded = _is_dialogue_box_bounded(line, start, end)
     if is_box_bounded:
         s += 2
+    # 名牌前綴 bonus + 密度豁免：候選前方為「【說話者】───」名牌時，
+    # 名牌後的對話常被破折號 `───`（屬 symbol_regex）拉高局部密度而誤殺。
+    has_name_tag = bool(_NAME_TAG_PREFIX_RE.search(line[:start]))
+    if has_name_tag:
+        s += 2
     # AA 噪聲懲罰：在「強日文信號」缺席時才嚴罰。
     # 注意：`_OKURIGANA_RE` 與 `_KANJI_HIRA_RE` 雖然有分數 bonus，但不列入
     # strong_jp — AA 圖中「kanji+hira」「kanji-hira-kanji」三字偶然碰撞時
@@ -488,7 +509,8 @@ def _score_candidate(text: str, line: str, start: int, end: int,
                  or any(ch in text for ch in '！？。')
                  or has_num_option
                  or is_right_edge
-                 or is_box_bounded)
+                 or is_box_bounded
+                 or has_name_tag)
     # 注意：分母改為「非空白字元數」後（見 `_local_aa_density`），閾值
     # 從原本 0.6 降到 0.4，否則 AA padding 大量空白會把比例壓低逃避懲罰。
     density = _local_aa_density(line, start, end, symbol_regex, 8)
@@ -590,6 +612,11 @@ def _is_strong_short_candidate(text: str) -> bool:
         return True
     if _NUMBER_OPTION_RE.search(text):
         return True
+    # 純平假名 run（整段為 ≥3 個真平假名，如「まだだ」「そうだ」）— AA 圖極少
+    # 湊出 3 個連續真平假名，視為可獨立成立的強短信號（同字重複如「んんん」
+    # 雖也命中，但會被分數階段的 `_REPEAT_HIRA_RE` -3 罰分擋下）。
+    if len(text) >= 3 and _HIRAGANA_RUN_RE.fullmatch(text):
+        return True
     return False
 
 
@@ -645,6 +672,23 @@ def _is_right_edge_dialogue(line: str, start: int, end: int) -> bool:
     return space_count >= 3
 
 
+def _in_bracket_region(line: str, start: int, end: int) -> bool:
+    """候選 [start, end) 是否落在某對括號（【「『（( 等）之內。
+
+    判定：`line[:start]` 中最後一個「尚未閉合」的開括號存在，且其對應閉括號
+    出現在 `line[end:]`。用於 `_SHORT_KATA_UTT_RE` 短純片假名喊叫的括號閘。
+    """
+    pending = None
+    for ch in line[:start]:
+        if ch in _OPEN_BRACKETS:
+            pending = ch
+        elif ch in _CLOSE_BRACKETS:
+            pending = None
+    if pending is None:
+        return False
+    return _BRACKET_PAIRS.get(pending, '') in line[end:]
+
+
 def _extract_experimental_line(
     line: str,
     invalid_regex: re.Pattern,
@@ -694,6 +738,10 @@ def _extract_experimental_line(
             continue
         if _score_candidate(text, line, s, e, symbol_regex) < 2:
             continue
+        # 短純片假名喊叫閘：恰好「2 片假名 + 標點」的最短型（如「クソ！」）
+        # 僅在括號區間內保留 — 括號外的同型碎片多為 AA 圖裝飾。
+        if _SHORT_KATA_UTT_RE.match(text) and not _in_bracket_region(line, s, e):
+            continue
         out.append((text, s, e))
     out.sort(key=lambda x: x[1])
 
@@ -708,7 +756,8 @@ def _extract_experimental_line(
         out = [(t, s, e) for t, s, e in out
                if len(t) >= 4
                or _is_strong_short_candidate(t)
-               or _is_right_edge_dialogue(line, s, e)]
+               or _is_right_edge_dialogue(line, s, e)
+               or _is_dialogue_box_bounded(line, s, e)]
     return out
 
 

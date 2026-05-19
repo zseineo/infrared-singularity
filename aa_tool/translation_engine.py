@@ -1,7 +1,26 @@
 import re
+import unicodedata
 
 from .constants import BORDER_CHARS, DEFAULT_SYMBOL_REGEX
 from .text_extraction import _BIDI_CONTROL_RE, aa_noise_ratio
+
+
+def _disp_width(text: str) -> int:
+    """字串在 MS PGothic 等寬 AA 基準下的顯示寬度（半形=1、全形=2）。
+
+    補空白對齊右側 AA 圖時必須以「顯示寬度」而非「字元數」計算 —— AA 圖
+    周圍常混用半形空白(寬1)與全形空白(寬2)，半形片假名、ASCII 也是寬1；
+    以字元數計會在這些字元上累積誤差，使右側 AA 圖填得歪掉。
+    """
+    return sum(2 if unicodedata.east_asian_width(c) in ('F', 'W') else 1
+               for c in text)
+
+
+def _make_pad(width: int) -> str:
+    """組出剛好 `width` 個半形寬度的填白：全形空白(2) ＋ 視需要一個半形空白(1)。"""
+    if width <= 0:
+        return ''
+    return '　' * (width // 2) + (' ' if width % 2 else '')
 
 
 # 用 backtick 作為「保留外圍空白」的分隔符。選 backtick 是因為：
@@ -132,15 +151,16 @@ def _replace_with_padding(
     padded_translated: str,
     pad_right_aa: bool = False,
     symbol_regex: 're.Pattern | None' = None,
-    len_diff: int = 0,
+    width_diff: int = 0,
 ) -> str:
     """在一行中執行替換，依右側是否擋著 AA 圖判斷補空白或消空白。
 
-    - `len_diff > 0`（譯文較短）：右側擋著 AA 圖時，於譯文後補 `len_diff` 個
-      全形空白（用 `padded_translated`），把右側 AA 圖推回原欄位。
-    - `len_diff < 0`（譯文較長，且 `pad_right_aa=True`）：右側擋著 AA 圖時，
-      跳過並保留緊接的收尾括號後，吃掉最多 `-len_diff` 個空白（全形或半形）；
-      空白不足時能吃幾個算幾個，盡量讓右側 AA 圖維持原欄位、不動 AA 圖本身。
+    `width_diff` 為「原文顯示寬度 − 譯文顯示寬度」（半形=1、全形=2）：
+    - `width_diff > 0`（譯文較窄）：右側擋著 AA 圖時，於譯文後補等寬空白
+      （用 `padded_translated`），把右側 AA 圖推回原欄位。
+    - `width_diff < 0`（譯文較寬，且 `pad_right_aa=True`）：右側擋著 AA 圖時，
+      跳過並保留緊接的收尾括號後，依「顯示寬度」吃掉右側空白共 `-width_diff`
+      寬；若最後吃到全形空白而吃過頭，補回多吃的半形寬度，使 AA 圖維持原欄位。
     """
     if original not in line:
         return line
@@ -152,24 +172,27 @@ def _replace_with_padding(
             result.append(line[pos:m.start()])
             rest = line[m.end():]
             has_aa = _right_side_has_aa(rest, pad_right_aa, symbol_regex)
-            if has_aa and len_diff > 0:
-                # 譯文較短：補空白
+            if has_aa and width_diff > 0:
+                # 譯文較窄：補等寬空白
                 result.append(padded_translated)
                 pos = m.end()
-            elif has_aa and len_diff < 0 and pad_right_aa:
-                # 譯文較長：吃掉右側空白（實驗性，僅 pad_right_aa 啟用時）
+            elif has_aa and width_diff < 0 and pad_right_aa:
+                # 譯文較寬：依顯示寬度吃掉右側空白（實驗性，僅 pad_right_aa 啟用時）
                 result.append(translated)
                 k = m.end()
                 # 先保留緊接的收尾括號（屬於文字尾巴，不可吃）
                 while k < len(line) and line[k] in _TRAILING_CLOSERS:
                     k += 1
                 result.append(line[m.end():k])
-                # 吃掉最多 -len_diff 個空白
-                want = -len_diff
+                # 依顯示寬度吃掉右側空白共 -width_diff 寬（全形記 2、半形記 1）
+                want = -width_diff
                 eaten = 0
                 while eaten < want and k < len(line) and line[k] in ('　', ' '):
-                    eaten += 1
+                    eaten += 2 if line[k] == '　' else 1
                     k += 1
+                # 吃過頭（最後吃到全形空白）→ 補回多吃的半形寬度
+                if eaten > want:
+                    result.append(_make_pad(eaten - want))
                 pos = k
             else:
                 result.append(translated)
@@ -350,16 +373,19 @@ def apply_translation(
             # 附加模式：以「原文 + 半形空白 + 翻譯文」取代原文位置；不補/不消空白
             final_translated = original + ' ' + final_translated
             padded = final_translated
-            len_diff = 0
+            width_diff = 0
         else:
-            len_diff = len(original) - len(final_translated)
-            padded = final_translated + ('　' * len_diff if len_diff > 0 else '')
+            # 以「顯示寬度」(半形=1/全形=2) 而非字元數計算差距，否則 AA 圖
+            # 周圍的半形空白／半形假名會造成累積誤差、右側 AA 填得歪掉。
+            width_diff = _disp_width(original) - _disp_width(final_translated)
+            padded = final_translated + (
+                _make_pad(width_diff) if width_diff > 0 else '')
             # 非該行最後一段：右側是同行的其他翻譯句而非 AA 圖，一律不補/不消
             # 空白，避免在句子之間塞入多餘全形空白（只有最後一段需要對齊 AA）。
             try:
                 _ln_s, _sg_s = _id.split('-', 1)
                 if last_seg_of_line.get(int(_ln_s), -1) != int(_sg_s):
-                    len_diff = 0
+                    width_diff = 0
                     padded = final_translated
             except (ValueError, IndexError):
                 pass
@@ -373,14 +399,14 @@ def apply_translation(
         if 0 <= line_idx < len(source_lines):
             source_lines[line_idx] = _replace_with_padding(
                 source_lines[line_idx], original, final_translated, padded,
-                pad_right_aa, symbol_regex, len_diff,
+                pad_right_aa, symbol_regex, width_diff,
             )
         else:
             # ID 無法解析時退回全行掃描（保護性 fallback）
             for i in range(len(source_lines)):
                 source_lines[i] = _replace_with_padding(
                     source_lines[i], original, final_translated, padded,
-                    pad_right_aa, symbol_regex, len_diff,
+                    pad_right_aa, symbol_regex, width_diff,
                 )
 
     source = '\n'.join(source_lines)

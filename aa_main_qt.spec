@@ -3,7 +3,7 @@
 # AA 創作翻譯輔助小工具 — PyInstaller spec
 #
 # 打包方式：pyinstaller aa_main_qt.spec
-# 輸出：dist/aa_main_qt/
+# 輸出：dist/aa_main_qt_v<版本>/  （版本號自 aa_main_qt.py 的 APP_VERSION 讀取）
 #   aa_main_qt.exe        主程式
 #   aa_url_fetch_qt.exe   URL 抓取子程序（由主程式以 subprocess 啟動）
 #   _internal/            所有依賴與資料
@@ -15,6 +15,19 @@
 #     為執行期產生，不打包；首次執行時程式自行在 exe 旁建立。
 
 block_cipher = None
+
+# ════════════════════════════════════════════════
+#  讀取 APP_VERSION，輸出資料夾依版本號命名
+#  dist/aa_main_qt_v<版本>/
+# ════════════════════════════════════════════════
+import re
+
+_ver_match = re.search(
+    r'APP_VERSION\s*=\s*"([^"]+)"',
+    open('aa_main_qt.py', encoding='utf-8').read(),
+)
+APP_VERSION = _ver_match.group(1) if _ver_match else 'dev'
+OUTPUT_NAME = f'aa_main_qt_v{APP_VERSION}'
 
 # ════════════════════════════════════════════════
 #  共用 datas（兩個 EXE 都需要）
@@ -143,5 +156,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name='aa_main_qt',   # 輸出資料夾名稱：dist/aa_main_qt/
+    name=OUTPUT_NAME,   # 輸出資料夾名稱：dist/aa_main_qt_v<版本>/
 )

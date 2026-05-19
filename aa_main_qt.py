@@ -1341,31 +1341,56 @@ class MainWindow(QMainWindow):
         )
 
     def analyze_extraction(self) -> None:
+        """提取分析 (Debug)：開啟對話框，使用者在輸入框貼上並反白選取要分析的
+        文字，按「分析選取文字」後在下方顯示分析報告。"""
         from PyQt6.QtWidgets import QDialog, QDialogButtonBox
-        cursor = self._translate_panel.source_text.textCursor()
-        sel = cursor.selectedText().replace('\u2029', '\n')
-        if not sel.strip():
-            self.show_status(
-                "⚠️ 請先在原始文本區塊反白選取要分析的文字！", "#f39c12")
-            return
-        report = _analyze_extraction(
-            sel,
-            self._active_base_regex(),
-            self.current_invalid_regex,
-            self.current_symbol_regex,
-            self._translate_panel.get_filter_text().strip(),
-            korean_mode=self._korean_mode,
-            experimental=self._experimental_extraction,
-        )
+
         dlg = QDialog(self)
         dlg.setWindowTitle("🔧 提取分析 (Debug)")
-        dlg.resize(800, 600)
+        dlg.resize(820, 680)
         vl = QVBoxLayout(dlg)
-        box = QTextEdit()
-        box.setFont(_aa_font(13))
-        box.setPlainText(report)
-        box.setReadOnly(True)
-        vl.addWidget(box)
+
+        hint = QLabel(
+            "① 在下方輸入框貼上文字　② 反白選取要分析的文字　③ 按「分析選取文字」")
+        vl.addWidget(hint)
+
+        input_box = QTextEdit()
+        input_box.setFont(_aa_font(13))
+        input_box.setAcceptRichText(False)
+        input_box.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        input_box.setPlaceholderText("在此貼上要分析的原始文本…")
+        vl.addWidget(input_box, 1)
+
+        btn_analyze = _make_btn(
+            "分析選取文字", "#007bff", "#0056b3", width=140)
+        vl.addWidget(btn_analyze)
+
+        report_box = QTextEdit()
+        report_box.setFont(_aa_font(13))
+        report_box.setReadOnly(True)
+        report_box.setPlaceholderText("分析結果會顯示在這裡…")
+        vl.addWidget(report_box, 1)
+
+        def _do_analyze() -> None:
+            cursor = input_box.textCursor()
+            sel = cursor.selectedText().replace('\u2029', '\n')
+            if not sel.strip():
+                report_box.setPlainText(
+                    "⚠️ 請先在上方輸入框反白選取要分析的文字！")
+                return
+            report = _analyze_extraction(
+                sel,
+                self._active_base_regex(),
+                self.current_invalid_regex,
+                self.current_symbol_regex,
+                self._translate_panel.get_filter_text().strip(),
+                korean_mode=self._korean_mode,
+                experimental=self._experimental_extraction,
+            )
+            report_box.setPlainText(report)
+
+        btn_analyze.clicked.connect(_do_analyze)
+
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         bb.rejected.connect(dlg.reject)
         vl.addWidget(bb)

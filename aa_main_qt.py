@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (
 from aa_tool.constants import (
     DEFAULT_BASE_REGEX, DEFAULT_BASE_REGEX_KO,
     DEFAULT_INVALID_REGEX, DEFAULT_SYMBOL_REGEX,
-    DEFAULT_BG_COLOR, DEFAULT_FG_COLOR, EDITOR_DEFAULT_BG,
+    DEFAULT_BG_COLOR, DEFAULT_FG_COLOR,
 )
 from aa_tool.html_io import read_html_pre_content, write_html_file, read_html_bg_color
 from aa_tool import original_cache
@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.31"
+APP_VERSION = "1.32"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -710,7 +710,7 @@ class MainWindow(QMainWindow):
         self._editor_font_size: int = 12
         self._editor_line_height: int = 120
         self._last_dir: str = ""
-        self._editor_bg_color: str = EDITOR_DEFAULT_BG
+        self._editor_bg_color: str = "#ffffff"
         self._auto_copy: bool = False
         self._work_history_limit: int = 10
         self._fetch_history_limit: int = 50
@@ -977,8 +977,8 @@ class MainWindow(QMainWindow):
             self._edit_window._display_title = display_title
             self._edit_window._is_temp_file = is_temp_file
             # 保留使用者記住的底色；只有首次沒有記錄時才從 HTML 讀取
-            if not self._editor_bg_color or self._editor_bg_color == EDITOR_DEFAULT_BG:
-                bg = read_html_bg_color(file_path) or EDITOR_DEFAULT_BG
+            if not self._editor_bg_color or self._editor_bg_color == "#ffffff":
+                bg = read_html_bg_color(file_path) or "#ffffff"
                 self._edit_window._bg_color = bg
             else:
                 self._edit_window._bg_color = self._editor_bg_color

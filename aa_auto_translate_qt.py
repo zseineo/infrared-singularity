@@ -125,8 +125,11 @@ class AutoTranslatePanel(QWidget):
 
         self.filename_preview = QLineEdit()
         self.filename_preview.setReadOnly(True)
+        # 唯讀預覽欄位，刻意挑可辨識的中灰底色與其他欄位（白底）作視覺區隔，
+        # 避免讓使用者誤以為可以編輯。
         self.filename_preview.setStyleSheet(
-            "QLineEdit { background:#f1f3f5; color:#495057; }")
+            "QLineEdit { background:#d6d8db; color:#343a40;"
+            " border:1px solid #adb5bd; }")
         self.filename_preview.setToolTip(
             "依目前設定計算出來的檔名範例。\n"
             "・「自動填入作品名稱」設定開啟時 → 每話檔名自動取自頁面標題\n"

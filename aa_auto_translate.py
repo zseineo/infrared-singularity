@@ -242,13 +242,17 @@ def _sanitize(text: str) -> str:
 
 
 def _unique_path(out_dir: str, name_base: str) -> str:
-    """同名衝突時加序號（``name_base``→``name_base_2``→``name_base_3``…）後回傳完整路徑。"""
+    """同名衝突時加 dash 序號（``name_base``→``name_base-2``→``name_base-3``…）後回傳完整路徑。
+
+    第一個檔案不加任何後綴（例：``Title_34.html``），第二個起以 ``-N`` 區分
+    （例：``Title_34-2.html``），這樣與作品中常見的「34、34-2」並列習慣一致。
+    """
     path = os.path.join(out_dir, f"{name_base}.html")
     if not os.path.exists(path):
         return path
     i = 2
     while True:
-        candidate = os.path.join(out_dir, f"{name_base}_{i}.html")
+        candidate = os.path.join(out_dir, f"{name_base}-{i}.html")
         if not os.path.exists(candidate):
             return candidate
         i += 1

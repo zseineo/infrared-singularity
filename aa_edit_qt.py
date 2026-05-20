@@ -2398,7 +2398,8 @@ class EditWindow(QMainWindow):
     def _reload_original_by_fingerprint(self) -> None:
         """以目前 HTML 檔的投稿指紋重查原文暫存，更新 orig_view 與 _original_text。
 
-        自動翻譯流程或 cache 失同步時，使用者可手動觸發重新對齊。
+        查不到本地暫存時會回頭看 ``url_history``：若指紋對應到網址，會直接重新
+        抓取網頁、解析、重建原文並寫回暫存（可能需要幾秒網路時間）。
         """
         if self._reload_original_for_file is None:
             self._set_status("⚠️ 無法取得原文查詢功能", "#ffc107")
@@ -2406,6 +2407,9 @@ class EditWindow(QMainWindow):
         if not self._html_file:
             self._set_status("⚠️ 目前沒有開啟的 HTML 檔案", "#ffc107")
             return
+        # 提示「查詢中」並強制刷新，避免使用者覺得 UI 卡死（fetch 可能耗時數秒）
+        self._set_status("⏳ 重新查詢原文中…（暫存沒有時會嘗試從網址重抓）", "#17a2b8")
+        QApplication.processEvents()
         try:
             text = self._reload_original_for_file(self._html_file)
         except Exception as e:
@@ -2413,7 +2417,7 @@ class EditWindow(QMainWindow):
             return
         if not text:
             self._set_status(
-                "ℹ️ 找不到符合此檔指紋的原文（暫存中沒有對應條目）", "#ffc107")
+                "ℹ️ 找不到對應原文（暫存與網址讀取紀錄皆無匹配條目）", "#ffc107")
             return
         self._original_text = text
         # 更新原文視圖（保留現有字型／行高）

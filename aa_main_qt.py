@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.29"
+APP_VERSION = "1.30"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -962,7 +962,7 @@ class MainWindow(QMainWindow):
                 pad_right_aa_provider=lambda: self._pad_right_aa,
                 glossary_avoid_aa_provider=lambda: self._glossary_avoid_aa,
                 url_for_text_provider=self._find_url_for_text,
-                reload_original_for_file=self.load_original_for_file,
+                reload_original_for_file=self.load_original_with_url_fallback,
             )
             # 替換 placeholder
             self.stack.removeWidget(self._edit_placeholder)
@@ -2339,6 +2339,61 @@ class MainWindow(QMainWindow):
 
     def load_original_for_file(self, file_path: str) -> str | None:
         return original_cache.load_text_for_html(self._base_dir(), file_path)
+
+    def load_original_with_url_fallback(self, file_path: str) -> str | None:
+        """重找原文：先查 ``aa_original_cache.json``；查不到時改查 ``url_history``
+        是否有指紋相符的網址，直接抓網頁解析重建原文，並同步寫回暫存。
+
+        編輯器「🔎 重找原文」鈕走這條：cache 失同步或自動翻譯前的舊檔，
+        只要還能從網址重抓就能對得回來。
+        """
+        # 1) 先試本地暫存
+        text = self.load_original_for_file(file_path)
+        if text:
+            return text
+        # 2) 從 HTML 的 <pre> 算指紋
+        try:
+            pre = read_html_pre_content(file_path)
+        except OSError:
+            return None
+        if not pre:
+            return None
+        fp = self._compute_author_fingerprint(pre)
+        if not fp:
+            return None
+        # 3) 在 url_history 中找指紋相符的網址
+        matching_url = next(
+            (h.get('url') for h in self.url_history
+             if isinstance(h, dict) and h.get('fingerprint') == fp
+             and h.get('url')),
+            None)
+        if not matching_url:
+            return None
+        # 4) 抓網頁＋解析（先吃 %TEMP%/aa_url_cache 的內容，沒命中才上網）
+        try:
+            page_html = self._read_url_cache(matching_url)
+            if page_html is None:
+                page_html = _fetch_url(matching_url)
+                self._write_url_cache(matching_url, page_html)
+            text_content, _nav, page_title = _parse_page_html(
+                page_html, matching_url,
+                author_name=self._author_name,
+                author_only=self._author_only)
+        except Exception:
+            return None
+        if not text_content or not text_content.strip():
+            return None
+        # 5) 重建 source（與自動翻譯一致：display_title + 空行 + 內文）並寫回暫存
+        display_title = _extract_work_title(page_title) if page_title else ""
+        source = (display_title + "\n\n" + text_content
+                  if display_title else text_content)
+        try:
+            original_cache.save_entry(
+                self._base_dir(), source,
+                limit=self._original_cache_limit)
+        except Exception:
+            pass
+        return source
 
     def _on_editor_bg_changed(self, color: str) -> None:
         self._editor_bg_color = color

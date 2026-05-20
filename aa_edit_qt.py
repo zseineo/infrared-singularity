@@ -181,6 +181,7 @@ class EditWindow(QMainWindow):
         pad_right_aa_provider=None,  # () -> bool；對應主程式「替換翻譯時偵測右側 AA 圖補空白」設定
         glossary_avoid_aa_provider=None,  # () -> bool；對應主程式「套用術語表時避免套用到 AA 圖」設定
         url_for_text_provider=None,  # (text: str) -> str | None；以指紋查 url_history 取得對應網址
+        reload_original_for_file=None,  # (file_path: str) -> str | None；依指紋查原文暫存
     ) -> None:
         super().__init__()
         self._html_file = html_file
@@ -225,6 +226,7 @@ class EditWindow(QMainWindow):
         self._pad_right_aa_provider = pad_right_aa_provider
         self._glossary_avoid_aa_provider = glossary_avoid_aa_provider
         self._url_for_text_provider = url_for_text_provider
+        self._reload_original_for_file = reload_original_for_file
 
         # Alt+4 局部重套用：保留 provider 取得的「完整」提取結果與翻譯文字，
         # 而 side_extracted / side_ai 只顯示當前編輯器可視範圍對應的行。
@@ -502,6 +504,18 @@ class EditWindow(QMainWindow):
             "以當前原文的投稿指紋查網址讀取紀錄，找到匹配條目則複製其網址")
         btn_copy_url.clicked.connect(self._copy_url_by_fingerprint)
         tb.addWidget(btn_copy_url)
+
+        # 「依索引重新尋找原文」：以目前 HTML 的 <pre> 算投稿指紋，重查
+        # aa_original_cache.json 取對應原文，更新 orig_view 與 _original_text。
+        # 自動翻譯流程下偶有 cache 對不上的狀況，此鈕讓使用者手動重新對齊。
+        if self._reload_original_for_file is not None:
+            btn_reload = _make_button(
+                "🔎 重找原文", "#fd7e14", "#e76b00", width=95)
+            btn_reload.setToolTip(
+                "依目前 HTML 的投稿指紋重查原文暫存（aa_original_cache.json），"
+                "用於原文模式對不上時手動重新對齊")
+            btn_reload.clicked.connect(self._reload_original_by_fingerprint)
+            tb.addWidget(btn_reload)
 
         btn_bg = _make_button("底色", "#6c757d", "#5a6268", width=50)
         btn_bg.clicked.connect(self._choose_bg)
@@ -2335,7 +2349,8 @@ class EditWindow(QMainWindow):
         # 優先用目前有焦點的那一個；否則用第一個有選取的
         view = next((w for w in candidates if w.hasFocus()), candidates[0])
 
-        selected = view.textCursor().selectedText().replace('', '\n')
+        # QTextCursor.selectedText() 以 U+2029 分隔行；換成 '\n' 才是正常的多行字串。
+        selected = view.textCursor().selectedText().replace(chr(0x2029), '\n')
         if not selected.strip():
             self._set_status("⚠️ 選取範圍內沒有內容", "#ffc107")
             return
@@ -2375,6 +2390,40 @@ class EditWindow(QMainWindow):
             return
         QApplication.clipboard().setText(url)
         self._set_status(f"✅ 已複製網址：{url}", "#0f0")
+
+    # ════════════════════════════════════════════════════════════
+    #  依索引重新尋找原文（手動重新對齊 aa_original_cache.json）
+    # ════════════════════════════════════════════════════════════
+
+    def _reload_original_by_fingerprint(self) -> None:
+        """以目前 HTML 檔的投稿指紋重查原文暫存，更新 orig_view 與 _original_text。
+
+        自動翻譯流程或 cache 失同步時，使用者可手動觸發重新對齊。
+        """
+        if self._reload_original_for_file is None:
+            self._set_status("⚠️ 無法取得原文查詢功能", "#ffc107")
+            return
+        if not self._html_file:
+            self._set_status("⚠️ 目前沒有開啟的 HTML 檔案", "#ffc107")
+            return
+        try:
+            text = self._reload_original_for_file(self._html_file)
+        except Exception as e:
+            self._set_status(f"⚠️ 查詢失敗：{e}", "#ffc107")
+            return
+        if not text:
+            self._set_status(
+                "ℹ️ 找不到符合此檔指紋的原文（暫存中沒有對應條目）", "#ffc107")
+            return
+        self._original_text = text
+        # 更新原文視圖（保留現有字型／行高）
+        self.orig_view.setPlainText(text)
+        self.orig_view.document().clearUndoRedoStacks()
+        try:
+            self._apply_line_height_to(self.orig_view)
+        except Exception:
+            pass
+        self._set_status("✅ 已依指紋重新載入原文", "#0f0")
 
     # ════════════════════════════════════════════════════════════
     #  其他

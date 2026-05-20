@@ -38,6 +38,7 @@ from aa_tool.constants import (
     DEFAULT_BG_COLOR, DEFAULT_FG_COLOR,
 )
 from aa_tool.html_io import read_html_pre_content, write_html_file, read_html_bg_color
+from aa_tool import original_cache
 from aa_tool.qt_helpers import show_toast
 from aa_tool.settings_manager import (
     SettingsManager, AppSettings, AppCache,
@@ -63,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.28"
+APP_VERSION = "1.29"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -961,6 +962,7 @@ class MainWindow(QMainWindow):
                 pad_right_aa_provider=lambda: self._pad_right_aa,
                 glossary_avoid_aa_provider=lambda: self._glossary_avoid_aa,
                 url_for_text_provider=self._find_url_for_text,
+                reload_original_for_file=self.load_original_for_file,
             )
             # 替換 placeholder
             self.stack.removeWidget(self._edit_placeholder)
@@ -2308,125 +2310,35 @@ class MainWindow(QMainWindow):
     #  原文暫存 (依「投稿標頭指紋」索引，上限由 self._original_cache_limit 控制)
     # ════════════════════════════════════════════════════════════
 
-    def _orig_cache_path(self) -> str:
-        return os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            'aa_original_cache.json')
-
-    def _load_orig_cache_data(self) -> dict:
-        p = self._orig_cache_path()
-        if not os.path.exists(p):
-            return {}
-        try:
-            with open(p, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except (OSError, json.JSONDecodeError):
-            return {}
-
-    def _save_orig_cache_data(self, data: dict) -> None:
-        """原子寫入：先寫暫存檔再改名，減少多執行緒損壞機率。"""
-        target = self._orig_cache_path()
-        tmp = target + ".tmp"
-        try:
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False)
-            os.replace(tmp, target)
-        except OSError:
-            pass
-
-    # 指紋：從第一個投稿標頭抽出「日期 + 時間.毫秒 + ID」組合，例：
-    #   "2023/04/02(日) 20:54:38.52 ID:5UkYdPSV"
-    # 這部分由伺服器產生，翻譯流程不會動到，可作為檔名外的備援索引。
-    _AUTHOR_FP_FULL_RE = _re_mod.compile(
-        r'\d{4}/\d{1,2}/\d{1,2}\([^)\s]+\)\s*\d{1,2}:\d{2}:\d{2}(?:\.\d+)?'
-        r'\s*ID:[A-Za-z0-9+/]+'
-    )
-    # fallback：無 ID 的老格式（5ch 早期），只取日期 + 時間
-    _AUTHOR_FP_DATE_RE = _re_mod.compile(
-        r'\d{4}/\d{1,2}/\d{1,2}\([^)\s]+\)\s*\d{1,2}:\d{2}:\d{2}(?:\.\d+)?'
-    )
+    def _base_dir(self) -> str:
+        return os.path.dirname(os.path.abspath(__file__))
 
     @classmethod
     def _compute_author_fingerprint(cls, text: str) -> str | None:
-        if not text:
-            return None
-        m = cls._AUTHOR_FP_FULL_RE.search(text)
-        if not m:
-            m = cls._AUTHOR_FP_DATE_RE.search(text)
-        if not m:
-            return None
-        return _re_mod.sub(r'\s+', ' ', m.group(0)).strip()
+        """便利轉接：實作改由 aa_tool.original_cache 提供（兩處共用同一份規則）。"""
+        return original_cache.compute_fingerprint(text)
 
     def save_original_for_file(self, file_path: str, original_text: str,
                                extracted: str = "",
                                translation: str = "") -> None:
-        """以「投稿標頭指紋」（日期 + 時間 + 作者 ID）作為唯一索引存入原文暫存。
+        """以「投稿標頭指紋」作為索引存入原文暫存。
 
-        指紋由伺服器產生，翻譯流程不會動到，跨檔名改名仍能命中。
-        若文字無法計算出指紋（罕見：純翻譯結果、舊格式投稿等）則略過寫入。
+        指紋由伺服器產生、翻譯流程不會動到，跨檔名仍能命中。實作委派給
+        `aa_tool.original_cache.save_entry`；本方法只負責把 GUI 端的上限設定
+        傳下去。`file_path` 目前未直接使用（保留簽名以維持其他呼叫端）。
         """
         if not file_path or not original_text:
             return
-        key = self._compute_author_fingerprint(original_text)
-        if not key:
-            return
-        # 讀回現有資料再合併（保留其他執行緒/進程已寫入的條目）
-        data = self._load_orig_cache_data()
-        entry: dict = {'text': original_text, 'ts': time.time()}
-        if extracted:
-            entry['extracted'] = extracted
-        if translation:
-            entry['translation'] = translation
-        data[key] = entry
-        # 上限裁切（依時間戳保留最新的 N 筆）
-        if len(data) > self._original_cache_limit:
-            ordered = sorted(data.items(),
-                             key=lambda kv: kv[1].get('ts', 0),
-                             reverse=True)
-            data = dict(ordered[:self._original_cache_limit])
-        self._save_orig_cache_data(data)
+        original_cache.save_entry(
+            self._base_dir(), original_text,
+            extracted=extracted, translation=translation,
+            limit=self._original_cache_limit)
 
     def _load_cache_entry_for_file(self, file_path: str) -> dict | None:
-        """以「投稿標頭指紋」查 cache。回傳完整 entry（含 text / extracted /
-        translation），找不到回傳 None。指紋從目標檔的 <pre> 內容計算。
-
-        相容性：舊版以檔名 basename 為 key、entry 內有 `author_key` 欄位作備援；
-        讀檔時若直接以指紋查不到，會掃過 values 比對 `author_key` 或重算指紋，
-        舊資料仍可被命中（migration-friendly）。
-        """
-        if not file_path:
-            return None
-        try:
-            pre = read_html_pre_content(file_path)
-        except OSError:
-            return None
-        if not pre:
-            return None
-        target_fp = self._compute_author_fingerprint(pre)
-        if not target_fp:
-            return None
-        data = self._load_orig_cache_data()
-        # 第一層：以指紋為 key 直接查（新版寫入路徑）
-        entry = data.get(target_fp)
-        if isinstance(entry, dict) and isinstance(entry.get('text'), str) and entry['text']:
-            return entry
-        # 第二層：掃過 values，比對舊版 `author_key` 欄位或從 text 重算指紋
-        # （讓舊 cache 仍能被命中）
-        for cached_entry in data.values():
-            if not isinstance(cached_entry, dict):
-                continue
-            if not isinstance(cached_entry.get('text'), str) or not cached_entry['text']:
-                continue
-            entry_fp = (cached_entry.get('author_key')
-                        or self._compute_author_fingerprint(cached_entry['text']))
-            if entry_fp == target_fp:
-                return cached_entry
-        return None
+        return original_cache.load_entry_for_html(self._base_dir(), file_path)
 
     def load_original_for_file(self, file_path: str) -> str | None:
-        entry = self._load_cache_entry_for_file(file_path)
-        return entry['text'] if entry else None
+        return original_cache.load_text_for_html(self._base_dir(), file_path)
 
     def _on_editor_bg_changed(self, color: str) -> None:
         self._editor_bg_color = color

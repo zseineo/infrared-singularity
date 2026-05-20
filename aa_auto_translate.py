@@ -23,8 +23,8 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Callable
 
-from aa_tool import constants, html_io, settings_manager, text_extraction
-from aa_tool import translation_engine, url_fetcher
+from aa_tool import constants, html_io, original_cache, settings_manager
+from aa_tool import text_extraction, translation_engine, url_fetcher
 from aa_tool.gemini_web import (
     GeminiAborted, GeminiModelMismatch, GeminiQuotaExceeded, GeminiWebError,
     GeminiWebSession,
@@ -419,6 +419,16 @@ def run_auto_translate(
                     source=source, page_title=page_title,
                     fallback_index=i)
                 html_io.write_html_file(out_path, result_text)
+                # 同步把原文（含 display_title 前綴）以「投稿指紋」存進
+                # aa_original_cache.json — 與手動流程一致，使 EditWindow
+                # 的「比對原文」模式能對得回 source。
+                try:
+                    original_cache.save_entry(
+                        base_dir, source,
+                        extracted=extracted, translation=translated,
+                        limit=cache.original_cache_limit)
+                except Exception as e:  # noqa: BLE001 — 暫存寫失敗不該中斷整批
+                    log(f"  ⚠️ 原文暫存寫入失敗（不影響存檔）：{e}")
                 result.done.append(out_path)
                 log(f"  ✅ 已存檔：{out_path}")
                 url = next_url

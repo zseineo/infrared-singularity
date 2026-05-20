@@ -19,5 +19,10 @@ DEFAULT_SYMBOL_REGEX = r"[ノツ人乂彡ミﾘﾊｿヽ、,\.亠厂イ从「二
 DEFAULT_BG_COLOR = "#ffffff"
 DEFAULT_FG_COLOR = "#000000"
 
+# 編輯器（editor / orig_view / preview_view）預設背景色。
+# 純白 (#ffffff) 在長時間閱讀下會「刺眼」，改用偏暖的米灰較舒適；
+# 使用者仍可透過編輯器工具列「底色」鈕自行覆寫。
+EDITOR_DEFAULT_BG = "#ebe9e2"
+
 # 對話框邊框字元（用於判斷是否需要 Auto-Padding）
 BORDER_CHARS = ['|', '│', '｜', '┃']

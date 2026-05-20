@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 from .constants import (
     DEFAULT_BASE_REGEX, DEFAULT_INVALID_REGEX, DEFAULT_SYMBOL_REGEX,
-    DEFAULT_BG_COLOR, DEFAULT_FG_COLOR,
+    DEFAULT_BG_COLOR, DEFAULT_FG_COLOR, EDITOR_DEFAULT_BG,
 )
 from .file_lock import locked_file
 
@@ -119,7 +119,10 @@ class AppCache:
     editor_font_size: int = 12
     editor_line_height: int = 120
     last_open_dir: str = ""
-    editor_bg_color: str = "#ffffff"
+    editor_bg_color: str = EDITOR_DEFAULT_BG
+    # 一次性遷移旗標：把舊版預設 "#ffffff" 換成 EDITOR_DEFAULT_BG 後就置 True，
+    # 之後若使用者透過「底色」鈕改回白色也不會再被反覆覆蓋。
+    editor_bg_migrated: bool = False
     work_history_limit: int = 10
     fetch_history_limit: int = 50
     original_cache_limit: int = 50
@@ -259,6 +262,9 @@ class SettingsManager:
         cache_file = self.get_cache_file()
         cache = AppCache()
         if not os.path.exists(cache_file):
+            # 全新安裝：直接用預設（已是 EDITOR_DEFAULT_BG），標記 migrated=True，
+            # 避免日後使用者手動改回 "#ffffff" 時被一次性遷移誤覆寫。
+            cache.editor_bg_migrated = True
             return cache
         try:
             with open(cache_file, 'r', encoding='utf-8') as f:
@@ -302,6 +308,15 @@ class SettingsManager:
             cache.last_open_dir = data.get('last_open_dir', '')
             cache.editor_bg_color = data.get(
                 'editor_bg_color', cache.editor_bg_color)
+            # 以「資料中有沒有 editor_bg_migrated key」判斷是不是首次升級後讀取；
+            # 是的話做一次性遷移把舊預設 "#ffffff" 換成 EDITOR_DEFAULT_BG。
+            already_seen = 'editor_bg_migrated' in data
+            cache.editor_bg_migrated = bool(
+                data.get('editor_bg_migrated', False))
+            if not already_seen:
+                if cache.editor_bg_color == "#ffffff":
+                    cache.editor_bg_color = EDITOR_DEFAULT_BG
+                cache.editor_bg_migrated = True
             try:
                 cache.work_history_limit = int(data.get(
                     'work_history_limit', cache.work_history_limit))
@@ -431,6 +446,7 @@ class SettingsManager:
                 'editor_line_height': cache.editor_line_height,
                 'last_open_dir': cache.last_open_dir,
                 'editor_bg_color': cache.editor_bg_color,
+                'editor_bg_migrated': cache.editor_bg_migrated,
                 'work_history_limit': cache.work_history_limit,
                 'fetch_history_limit': cache.fetch_history_limit,
                 'original_cache_limit': cache.original_cache_limit,

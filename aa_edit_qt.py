@@ -46,7 +46,7 @@ from aa_tool.translation_engine import (
 )
 
 LINE_HEIGHT_PERCENT = 120  # 對應 CSS line-height: 1.2，與瀏覽器顯示一致
-DEFAULT_BG = "#ffffff"
+from aa_tool.constants import EDITOR_DEFAULT_BG as DEFAULT_BG
 DEFAULT_COLOR = "#ff0000"
 DEFAULT_EDITOR_FONT = "MS PGothic"  # ⚠️ 請勿改動：AA 對齊計算依賴此字體的 metrics
 DEFAULT_EDITOR_FONT_SIZE = 12

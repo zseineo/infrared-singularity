@@ -35,6 +35,36 @@ class GeminiStuck(GeminiWebError):
     """Gemini 卡住超過 10 分鐘仍無回應；通常重開對話可解。"""
 
 
+class GeminiModelMismatch(GeminiWebError):
+    """偵測到目前模型與 ``required_model`` 不符；應立刻中止整批翻譯。"""
+
+
+def model_matches(detected: str, required: str) -> bool:
+    """判斷讀到的模型字串是否符合要求。
+
+    required 可選值：
+      - ``""`` / ``"any"`` → 不檢查，永遠視為符合
+      - ``"pro"``        → 字串含 ``pro`` 且不含 ``flash``
+      - ``"flash"``      → 字串含 ``flash`` 但不含 ``lite``
+      - ``"flash-lite"`` → 字串含 ``flash`` 且含 ``lite``
+
+    讀不到模型字串（``detected`` 為空）時回 True（不阻擋，但會在 Log 顯示警告）；
+    這是為了避免 Gemini 改版讀不到指示元素時把使用者整批鎖死。
+    """
+    if not required or required == "any":
+        return True
+    if not detected:
+        return True  # 讀不到不阻擋，由 Log 警告提示使用者
+    d = detected.lower()
+    if required == "pro":
+        return "pro" in d and "flash" not in d
+    if required == "flash-lite":
+        return "flash" in d and "lite" in d
+    if required == "flash":
+        return "flash" in d and "lite" not in d
+    return True  # 未知 required 值 → 不阻擋
+
+
 # ── DOM 選擇器（集中管理，Gemini 改版時改這裡）──
 # 每一項為「候選 selector 列表」，依序嘗試，取第一個命中的元素。
 DEFAULT_SELECTORS: dict[str, list[str]] = {
@@ -126,6 +156,7 @@ class GeminiWebSession:
         max_per_session: int = DEFAULT_MAX_PER_SESSION,
         selectors: dict | None = None,
         headless: bool = False,
+        required_model: str = "",
         log: Callable[[str], None] | None = None,
     ) -> None:
         if not gem_url:
@@ -133,6 +164,7 @@ class GeminiWebSession:
         self.gem_url = gem_url
         self.profile_dir = profile_dir
         self.max_per_session = max(1, int(max_per_session or DEFAULT_MAX_PER_SESSION))
+        self.required_model = (required_model or "").strip().lower()
         # 合併使用者覆寫：覆寫值為「完整候選列表」，整項取代預設。
         self.selectors = dict(DEFAULT_SELECTORS)
         for key, val in (selectors or {}).items():
@@ -252,17 +284,27 @@ class GeminiWebSession:
         self._session_index += 1
 
     def _log_current_model(self) -> None:
-        """讀取並 log 目前使用的模型；Gemini 改版後預設模型選項消失，這項顯示供使用者確認。"""
+        """讀取目前使用的模型；若 ``required_model`` 已設定且不符，丟 GeminiModelMismatch。
+
+        讀不到模型字串時不阻擋（Gemini 改版後讀不到才不至於把使用者整批鎖死），
+        改以警告 Log 提示。
+        """
         try:
             self._page.wait_for_timeout(400)
         except Exception:
             pass
         model = self._read_current_model()
-        if model:
-            note = "" if "pro" in model.lower() else "  ⚠️ 未偵測到 Pro 字樣，請確認"
-            self._log(f"目前使用模型：{model}{note}")
+        req = self.required_model
+        if not model:
+            self._log("⚠️ 無法讀取模型名稱（Gemini 可能改版），請在瀏覽器自行確認")
+            return
+        if model_matches(model, req):
+            tag = f"（符合需求：{req}）" if req and req != "any" else ""
+            self._log(f"目前使用模型：{model}{tag}")
         else:
-            self._log("⚠️ 無法讀取模型名稱（Gemini 可能改版），請在瀏覽器確認是否為 Pro")
+            self._log(f"🛑 目前模型「{model}」與要求「{req}」不符 — 即將中止整批翻譯")
+            raise GeminiModelMismatch(
+                f"目前模型「{model}」不符需求「{req}」")
 
     def _read_current_model(self) -> str:
         """讀取頁面上顯示的目前模型名稱（例如 '2.5 Pro'）。讀不到回空字串。"""

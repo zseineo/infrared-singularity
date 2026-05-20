@@ -1318,6 +1318,16 @@ def get_chapter_display(text_first_lines: str) -> tuple[str, str] | None:
         n = f"{a}-{b}"
         return (n, f"第{n}話その{b}")
 
+    # 第N話 前編／後編 — 兩部分篇（如「第32話 後編」→ 32-2、「第7話 前編」→ 7-1）。
+    # 同行內「第N話」之後出現「前編」或「後編」即視為分篇，前=1、後=2。
+    match = re.search(
+        r'第\s*([０-９\d]+)\s*話[^\n]*?(前|後)編', text_first_lines)
+    if match:
+        a = str(int(match.group(1).translate(_trans_fw)))
+        b = '1' if match.group(2) == '前' else '2'
+        n = f"{a}-{b}"
+        return (n, f"第{n}話{match.group(2)}編")
+
     # 第N話 — 阿拉伯數字
     match = re.search(r'第\s*(\d+)\s*話', text_first_lines)
     if match:

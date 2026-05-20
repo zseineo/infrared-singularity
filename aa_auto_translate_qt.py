@@ -15,9 +15,19 @@ import os
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QCheckBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPlainTextEdit, QPushButton, QSpinBox, QSplitter, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+    QLineEdit, QPlainTextEdit, QPushButton, QSpinBox, QSplitter, QVBoxLayout,
+    QWidget,
 )
+
+
+# (顯示文字, 內部值)；內部值需與 aa_tool.gemini_web.model_matches 一致。
+_MODEL_OPTIONS: list[tuple[str, str]] = [
+    ("Pro", "pro"),
+    ("Flash", "flash"),
+    ("Flash-Lite", "flash-lite"),
+    ("不檢查（任何模型都接受）", "any"),
+]
 
 
 def _font(size: int = 12, bold: bool = False) -> QFont:
@@ -92,6 +102,14 @@ class AutoTranslatePanel(QWidget):
         self.gem_edit.setPlaceholderText("https://gemini.google.com/gem/...")
         form.addRow("Gemini Gem 網址：", self.gem_edit)
 
+        self.model_combo = QComboBox()
+        for label, value in _MODEL_OPTIONS:
+            self.model_combo.addItem(label, value)
+        self.model_combo.setToolTip(
+            "若偵測到 Gemini 目前使用的模型與此不符，整批自動中止。\n"
+            "讀不到模型字串時不會阻擋（會在 Log 顯示警告，請自行於瀏覽器確認）。")
+        form.addRow("要求模型：", self.model_combo)
+
         self.max_session_spin = QSpinBox()
         self.max_session_spin.setRange(1, 99)
         self.max_session_spin.setSuffix(" 次")
@@ -161,6 +179,10 @@ class AutoTranslatePanel(QWidget):
             getattr(m, "_auto_translate_until_last", False)))
         self.count_spin.setEnabled(not self.until_last.isChecked())
         self.gem_edit.setText(getattr(m, "_gemini_gem_url", "") or "")
+        required = (getattr(m, "_gemini_required_model", "pro") or "pro").lower()
+        idx = next((i for i, (_, v) in enumerate(_MODEL_OPTIONS) if v == required),
+                   0)
+        self.model_combo.setCurrentIndex(idx)
         self.max_session_spin.setValue(int(
             getattr(m, "_gemini_max_per_session", 3) or 3))
         self.out_edit.setText(getattr(m, "_auto_translate_out_dir", "")
@@ -189,6 +211,7 @@ class AutoTranslatePanel(QWidget):
             "count": self.count_spin.value(),
             "until_last": self.until_last.isChecked(),
             "gem_url": gem,
+            "required_model": self.model_combo.currentData(),
             "max_per_session": self.max_session_spin.value(),
             "out_dir": out_dir,
         }
@@ -226,7 +249,8 @@ class AutoTranslatePanel(QWidget):
         self.btn_stop.setEnabled(running)
         # 執行中鎖住設定欄位，避免使用者中途改值造成混亂
         for w in (self.url_edit, self.count_spin, self.until_last,
-                  self.gem_edit, self.max_session_spin, self.out_edit):
+                  self.gem_edit, self.model_combo, self.max_session_spin,
+                  self.out_edit):
             w.setEnabled(not running)
         # until_last 勾選時保持 count 灰
         if not running:

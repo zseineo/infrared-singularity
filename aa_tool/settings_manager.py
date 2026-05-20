@@ -164,6 +164,9 @@ class AppCache:
     auto_translate_out_dir: str = ""
     auto_translate_count: int = 5
     auto_translate_until_last: bool = False
+    # 要求的 Gemini 模型：pro / flash / flash-lite / any。
+    # 翻譯中若偵測到模型與此不符，整批自動中止（讀不到模型字串時不阻擋，會在 Log 警告）。
+    gemini_required_model: str = "pro"
 
 
 class SettingsManager:
@@ -364,6 +367,8 @@ class SettingsManager:
                 pass
             cache.auto_translate_until_last = bool(data.get(
                 'auto_translate_until_last', cache.auto_translate_until_last))
+            cache.gemini_required_model = str(data.get(
+                'gemini_required_model', cache.gemini_required_model) or "pro")
             try:
                 v = int(data.get('pad_space_count', cache.pad_space_count))
                 if v in (1, 2, 3):
@@ -450,6 +455,7 @@ class SettingsManager:
                 'auto_translate_out_dir': cache.auto_translate_out_dir,
                 'auto_translate_count': cache.auto_translate_count,
                 'auto_translate_until_last': cache.auto_translate_until_last,
+                'gemini_required_model': cache.gemini_required_model,
             }
             self._atomic_write_json(cache_file, data)
 

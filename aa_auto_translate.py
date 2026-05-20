@@ -25,7 +25,9 @@ from typing import Callable
 
 from aa_tool import constants, html_io, settings_manager, text_extraction
 from aa_tool import translation_engine, url_fetcher
-from aa_tool.gemini_web import GeminiQuotaExceeded, GeminiWebError, GeminiWebSession
+from aa_tool.gemini_web import (
+    GeminiModelMismatch, GeminiQuotaExceeded, GeminiWebError, GeminiWebSession,
+)
 
 # 單次送給 Gemini 的最大提取行數；超過則分段送出後合併。
 # 800 是經驗值：實務上短於這個長度都不需分段；切點固定在「整行」邊界，
@@ -109,6 +111,7 @@ class AutoResult:
     remaining: int = 0                              # 尚未處理的話數
     stopped: bool = False                           # 是否被使用者手動停止
     reached_end: bool = False                       # 是否因為沒有下一話而結束
+    model_mismatch: bool = False                    # 是否因模型與要求不符而中止
 
 
 # ── URL 快取（沿用 aa_main_qt 的 %TEMP%/aa_url_cache/<md5>.html 格式）──
@@ -265,6 +268,7 @@ def run_auto_translate(
     profile_dir: str | None = None,
     headless: bool = False,
     max_per_session: int | None = None,
+    required_model: str = "",
     until_last: bool = False,
     stop_event=None,
     progress: Callable[[str], None] | None = None,
@@ -303,11 +307,17 @@ def run_auto_translate(
                          if max_per_session is not None
                          else cache.gemini_max_per_session),
         selectors=cache.gemini_selectors or None,
+        required_model=required_model or cache.gemini_required_model,
         headless=headless, log=log)
 
     try:
         log("開啟瀏覽器並登入 Gemini…")
-        session.open()
+        try:
+            session.open()
+        except GeminiModelMismatch as e:
+            result.model_mismatch = True
+            log(f"🛑 啟動時模型不符（{e}），未開始翻譯。")
+            return result
         for i in range(1, total + 1):
             if _stopping():
                 result.stopped = True
@@ -351,6 +361,11 @@ def run_auto_translate(
                 result.done.append(out_path)
                 log(f"  ✅ 已存檔：{out_path}")
                 url = next_url
+            except GeminiModelMismatch as e:
+                result.model_mismatch = True
+                result.pending_url = url
+                log(f"🛑 模型不符（{e}），中止整批。")
+                break
             except CensoredResponse as e:
                 result.failed.append((url, f"可能被審查：{e}"))
                 log(f"  🚫 {e} → 跳過此話，繼續下一話。")
@@ -399,6 +414,8 @@ def _print_summary(result: AutoResult, log: Callable[[str], None]) -> None:
             log(f"   要接續，可用此網址當 --url：{result.pending_url}")
     if result.reached_end:
         log("🏁 已翻到最後一話。")
+    if result.model_mismatch:
+        log("🛑 因模型與要求不符而中止整批。請在 Gemini 切換到正確模型後重跑。")
 
 
 # ── CLI ──
@@ -418,6 +435,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Playwright 瀏覽器 profile 目錄")
     parser.add_argument("--max-per-session", type=int, default=None,
                         help="同一對話最多送幾次後開新對話（覆寫設定）")
+    parser.add_argument("--required-model", default="",
+                        help="要求的模型（pro／flash／flash-lite／any，預設讀設定）")
     parser.add_argument("--headless", action="store_true",
                         help="無頭模式（首次登入請勿用，需看得到視窗手動登入）")
     args = parser.parse_args(argv)
@@ -427,7 +446,8 @@ def main(argv: list[str] | None = None) -> int:
             args.url, args.count, args.out,
             gem_url=args.gem_url, profile_dir=args.profile_dir,
             headless=args.headless, until_last=args.until_last,
-            max_per_session=args.max_per_session)
+            max_per_session=args.max_per_session,
+            required_model=args.required_model)
     except (ValueError, GeminiWebError) as e:
         print(f"❌ {e}", file=sys.stderr)
         return 1

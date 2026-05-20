@@ -63,7 +63,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.26"
+APP_VERSION = "1.27"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -692,6 +692,7 @@ class MainWindow(QMainWindow):
         self._gemini_gem_url: str = ""
         self._gemini_profile_dir: str = ""
         self._gemini_max_per_session: int = 3
+        self._gemini_required_model: str = "pro"
         self._gemini_selectors: dict = {}
         self._auto_translate_out_dir: str = ""
         self._auto_translate_count: int = 5
@@ -1555,16 +1556,18 @@ class MainWindow(QMainWindow):
         self._auto_translate_count = params["count"]
         self._auto_translate_until_last = params["until_last"]
         self._gemini_max_per_session = params["max_per_session"]
+        self._gemini_required_model = params["required_model"] or "pro"
         self.save_cache()
         self._start_auto_translate(
             params["start_url"], params["count"], params["out_dir"],
             params["gem_url"], params["until_last"],
-            params["max_per_session"])
+            params["max_per_session"], params["required_model"])
 
     def _start_auto_translate(self, start_url: str, count: int,
                                out_dir: str, gem_url: str,
                                until_last: bool,
-                               max_per_session: int) -> None:
+                               max_per_session: int,
+                               required_model: str = "") -> None:
         """在背景執行緒跑自動翻譯，進度同步至橫幅、狀態列與面板 Log。"""
         self._auto_translate_running = True
         self._auto_stop_event = threading.Event()
@@ -1603,6 +1606,7 @@ class MainWindow(QMainWindow):
                     gem_url=gem_url,
                     profile_dir=self._gemini_profile_dir or None,
                     max_per_session=max_per_session,
+                    required_model=required_model,
                     until_last=until_last,
                     stop_event=stop_event,
                     progress=_progress)
@@ -1657,9 +1661,16 @@ class MainWindow(QMainWindow):
             if result.pending_url:
                 lines.append("要接續，用下列網址當起始網址：")
                 lines.append(result.pending_url)
+        if result.model_mismatch:
+            lines.append("")
+            lines.append("🛑 偵測到 Gemini 模型與要求不符，已中止整批。")
+            lines.append("請在瀏覽器切換到正確模型後重跑。")
         ok = (not result.failed and not result.quota_paused
-              and not result.stopped)
-        if result.stopped:
+              and not result.stopped and not result.model_mismatch)
+        if result.model_mismatch:
+            color = "#dc3545"
+            head = "🛑 模型不符已中止"
+        elif result.stopped:
             color = "#6c757d"
             head = "⏹️ 已停止"
         elif ok:
@@ -2021,6 +2032,7 @@ class MainWindow(QMainWindow):
             gemini_gem_url=self._gemini_gem_url,
             gemini_profile_dir=self._gemini_profile_dir,
             gemini_max_per_session=self._gemini_max_per_session,
+            gemini_required_model=self._gemini_required_model,
             gemini_selectors=self._gemini_selectors,
             auto_translate_out_dir=self._auto_translate_out_dir,
             auto_translate_count=self._auto_translate_count,
@@ -2089,6 +2101,8 @@ class MainWindow(QMainWindow):
         self._gemini_profile_dir = str(cache.gemini_profile_dir or "")
         self._gemini_max_per_session = max(1, int(
             cache.gemini_max_per_session or 3))
+        self._gemini_required_model = (
+            str(cache.gemini_required_model or "pro").lower() or "pro")
         self._gemini_selectors = dict(cache.gemini_selectors or {})
         self._auto_translate_out_dir = str(cache.auto_translate_out_dir or "")
         try:

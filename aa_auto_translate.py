@@ -26,7 +26,8 @@ from typing import Callable
 from aa_tool import constants, html_io, settings_manager, text_extraction
 from aa_tool import translation_engine, url_fetcher
 from aa_tool.gemini_web import (
-    GeminiModelMismatch, GeminiQuotaExceeded, GeminiWebError, GeminiWebSession,
+    GeminiAborted, GeminiModelMismatch, GeminiQuotaExceeded, GeminiWebError,
+    GeminiWebSession,
 )
 
 # 單次送給 Gemini 的最大提取行數；超過則分段送出後合併。
@@ -233,12 +234,58 @@ def _translate(session: GeminiWebSession, extracted: str,
     return "\n".join(parts)
 
 
-def _safe_filename(page_title: str, index: int) -> str:
-    """由頁面標題產生安全檔名，前綴序號以維持話數順序。"""
-    title = (page_title or "").strip() or f"chapter_{index}"
-    title = re.sub(r'[\\/:*?"<>|]', "_", title)
-    title = title[:80].strip() or f"chapter_{index}"
-    return f"{index:03d}_{title}.html"
+_INVALID_FN_CHARS = re.compile(r'[\\/:*?"<>|]')
+
+
+def _sanitize(text: str) -> str:
+    return _INVALID_FN_CHARS.sub("_", (text or "").strip())[:80].strip()
+
+
+def _unique_path(out_dir: str, name_base: str) -> str:
+    """同名衝突時加序號（``name_base``→``name_base_2``→``name_base_3``…）後回傳完整路徑。"""
+    path = os.path.join(out_dir, f"{name_base}.html")
+    if not os.path.exists(path):
+        return path
+    i = 2
+    while True:
+        candidate = os.path.join(out_dir, f"{name_base}_{i}.html")
+        if not os.path.exists(candidate):
+            return candidate
+        i += 1
+
+
+def compute_chapter_filename(
+    out_dir: str,
+    *,
+    doc_title: str,
+    fetch_auto_fill_title: bool,
+    source: str,
+    page_title: str,
+    fallback_index: int,
+) -> str:
+    """每話檔名計算，與主畫面 ``_prepare_translation`` 的命名規則一致。
+
+    - ``fetch_auto_fill_title=True``（自動填入模式）：title 由 ``extract_work_title``
+      從每話的 ``page_title`` 萃取；話數欄位被視為空，檔名只用 title。
+    - ``fetch_auto_fill_title=False``（手動模式）：title 用使用者填的 ``doc_title``；
+      話數由 ``check_chapter_number`` 從每話原文偵測（找不到時不附加），檔名為
+      ``{title}_{num}.html`` 或 ``{title}.html``。
+
+    同名衝突一律加序號 ``_2``、``_3`` 等。
+    """
+    if fetch_auto_fill_title:
+        auto_title = (text_extraction.extract_work_title(page_title)
+                      if page_title else "")
+        title = auto_title or page_title or f"chapter_{fallback_index}"
+        num = ""
+    else:
+        title = (doc_title or "").strip() or "未命名"
+        detected = text_extraction.check_chapter_number((source or "")[:200])
+        num = str(detected) if detected is not None else ""
+    safe_title = _sanitize(title) or f"chapter_{fallback_index}"
+    safe_num = _sanitize(num)
+    name_base = f"{safe_title}_{safe_num}" if safe_num else safe_title
+    return _unique_path(out_dir, name_base)
 
 
 def _next_chapter_url(nav_links: list) -> str:
@@ -269,6 +316,8 @@ def run_auto_translate(
     headless: bool = False,
     max_per_session: int | None = None,
     required_model: str = "",
+    doc_title: str = "",
+    fetch_auto_fill_title: bool | None = None,
     until_last: bool = False,
     stop_event=None,
     progress: Callable[[str], None] | None = None,
@@ -291,6 +340,8 @@ def run_auto_translate(
         raise ValueError("未設定 Gem 網址（gemini_gem_url）")
     profile_dir = (profile_dir or cache.gemini_profile_dir
                    or os.path.join(tempfile.gettempdir(), "aa_gemini_profile"))
+    if fetch_auto_fill_title is None:
+        fetch_auto_fill_title = cache.fetch_auto_fill_title
     os.makedirs(out_dir, exist_ok=True)
 
     total = _UNTIL_LAST_CAP if until_last else max(1, count)
@@ -308,6 +359,7 @@ def run_auto_translate(
                          else cache.gemini_max_per_session),
         selectors=cache.gemini_selectors or None,
         required_model=required_model or cache.gemini_required_model,
+        stop_event=stop_event,
         headless=headless, log=log)
 
     try:
@@ -316,7 +368,11 @@ def run_auto_translate(
             session.open()
         except GeminiModelMismatch as e:
             result.model_mismatch = True
-            log(f"🛑 啟動時模型不符（{e}），未開始翻譯。")
+            log(f"🛑 啟動時模型不符且等待逾時（{e}），未開始翻譯。")
+            return result
+        except GeminiAborted as e:
+            result.stopped = True
+            log(f"⏹️ {e}，未開始翻譯。")
             return result
         for i in range(1, total + 1):
             if _stopping():
@@ -356,7 +412,12 @@ def run_auto_translate(
                     pad_right_aa=cfg.pad_right_aa,
                     symbol_regex_str=cfg.symbol_regex,
                     glossary_avoid_aa=cfg.glossary_avoid_aa)
-                out_path = os.path.join(out_dir, _safe_filename(page_title, i))
+                out_path = compute_chapter_filename(
+                    out_dir,
+                    doc_title=doc_title,
+                    fetch_auto_fill_title=fetch_auto_fill_title,
+                    source=source, page_title=page_title,
+                    fallback_index=i)
                 html_io.write_html_file(out_path, result_text)
                 result.done.append(out_path)
                 log(f"  ✅ 已存檔：{out_path}")
@@ -364,7 +425,12 @@ def run_auto_translate(
             except GeminiModelMismatch as e:
                 result.model_mismatch = True
                 result.pending_url = url
-                log(f"🛑 模型不符（{e}），中止整批。")
+                log(f"🛑 模型不符且等待逾時（{e}），中止整批。")
+                break
+            except GeminiAborted as e:
+                result.stopped = True
+                result.pending_url = url
+                log(f"⏹️ {e}，中止整批。")
                 break
             except CensoredResponse as e:
                 result.failed.append((url, f"可能被審查：{e}"))
@@ -437,6 +503,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="同一對話最多送幾次後開新對話（覆寫設定）")
     parser.add_argument("--required-model", default="",
                         help="要求的模型（pro／flash／flash-lite／any，預設讀設定）")
+    parser.add_argument("--doc-title", default="",
+                        help="作品名稱（手動模式檔名前綴）；預設 '未命名'")
+    parser.add_argument("--auto-fill-title", action="store_true",
+                        help="檔名從每話 page_title 自動萃取（覆寫 fetch_auto_fill_title 設定）")
     parser.add_argument("--headless", action="store_true",
                         help="無頭模式（首次登入請勿用，需看得到視窗手動登入）")
     args = parser.parse_args(argv)
@@ -447,7 +517,9 @@ def main(argv: list[str] | None = None) -> int:
             gem_url=args.gem_url, profile_dir=args.profile_dir,
             headless=args.headless, until_last=args.until_last,
             max_per_session=args.max_per_session,
-            required_model=args.required_model)
+            required_model=args.required_model,
+            doc_title=args.doc_title,
+            fetch_auto_fill_title=(True if args.auto_fill_title else None))
     except (ValueError, GeminiWebError) as e:
         print(f"❌ {e}", file=sys.stderr)
         return 1

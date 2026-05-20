@@ -36,7 +36,11 @@ class GeminiStuck(GeminiWebError):
 
 
 class GeminiModelMismatch(GeminiWebError):
-    """偵測到目前模型與 ``required_model`` 不符；應立刻中止整批翻譯。"""
+    """偵測到目前模型與 ``required_model`` 不符，且等待重選逾時。"""
+
+
+class GeminiAborted(GeminiWebError):
+    """等待過程中收到外部 stop_event，使用者主動中止。"""
 
 
 def model_matches(detected: str, required: str) -> bool:
@@ -135,6 +139,11 @@ _STABLE_CHECKS = 3
 _GEN_TIMEOUT = 600          # 單次生成最長等待秒數
 _GEN_START_TIMEOUT = 25     # 送出後等待「開始生成」的最長秒數
 
+# 模型不符時，暫停等使用者在瀏覽器手動切換模型的最長秒數。
+_MODEL_WAIT_TIMEOUT = 300   # 5 分鐘
+_MODEL_WAIT_POLL = 3        # 每 3 秒重讀一次模型字串
+_MODEL_REMIND_EVERY = 30    # 每 30 秒於 Log 提醒一次「請切換模型」
+
 
 class GeminiWebSession:
     """管理一個持久化瀏覽器，操控 Gemini Gem 進行翻譯。
@@ -157,6 +166,7 @@ class GeminiWebSession:
         selectors: dict | None = None,
         headless: bool = False,
         required_model: str = "",
+        stop_event=None,
         log: Callable[[str], None] | None = None,
     ) -> None:
         if not gem_url:
@@ -165,6 +175,7 @@ class GeminiWebSession:
         self.profile_dir = profile_dir
         self.max_per_session = max(1, int(max_per_session or DEFAULT_MAX_PER_SESSION))
         self.required_model = (required_model or "").strip().lower()
+        self.stop_event = stop_event  # 由協調器傳入，模型等待時用來中止
         # 合併使用者覆寫：覆寫值為「完整候選列表」，整項取代預設。
         self.selectors = dict(DEFAULT_SELECTORS)
         for key, val in (selectors or {}).items():
@@ -284,7 +295,9 @@ class GeminiWebSession:
         self._session_index += 1
 
     def _log_current_model(self) -> None:
-        """讀取目前使用的模型；若 ``required_model`` 已設定且不符，丟 GeminiModelMismatch。
+        """讀取目前使用的模型；若不符 ``required_model``，暫停等使用者在瀏覽器
+        手動切換最多 ``_MODEL_WAIT_TIMEOUT`` 秒；逾時丟 GeminiModelMismatch，
+        途中 stop_event 被設則丟 GeminiAborted。
 
         讀不到模型字串時不阻擋（Gemini 改版後讀不到才不至於把使用者整批鎖死），
         改以警告 Log 提示。
@@ -301,10 +314,38 @@ class GeminiWebSession:
         if model_matches(model, req):
             tag = f"（符合需求：{req}）" if req and req != "any" else ""
             self._log(f"目前使用模型：{model}{tag}")
-        else:
-            self._log(f"🛑 目前模型「{model}」與要求「{req}」不符 — 即將中止整批翻譯")
-            raise GeminiModelMismatch(
-                f"目前模型「{model}」不符需求「{req}」")
+            return
+        # 不符 → 暫停等使用者重選
+        self._wait_for_correct_model(model, req)
+
+    def _wait_for_correct_model(self, initial: str, req: str) -> None:
+        """暫停等使用者在瀏覽器把模型切換成 ``req``；逾時或被外部中止才丟例外。"""
+        self._log(
+            f"⏸️ 目前模型「{initial}」與要求「{req}」不符 — "
+            f"請在瀏覽器切換到正確模型，最多等 {_MODEL_WAIT_TIMEOUT // 60} 分鐘")
+        deadline = time.time() + _MODEL_WAIT_TIMEOUT
+        last_remind = time.time()
+        last_seen = initial
+        while time.time() < deadline:
+            if self.stop_event is not None and self.stop_event.is_set():
+                raise GeminiAborted("使用者於模型等待期間中止")
+            time.sleep(_MODEL_WAIT_POLL)
+            cur = self._read_current_model()
+            if cur and model_matches(cur, req):
+                self._log(f"✅ 模型已切換為「{cur}」，繼續翻譯")
+                return
+            if cur and cur != last_seen:
+                self._log(f"  仍未符合要求（目前：{cur}）")
+                last_seen = cur
+            if time.time() - last_remind >= _MODEL_REMIND_EVERY:
+                remaining = int(deadline - time.time())
+                self._log(
+                    f"  ⏳ 還在等待切換到「{req}」… 剩餘 {remaining} 秒")
+                last_remind = time.time()
+        final = self._read_current_model() or initial
+        raise GeminiModelMismatch(
+            f"等待 {_MODEL_WAIT_TIMEOUT} 秒後模型仍為「{final}」，"
+            f"不符需求「{req}」")
 
     def _read_current_model(self) -> str:
         """讀取頁面上顯示的目前模型名稱（例如 '2.5 Pro'）。讀不到回空字串。"""

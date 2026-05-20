@@ -63,7 +63,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.27"
+APP_VERSION = "1.28"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -1557,17 +1557,25 @@ class MainWindow(QMainWindow):
         self._auto_translate_until_last = params["until_last"]
         self._gemini_max_per_session = params["max_per_session"]
         self._gemini_required_model = params["required_model"] or "pro"
+        # 手動模式下也把使用者填的作品名稱同步回首頁（保持兩邊一致）
+        try:
+            if not self._fetch_auto_fill_title and params.get("doc_title"):
+                self._translate_panel.doc_title.setText(params["doc_title"])
+        except Exception:
+            pass
         self.save_cache()
         self._start_auto_translate(
             params["start_url"], params["count"], params["out_dir"],
             params["gem_url"], params["until_last"],
-            params["max_per_session"], params["required_model"])
+            params["max_per_session"], params["required_model"],
+            params.get("doc_title", ""))
 
     def _start_auto_translate(self, start_url: str, count: int,
                                out_dir: str, gem_url: str,
                                until_last: bool,
                                max_per_session: int,
-                               required_model: str = "") -> None:
+                               required_model: str = "",
+                               doc_title: str = "") -> None:
         """在背景執行緒跑自動翻譯，進度同步至橫幅、狀態列與面板 Log。"""
         self._auto_translate_running = True
         self._auto_stop_event = threading.Event()
@@ -1607,6 +1615,8 @@ class MainWindow(QMainWindow):
                     profile_dir=self._gemini_profile_dir or None,
                     max_per_session=max_per_session,
                     required_model=required_model,
+                    doc_title=doc_title,
+                    fetch_auto_fill_title=self._fetch_auto_fill_title,
                     until_last=until_last,
                     stop_event=stop_event,
                     progress=_progress)

@@ -118,6 +118,22 @@ class AutoTranslatePanel(QWidget):
             "目的：避免單一對話累積太多上下文使翻譯品質下降。")
         form.addRow("每 N 次送出後換新對話：", self.max_session_spin)
 
+        self.doc_title_edit = QLineEdit()
+        self.doc_title_edit.setPlaceholderText("（手動模式必填，作為檔名前綴）")
+        self.doc_title_edit.textChanged.connect(self._update_filename_preview)
+        form.addRow("作品名稱：", self.doc_title_edit)
+
+        self.filename_preview = QLineEdit()
+        self.filename_preview.setReadOnly(True)
+        self.filename_preview.setStyleSheet(
+            "QLineEdit { background:#f1f3f5; color:#495057; }")
+        self.filename_preview.setToolTip(
+            "依目前設定計算出來的檔名範例。\n"
+            "・「自動填入作品名稱」設定開啟時 → 每話檔名自動取自頁面標題\n"
+            "・關閉時 → {作品名稱}_{偵測到的話數}.html\n"
+            "・同名衝突時自動加 _2、_3 等序號")
+        form.addRow("檔名預覽：", self.filename_preview)
+
         out_row = QWidget()
         out_hl = QHBoxLayout(out_row)
         out_hl.setContentsMargins(0, 0, 0, 0)
@@ -187,6 +203,21 @@ class AutoTranslatePanel(QWidget):
             getattr(m, "_gemini_max_per_session", 3) or 3))
         self.out_edit.setText(getattr(m, "_auto_translate_out_dir", "")
                               or getattr(m, "_last_dir", "") or "")
+        # 作品名稱：與首頁同步——優先用首頁 doc_title，沒有就空
+        try:
+            home_title = m._translate_panel.get_doc_title().strip()
+        except Exception:
+            home_title = ""
+        self.doc_title_edit.setText(home_title)
+        # 「自動填入作品名稱」設定為 ON 時，鎖住手動填寫並改顯示自動模式提示
+        auto_fill = bool(getattr(m, "_fetch_auto_fill_title", False))
+        self.doc_title_edit.setEnabled(not auto_fill)
+        if auto_fill:
+            self.doc_title_edit.setPlaceholderText(
+                "（已開啟「自動填入作品名稱」設定 — 由每話 page_title 自動萃取，本欄忽略）")
+        else:
+            self.doc_title_edit.setPlaceholderText("（手動模式必填，作為檔名前綴）")
+        self._update_filename_preview()
 
     def refresh_from_main(self) -> None:
         """從主視窗目前狀態重整欄位（每次 show_auto_translate_panel 都呼叫）。"""
@@ -213,8 +244,21 @@ class AutoTranslatePanel(QWidget):
             "gem_url": gem,
             "required_model": self.model_combo.currentData(),
             "max_per_session": self.max_session_spin.value(),
+            "doc_title": self.doc_title_edit.text().strip(),
             "out_dir": out_dir,
         }
+
+    def _update_filename_preview(self) -> None:
+        """依目前設定計算一個檔名範例顯示在預覽欄。"""
+        auto_fill = bool(getattr(self._main, "_fetch_auto_fill_title", False))
+        if auto_fill:
+            self.filename_preview.setText("<每話自動取自 page_title>.html")
+            return
+        title = self.doc_title_edit.text().strip() or "未命名"
+        # 安全字元清洗示意
+        import re as _re
+        safe = _re.sub(r'[\\/:*?"<>|]', "_", title)[:80].strip() or "未命名"
+        self.filename_preview.setText(f"{safe}_<話數>.html  （同名時自動加 _2／_3…）")
 
     # ── Slots ──
 
@@ -250,7 +294,7 @@ class AutoTranslatePanel(QWidget):
         # 執行中鎖住設定欄位，避免使用者中途改值造成混亂
         for w in (self.url_edit, self.count_spin, self.until_last,
                   self.gem_edit, self.model_combo, self.max_session_spin,
-                  self.out_edit):
+                  self.doc_title_edit, self.out_edit):
             w.setEnabled(not running)
         # until_last 勾選時保持 count 灰
         if not running:

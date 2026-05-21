@@ -14,7 +14,7 @@ import os
 import threading
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
     QLineEdit, QPlainTextEdit, QPushButton, QSpinBox, QSplitter,
@@ -70,6 +70,18 @@ class AutoTranslatePanel(QWidget):
         self._running = False
         self._build_ui()
         self._load_from_main()
+        # ESC：連線設定分頁→退回主分頁；主分頁→返回首頁。
+        # 用 WidgetWithChildren context，子欄位（QLineEdit / QPlainTextEdit）
+        # 有焦點時 ESC 也能觸發。
+        esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        esc.activated.connect(self._on_escape)
+
+    def _on_escape(self) -> None:
+        if self._pages.currentIndex() == 1:
+            self._pages.setCurrentIndex(0)
+        else:
+            self._main.show_translate_panel()
 
     # ── UI ──
 

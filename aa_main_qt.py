@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.37"
+APP_VERSION = "1.38"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -2196,7 +2196,8 @@ class MainWindow(QMainWindow):
             glossary_avoid_aa=self._glossary_avoid_aa,
             glossary_translation_only=self._glossary_translation_only,
             fetch_auto_fill_title=self._fetch_auto_fill_title,
-            orig_cache_path=self._orig_cache_path(),
+            orig_cache_path=os.path.join(
+                self._base_dir(), original_cache.CACHE_FILENAME),
             on_apply=self._on_settings_applied,
             on_clear_url_history=self._on_clear_url_history_from_settings,
         )

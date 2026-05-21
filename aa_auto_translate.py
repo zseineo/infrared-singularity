@@ -292,6 +292,57 @@ def compute_chapter_filename(
     return _unique_path(out_dir, name_base)
 
 
+def preview_first_filename(
+    out_dir: str,
+    url: str,
+    *,
+    base_dir: str | None = None,
+    doc_title: str = "",
+    fetch_auto_fill_title: bool | None = None,
+    allow_network: bool = True,
+) -> str | None:
+    """試算 ``url`` 這一話實際會寫入的檔名（含碰撞序號），不翻譯、不寫檔。
+
+    供面板「檔名預覽」即時顯示真正會落地的檔名用。
+    - `allow_network=False`：只吃本地 URL 快取，沒命中回 None（不卡網路，
+      適合面板開啟時的即時預覽）。
+    - fetch/parse 失敗或內文為空一律回 None（預覽不該丟例外）。
+    """
+    if not url:
+        return None
+    base_dir = base_dir or os.path.dirname(os.path.abspath(__file__))
+    cfg = load_config(base_dir)
+    if fetch_auto_fill_title is None:
+        fetch_auto_fill_title = settings_manager.SettingsManager(
+            base_dir).load_cache().fetch_auto_fill_title
+    page_html = _read_url_cache(url)
+    if page_html is None:
+        if not allow_network:
+            return None
+        try:
+            page_html = url_fetcher.fetch_url(url)
+        except Exception:
+            return None
+        _write_url_cache(url, page_html)
+    try:
+        text_content, _nav, page_title = url_fetcher.parse_page_html(
+            page_html, url,
+            author_name=cfg.author_name, author_only=cfg.author_only)
+    except Exception:
+        return None
+    if not text_content or not text_content.strip():
+        return None
+    display_title = (text_extraction.extract_work_title(page_title)
+                     if page_title else "")
+    source = (display_title + "\n\n" + text_content
+              if display_title else text_content)
+    path = compute_chapter_filename(
+        out_dir or ".", doc_title=doc_title,
+        fetch_auto_fill_title=fetch_auto_fill_title,
+        source=source, page_title=page_title, fallback_index=1)
+    return os.path.basename(path)
+
+
 def _next_chapter_url(nav_links: list) -> str:
     """從關聯連結找「下一話」的 URL（邏輯同 aa_main_qt._fetch_adjacent_chapter）。"""
     if not nav_links:

@@ -217,6 +217,14 @@ _SPACED_OUT_RE = re.compile(
     r'(?:[ぁ-ゟ゠-ヿ一-鿿]　{1,2}){3,}[ぁ-ゟ゠-ヿ一-鿿]'
     r'(?:[　 ]*[！？。!?]+)?')
 
+# 全形片假名整句（角色全程以片假名講話的特殊情況，如「ホウシシュゾク　ハ　イシガ
+# 　ナイカギリ」）：≥2 個由「全形片假名／長音／中黑點／英字」構成的詞、以單一全形
+# 空白分隔，可結尾 `。`。AA 圖裝飾多為**半形**片假名（ｦ-ﾟ）；整句**全形**片假名
+# 加全形空白分詞，在 AA 圖中極罕見，是可信的對話信號。為避免「ニニ　ニニ」這類
+# 重複裝飾，於 `_find_kata_sentence` 另要求全形片假名數 ≥5 且相異片假名 ≥3。
+_KATA_SENTENCE_RE = re.compile(
+    r'[A-Za-z゠-ヿ々]+(?:　[A-Za-z゠-ヿ々]+)+。?')
+
 # 數字選項 anchor：數字（可帶範圍 `～`）+ **全形**「：」/「．」分隔。
 # 例：「１：」、「１０：」、「１～３：」、「1．」。
 # 用途：捕捉「１０：ご主人様」「１～３：ママぁ」這類短內容的選項列。
@@ -591,6 +599,23 @@ def _find_spaced_out(line: str) -> list[tuple[str, int, int]]:
     return out
 
 
+def _find_kata_sentence(line: str) -> list[tuple[str, int, int]]:
+    """偵測「全形片假名整句」（角色全程以片假名講話）並回傳「**保留空白**」字串。
+
+    例：「ホウシシュゾク　ハ　イシガ　ナイカギリ」、「ニンゲンノ　シタイ　ニナル。」
+    判斷條件（見 `_KATA_SENTENCE_RE` 註解）：≥2 詞、全形片假名數 ≥5、相異片假名
+    ≥3，藉「整句全形片假名 + 全形空白分詞」這個 AA 圖罕見特徵與裝飾區隔。
+    保留內部空白的理由同 `_find_spaced_out`。
+    """
+    out: list[tuple[str, int, int]] = []
+    for m in _KATA_SENTENCE_RE.finditer(line):
+        raw = m.group(0)
+        kata = [c for c in raw if 0x30A0 <= ord(c) <= 0x30FF]
+        if len(kata) >= 5 and len(set(kata)) >= 3:
+            out.append((raw, m.start(), m.end()))
+    return out
+
+
 def _is_strong_short_candidate(text: str) -> bool:
     """短候選（≤ 3 char）是否具備「強日文信號」可獨立成立。
 
@@ -700,10 +725,18 @@ def _extract_experimental_line(
     """
     out: list[tuple[str, int, int]] = []
 
-    # 先處理「拉長念法」：直接回傳合併後字串，不走邊界擴展與分數過濾
+    # 先處理「拉長念法」與「全形片假名整句」：直接回傳保留空白字串，不走邊界擴展與分數過濾
+    covered_ranges: list[tuple[int, int]] = []
     spaced = _find_spaced_out(line)
-    spaced_ranges: list[tuple[int, int]] = [(s, e) for _t, s, e in spaced]
     for text, s, e in spaced:
+        covered_ranges.append((s, e))
+        if invalid_regex.match(text):
+            continue
+        out.append((text, s, e))
+    for text, s, e in _find_kata_sentence(line):
+        if any(ss <= s and e <= ee for ss, ee in covered_ranges):
+            continue
+        covered_ranges.append((s, e))
         if invalid_regex.match(text):
             continue
         out.append((text, s, e))
@@ -715,8 +748,8 @@ def _extract_experimental_line(
     expanded = _merge_overlapping(expanded)
 
     for s, e in expanded:
-        # 跳過已被「拉長念法」覆蓋的區間
-        if any(ss <= s and e <= ee for ss, ee in spaced_ranges):
+        # 跳過已被「拉長念法／全形片假名整句」覆蓋的區間
+        if any(ss <= s and e <= ee for ss, ee in covered_ranges):
             continue
         text = line[s:e].strip()
         # 一般候選需 ≥ 3 char。長度 2 的特殊放行：
@@ -726,11 +759,16 @@ def _extract_experimental_line(
         #   ↑ 必須行尾：避免「二つ」「メヘ」等漢字+假名片段在 AA 中段被誤抓
         # 注意：通過 min_len 不等於最終保留，後續的 score 過濾與孤立過濾還會
         # 進一步把可疑短候選擋下。
+        # - `_KANJI_END_PUNCT_RE` 匹配 **且** 位於行尾（如行尾的「何？」「諸君！」）
+        #   ↑ 必須行尾：純漢字+標點短碎片只在「左圖右文」右端才信賴
         is_short_utt = bool(_SHORT_UTT_RE.fullmatch(text))
         is_pure_hira = bool(_HIRAGANA_RUN_RE.fullmatch(text))
         is_kanji_hira = bool(_KANJI_HIRA_RE.fullmatch(text))
+        is_kanji_end = bool(_KANJI_END_PUNCT_RE.fullmatch(text))
         is_re = _is_right_edge_dialogue(line, s, e)
-        allow_short = is_short_utt or is_pure_hira or (is_kanji_hira and is_re)
+        allow_short = (is_short_utt or is_pure_hira
+                       or (is_kanji_hira and is_re)
+                       or (is_kanji_end and is_re))
         min_len = 2 if allow_short else 3
         if len(text) < min_len:
             continue
@@ -928,6 +966,8 @@ def extract_text(
                 allow_short = (_SHORT_UTT_RE.fullmatch(text)
                                or _HIRAGANA_RUN_RE.fullmatch(text)
                                or (_KANJI_HIRA_RE.fullmatch(text)
+                                   and is_re_post)
+                               or (_KANJI_END_PUNCT_RE.fullmatch(text)
                                    and is_re_post))
                 min_len = 2 if allow_short else 3
                 if len(text) < min_len:
@@ -1186,7 +1226,7 @@ def analyze_extraction(
 _SINGLE_KANA_RE = re.compile(
     r'[ 　.．\-－‐—―ーｰ…]'   # pos 1
     r'([アあハはンんオおで])'    # pos 2（捕捉）：限定 ア/あ ハ/は ン/ん オ/お で
-    r'[。?？！!]'                  # pos 3：句號、問號、驚嘆號（不含空白）
+    r'[。？！]'                   # pos 3：**全形**句號／問號／驚嘆號（不含空白）
 )
 
 
@@ -1200,7 +1240,8 @@ def extract_single_kana(
     - 第一字元：空白（ / 　）、點（. / ．）、破折號（- / － / ‐ / — / ―）
                 、長音符號（ー / ｰ）或省略號（…），半形/全形皆可
     - 第二字元：ア/あ、ハ/は、ン/ん、オ/お（平假名或片假名，各四種）
-    - 第三字元：句號（。）或問號（? / ？）或驚嘆號（！ / !）；不含空白
+    - 第三字元：**全形**句號（。）／問號（？）／驚嘆號（！）；不含空白與半形
+      `?` `!`（AA 圖常以半形驚嘆/問號作裝飾，如「 ン!」會誤判）
 
     完全獨立於 base_regex / invalid_regex / symbol_regex；
     只受自訂過濾規則（filter_str）影響。

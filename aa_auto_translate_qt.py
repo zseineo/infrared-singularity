@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import threading
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -123,6 +124,9 @@ class AutoTranslatePanel(QWidget):
         self.doc_title_edit.textChanged.connect(self._update_filename_preview)
         form.addRow("作品名稱：", self.doc_title_edit)
 
+        preview_row = QWidget()
+        preview_hl = QHBoxLayout(preview_row)
+        preview_hl.setContentsMargins(0, 0, 0, 0)
         self.filename_preview = QLineEdit()
         self.filename_preview.setReadOnly(True)
         # 唯讀預覽欄位，刻意挑可辨識的中灰底色與其他欄位（白底）作視覺區隔，
@@ -131,11 +135,19 @@ class AutoTranslatePanel(QWidget):
             "QLineEdit { background:#d6d8db; color:#343a40;"
             " border:1px solid #adb5bd; }")
         self.filename_preview.setToolTip(
-            "依目前設定計算出來的檔名範例。\n"
-            "・「自動填入作品名稱」設定開啟時 → 每話檔名自動取自頁面標題\n"
+            "起始網址這一話實際會寫入的檔名。\n"
+            "・「自動填入作品名稱」設定開啟時 → 檔名取自頁面標題\n"
             "・關閉時 → {作品名稱}_{偵測到的話數}.html\n"
-            "・同名衝突時自動加 _2、_3 等序號")
-        form.addRow("檔名預覽：", self.filename_preview)
+            "・同名衝突時自動加 -2、-3 等序號\n"
+            "按「🔄 試算」會實際讀取網址解析後顯示真正的檔名。")
+        btn_preview = QPushButton("🔄 試算")
+        btn_preview.setToolTip(
+            "讀取起始網址、解析後顯示這一話實際會寫入的檔名（含同名序號）")
+        btn_preview.clicked.connect(
+            lambda: self._refresh_actual_filename(allow_network=True))
+        preview_hl.addWidget(self.filename_preview, 1)
+        preview_hl.addWidget(btn_preview)
+        form.addRow("檔名預覽：", preview_row)
 
         out_row = QWidget()
         out_hl = QHBoxLayout(out_row)
@@ -221,6 +233,8 @@ class AutoTranslatePanel(QWidget):
         else:
             self.doc_title_edit.setPlaceholderText("（手動模式必填，作為檔名前綴）")
         self._update_filename_preview()
+        # 面板開啟時，若起始網址已在本地快取就直接試算實際檔名（不上網、不卡 UI）
+        self._refresh_actual_filename(allow_network=False)
 
     def refresh_from_main(self) -> None:
         """從主視窗目前狀態重整欄位（每次 show_auto_translate_panel 都呼叫）。"""
@@ -252,16 +266,58 @@ class AutoTranslatePanel(QWidget):
         }
 
     def _update_filename_preview(self) -> None:
-        """依目前設定計算一個檔名範例顯示在預覽欄。"""
+        """顯示靜態檔名模板（不讀網址）。實際檔名請按「🔄 試算」或開啟面板時自動帶。"""
         auto_fill = bool(getattr(self._main, "_fetch_auto_fill_title", False))
         if auto_fill:
-            self.filename_preview.setText("<每話自動取自 page_title>.html")
+            self.filename_preview.setText(
+                "<每話自動取自 page_title>.html  （按 🔄 試算看實際檔名）")
             return
         title = self.doc_title_edit.text().strip() or "未命名"
-        # 安全字元清洗示意
         import re as _re
         safe = _re.sub(r'[\\/:*?"<>|]', "_", title)[:80].strip() or "未命名"
-        self.filename_preview.setText(f"{safe}_<話數>.html  （同名時自動加 _2／_3…）")
+        self.filename_preview.setText(
+            f"{safe}_<話數>.html  （同名時自動加 -2／-3…；按 🔄 試算看實際檔名）")
+
+    def _refresh_actual_filename(self, allow_network: bool) -> None:
+        """讀取起始網址、解析後在預覽欄顯示真正會寫入的檔名（背景執行緒）。
+
+        `allow_network=False`：只吃本地快取，沒命中就維持靜態模板（不上網、不卡 UI）；
+        面板開啟時用這個。按「🔄 試算」鈕則用 `allow_network=True` 真的上網抓。
+        """
+        url = self.url_edit.text().strip()
+        if not url:
+            if allow_network:
+                self._main.show_status("⚠️ 請先填入起始網址", "#f39c12")
+            return
+        out_dir = self.out_edit.text().strip()
+        doc_title = self.doc_title_edit.text().strip()
+        auto_fill = bool(getattr(self._main, "_fetch_auto_fill_title", False))
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        if allow_network:
+            self.filename_preview.setText("⏳ 試算中（讀取網址）…")
+
+        def _bg() -> None:
+            import aa_auto_translate as a
+            try:
+                name = a.preview_first_filename(
+                    out_dir, url, base_dir=base_dir, doc_title=doc_title,
+                    fetch_auto_fill_title=auto_fill,
+                    allow_network=allow_network)
+            except Exception as e:  # noqa: BLE001 — 預覽失敗只回報，不影響流程
+                self._main._invoke_on_main.emit(
+                    lambda e=e: self.filename_preview.setText(f"⚠️ 試算失敗：{e}"))
+                return
+
+            def _apply(n=name) -> None:
+                if n:
+                    self.filename_preview.setText(n)
+                elif allow_network:
+                    self.filename_preview.setText(
+                        "⚠️ 無法解析此網址（抓取或解析失敗）")
+                # allow_network=False 且沒命中快取 → 保留靜態模板，不覆蓋
+            self._main._invoke_on_main.emit(_apply)
+
+        threading.Thread(target=_bg, daemon=True).start()
 
     # ── Slots ──
 

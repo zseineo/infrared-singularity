@@ -265,10 +265,12 @@ class AutoTranslatePanel(QWidget):
 
         self.api_prompt_edit = QPlainTextEdit()
         self.api_prompt_edit.setPlaceholderText(
-            "API 模式的系統指令／翻譯人設（建議貼上你 Gem 的翻譯規則）。\n"
-            "瀏覽器模式不使用此欄（人設在 Gem 內）。")
-        self.api_prompt_edit.setFixedHeight(120)
-        form.addRow("系統指令：", self.api_prompt_edit)
+            "翻譯 prompt／人設（兩種模式都會用到）：\n"
+            "・API 模式 → 當作系統指令送出\n"
+            "・瀏覽器模式 → 附加在每個新對話的第一則訊息開頭\n"
+            "若瀏覽器模式已用內建人設的 Gem，可留空。")
+        self.api_prompt_edit.setFixedHeight(140)
+        form.addRow("翻譯 Prompt：", self.api_prompt_edit)
 
         # 動作列
         btn_row = QWidget()
@@ -290,10 +292,11 @@ class AutoTranslatePanel(QWidget):
         self._pages.setCurrentIndex(1)
 
     def _on_backend_changed(self, _idx: int = 0) -> None:
-        """API 模式才啟用 API 相關欄位。"""
+        """API 模型／金鑰只在 API 模式啟用；翻譯 Prompt 兩模式都可編輯。"""
         is_api = self.backend_combo.currentData() == "api"
-        for w in (self.api_model_combo, self.api_keys_edit, self.api_prompt_edit):
+        for w in (self.api_model_combo, self.api_keys_edit):
             w.setEnabled(is_api)
+        self.api_prompt_edit.setEnabled(True)
 
     # ── 與 MainWindow 同步狀態 ──
 

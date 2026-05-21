@@ -166,6 +166,7 @@ class GeminiWebSession:
         selectors: dict | None = None,
         headless: bool = False,
         required_model: str = "",
+        prepend_prompt: str = "",
         stop_event=None,
         log: Callable[[str], None] | None = None,
     ) -> None:
@@ -175,6 +176,9 @@ class GeminiWebSession:
         self.profile_dir = profile_dir
         self.max_per_session = max(1, int(max_per_session or DEFAULT_MAX_PER_SESSION))
         self.required_model = (required_model or "").strip().lower()
+        # 翻譯 prompt：非空時，會附加在「每個新對話的第一則訊息」最前面，
+        # 等於把指令放在對話開頭（後續同對話的分段靠 Gemini 自身上下文即可）。
+        self.prepend_prompt = (prepend_prompt or "").strip()
         self.stop_event = stop_event  # 由協調器傳入，模型等待時用來中止
         # 合併使用者覆寫：覆寫值為「完整候選列表」，整項取代預設。
         self.selectors = dict(DEFAULT_SELECTORS)
@@ -275,12 +279,18 @@ class GeminiWebSession:
 
     def _send_and_collect(self, prompt_text: str) -> str:
         """填入 → 送出 → 等待生成完成 → 取最新回覆。內部計數已遞增。"""
+        # 新對話的第一則訊息把 prompt 附在最前面（後續分段靠對話上下文）
+        first_in_chat = (self._send_count == 0)
         self._send_count += 1
         self._log(f"session #{self._session_index} 第 "
                   f"{self._send_count}/{self.max_per_session} 次送出")
+        text = prompt_text
+        if self.prepend_prompt and first_in_chat:
+            text = self.prepend_prompt + "\n\n" + prompt_text
+            self._log("  （已在對話開頭附加翻譯 prompt）")
         editor = self._require("input")
         editor.click()
-        editor.fill(prompt_text)
+        editor.fill(text)
         prev_count = self._response_count()
         self._click_send()
         self._wait_generation_done(prev_count)

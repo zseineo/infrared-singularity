@@ -366,6 +366,7 @@ def run_auto_translate(
     out_dir: str,
     *,
     base_dir: str | None = None,
+    backend: str | None = None,
     gem_url: str | None = None,
     profile_dir: str | None = None,
     headless: bool = False,
@@ -390,11 +391,7 @@ def run_auto_translate(
 
     cfg = load_config(base_dir)
     cache = settings_manager.SettingsManager(base_dir).load_cache()
-    gem_url = gem_url or cache.gemini_gem_url
-    if not gem_url:
-        raise ValueError("未設定 Gem 網址（gemini_gem_url）")
-    profile_dir = (profile_dir or cache.gemini_profile_dir
-                   or os.path.join(tempfile.gettempdir(), "aa_gemini_profile"))
+    backend = (backend or cache.translate_backend or "browser").lower()
     if fetch_auto_fill_title is None:
         fetch_auto_fill_title = cache.fetch_auto_fill_title
     os.makedirs(out_dir, exist_ok=True)
@@ -407,18 +404,37 @@ def run_auto_translate(
 
     result = AutoResult()
     url = start_url
-    session = GeminiWebSession(
-        gem_url, profile_dir,
-        max_per_session=(max_per_session
-                         if max_per_session is not None
-                         else cache.gemini_max_per_session),
-        selectors=cache.gemini_selectors or None,
-        required_model=required_model or cache.gemini_required_model,
-        stop_event=stop_event,
-        headless=headless, log=log)
+
+    # ── 依後端建立翻譯 session（兩者皆提供 open / translate / close） ──
+    if backend == "api":
+        from aa_tool import gemini_api, secure_store
+        keys = secure_store.load_keys(base_dir)
+        if not keys:
+            raise ValueError("API 模式但未設定任何 API 金鑰（請到「連線設定」輸入）")
+        session = gemini_api.GeminiApiSession(
+            keys, cache.gemini_api_model,
+            system_prompt=cache.gemini_api_system_prompt, log=log)
+        open_log = f"使用 Google API（模型 {cache.gemini_api_model}）…"
+    else:
+        gem_url = gem_url or cache.gemini_gem_url
+        if not gem_url:
+            raise ValueError("未設定 Gem 網址（gemini_gem_url）")
+        profile_dir = (profile_dir or cache.gemini_profile_dir
+                       or os.path.join(tempfile.gettempdir(),
+                                       "aa_gemini_profile"))
+        session = GeminiWebSession(
+            gem_url, profile_dir,
+            max_per_session=(max_per_session
+                             if max_per_session is not None
+                             else cache.gemini_max_per_session),
+            selectors=cache.gemini_selectors or None,
+            required_model=required_model or cache.gemini_required_model,
+            stop_event=stop_event,
+            headless=headless, log=log)
+        open_log = "開啟瀏覽器並登入 Gemini…"
 
     try:
-        log("開啟瀏覽器並登入 Gemini…")
+        log(open_log)
         try:
             session.open()
         except GeminiModelMismatch as e:
@@ -564,6 +580,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="Gemini Gem 網址（預設讀設定 gemini_gem_url）")
     parser.add_argument("--profile-dir", default=None,
                         help="Playwright 瀏覽器 profile 目錄")
+    parser.add_argument("--backend", default=None,
+                        choices=["browser", "api"],
+                        help="翻譯後端：browser（操控網頁）或 api（Gemini API）")
     parser.add_argument("--max-per-session", type=int, default=None,
                         help="同一對話最多送幾次後開新對話（覆寫設定）")
     parser.add_argument("--required-model", default="",
@@ -579,6 +598,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = run_auto_translate(
             args.url, args.count, args.out,
+            backend=args.backend,
             gem_url=args.gem_url, profile_dir=args.profile_dir,
             headless=args.headless, until_last=args.until_last,
             max_per_session=args.max_per_session,

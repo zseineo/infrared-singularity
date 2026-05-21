@@ -17,9 +17,18 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPlainTextEdit, QPushButton, QSpinBox, QSplitter, QVBoxLayout,
-    QWidget,
+    QLineEdit, QPlainTextEdit, QPushButton, QSpinBox, QSplitter,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
+
+from aa_tool.gemini_api import API_MODELS
+from aa_tool import secure_store
+
+# 翻譯後端選項：(顯示文字, 內部值)
+_BACKEND_OPTIONS: list[tuple[str, str]] = [
+    ("現行（瀏覽器操控網頁 Gemini）", "browser"),
+    ("使用 Google API", "api"),
+]
 
 
 # (顯示文字, 內部值)；內部值需與 aa_tool.gemini_web.model_matches 一致。
@@ -66,12 +75,19 @@ class AutoTranslatePanel(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        self._pages = QStackedWidget()
+        root.addWidget(self._pages)
 
+        # ── 主頁（翻譯設定 + Log） ──
+        main_page = QWidget()
+        main_v = QVBoxLayout(main_page)
+        main_v.setContentsMargins(10, 10, 10, 10)
+        main_v.setSpacing(8)
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.setChildrenCollapsible(False)
-        root.addWidget(splitter, 1)
+        main_v.addWidget(splitter, 1)
 
         # ── 上半：設定 ──
         top = QWidget()
@@ -175,6 +191,10 @@ class AutoTranslatePanel(QWidget):
         btn_clear.clicked.connect(self._clear_log)
         btn_hl.addWidget(btn_clear)
         btn_hl.addStretch()
+        btn_conn = _btn("⚙ 連線設定", "#6f42c1", "#5a32a3", width=110)
+        btn_conn.setToolTip("切換翻譯方式（瀏覽器／API）、API 金鑰與模型")
+        btn_conn.clicked.connect(self._show_conn_page)
+        btn_hl.addWidget(btn_conn)
         form.addRow(btn_row)
 
         splitter.addWidget(top)
@@ -199,6 +219,81 @@ class AutoTranslatePanel(QWidget):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([240, 480])
+
+        self._pages.addWidget(main_page)                # index 0
+        self._pages.addWidget(self._build_conn_page())  # index 1
+
+    def _build_conn_page(self) -> QWidget:
+        """連線設定分頁：翻譯方式（瀏覽器／API）、API 金鑰、模型、系統指令。"""
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(10, 10, 10, 10)
+        v.setSpacing(8)
+
+        title = QLabel("連線設定")
+        title.setFont(_font(15, bold=True))
+        v.addWidget(title)
+
+        form = QFormLayout()
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
+        v.addLayout(form)
+
+        self.backend_combo = QComboBox()
+        for label, value in _BACKEND_OPTIONS:
+            self.backend_combo.addItem(label, value)
+        self.backend_combo.currentIndexChanged.connect(self._on_backend_changed)
+        form.addRow("翻譯方式：", self.backend_combo)
+
+        self.api_model_combo = QComboBox()
+        self.api_model_combo.addItems(API_MODELS)
+        form.addRow("API 模型：", self.api_model_combo)
+
+        self.api_keys_edit = QPlainTextEdit()
+        self.api_keys_edit.setPlaceholderText(
+            "每行一把 Google API 金鑰；多把會輪流送出請求")
+        self.api_keys_edit.setFixedHeight(90)
+        form.addRow("API 金鑰：", self.api_keys_edit)
+
+        enc_note = QLabel(
+            "🔒 金鑰以 Windows DPAPI 加密存於 aa_api_keys.dat（綁定本機帳號、"
+            "已列入 .gitignore，不會上傳）" if secure_store.is_real_encryption()
+            else "⚠️ 非 Windows：金鑰僅 base64 混淆儲存，安全性較低")
+        enc_note.setWordWrap(True)
+        enc_note.setStyleSheet("color:#6c757d; font-size:11px;")
+        form.addRow("", enc_note)
+
+        self.api_prompt_edit = QPlainTextEdit()
+        self.api_prompt_edit.setPlaceholderText(
+            "API 模式的系統指令／翻譯人設（建議貼上你 Gem 的翻譯規則）。\n"
+            "瀏覽器模式不使用此欄（人設在 Gem 內）。")
+        self.api_prompt_edit.setFixedHeight(120)
+        form.addRow("系統指令：", self.api_prompt_edit)
+
+        # 動作列
+        btn_row = QWidget()
+        bh = QHBoxLayout(btn_row)
+        bh.setContentsMargins(0, 4, 0, 0)
+        btn_save = _btn("💾 儲存連線設定", "#28a745", "#218838", width=140)
+        btn_save.clicked.connect(self._save_conn_settings)
+        bh.addWidget(btn_save)
+        btn_back = _btn("← 返回", "#6c757d", "#5a6268", width=80)
+        btn_back.clicked.connect(lambda: self._pages.setCurrentIndex(0))
+        bh.addWidget(btn_back)
+        bh.addStretch()
+        v.addWidget(btn_row)
+        v.addStretch()
+        return page
+
+    def _show_conn_page(self) -> None:
+        self._load_conn_from_main()
+        self._pages.setCurrentIndex(1)
+
+    def _on_backend_changed(self, _idx: int = 0) -> None:
+        """API 模式才啟用 API 相關欄位。"""
+        is_api = self.backend_combo.currentData() == "api"
+        for w in (self.api_model_combo, self.api_keys_edit, self.api_prompt_edit):
+            w.setEnabled(is_api)
 
     # ── 與 MainWindow 同步狀態 ──
 
@@ -239,6 +334,41 @@ class AutoTranslatePanel(QWidget):
     def refresh_from_main(self) -> None:
         """從主視窗目前狀態重整欄位（每次 show_auto_translate_panel 都呼叫）。"""
         self._load_from_main()
+
+    def _load_conn_from_main(self) -> None:
+        """把主視窗的連線設定載入連線分頁欄位。"""
+        m = self._main
+        backend = (getattr(m, "_translate_backend", "browser") or "browser")
+        bidx = next((i for i, (_, v) in enumerate(_BACKEND_OPTIONS)
+                     if v == backend), 0)
+        self.backend_combo.setCurrentIndex(bidx)
+        model = getattr(m, "_gemini_api_model", "") or API_MODELS[0]
+        midx = self.api_model_combo.findText(model)
+        self.api_model_combo.setCurrentIndex(midx if midx >= 0 else 0)
+        self.api_prompt_edit.setPlainText(
+            getattr(m, "_gemini_api_system_prompt", "") or "")
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        keys = secure_store.load_keys(base_dir)
+        self.api_keys_edit.setPlainText("\n".join(keys))
+        self._on_backend_changed()
+
+    def _save_conn_settings(self) -> None:
+        keys = [l.strip() for l in
+                self.api_keys_edit.toPlainText().splitlines() if l.strip()]
+        params = {
+            "backend": self.backend_combo.currentData(),
+            "api_model": self.api_model_combo.currentText(),
+            "api_system_prompt": self.api_prompt_edit.toPlainText(),
+            "api_keys": keys,
+        }
+        self._main.save_connection_settings(params)
+        kn = len(keys)
+        if params["backend"] == "api" and kn == 0:
+            self._main.show_status(
+                "⚠️ 已儲存，但 API 模式尚未輸入任何金鑰", "#f39c12")
+        else:
+            self._main.show_status(
+                f"✅ 連線設定已儲存（{kn} 把金鑰）", "#28a745")
 
     def collect_params(self) -> dict | None:
         """收集表單參數；任一必填欄位空缺則彈 toast 並回 None。"""

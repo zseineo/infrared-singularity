@@ -164,6 +164,12 @@ class AppCache:
     auto_translate_out_dir: str = ""
     auto_translate_count: int = 5
     auto_translate_until_last: bool = False
+    # 翻譯後端：'browser'（操控網頁版 Gemini）或 'api'（Google Gemini API）。
+    translate_backend: str = "browser"
+    # API 模式用的模型 id（見 aa_tool.gemini_api.API_MODELS）。
+    gemini_api_model: str = "gemini-2.5-pro"
+    # API 模式的系統指令（翻譯人設／要求）；金鑰另存於加密檔 aa_api_keys.dat。
+    gemini_api_system_prompt: str = ""
     # 要求的 Gemini 模型：pro / flash / flash-lite / any。
     # 翻譯中若偵測到模型與此不符，整批自動中止（讀不到模型字串時不阻擋，會在 Log 警告）。
     gemini_required_model: str = "pro"
@@ -369,6 +375,13 @@ class SettingsManager:
                 'auto_translate_until_last', cache.auto_translate_until_last))
             cache.gemini_required_model = str(data.get(
                 'gemini_required_model', cache.gemini_required_model) or "pro")
+            cache.translate_backend = str(data.get(
+                'translate_backend', cache.translate_backend) or "browser")
+            cache.gemini_api_model = str(data.get(
+                'gemini_api_model', cache.gemini_api_model)
+                or "gemini-2.5-pro")
+            cache.gemini_api_system_prompt = str(data.get(
+                'gemini_api_system_prompt', cache.gemini_api_system_prompt))
             try:
                 v = int(data.get('pad_space_count', cache.pad_space_count))
                 if v in (1, 2, 3):
@@ -456,6 +469,9 @@ class SettingsManager:
                 'auto_translate_count': cache.auto_translate_count,
                 'auto_translate_until_last': cache.auto_translate_until_last,
                 'gemini_required_model': cache.gemini_required_model,
+                'translate_backend': cache.translate_backend,
+                'gemini_api_model': cache.gemini_api_model,
+                'gemini_api_system_prompt': cache.gemini_api_system_prompt,
             }
             self._atomic_write_json(cache_file, data)
 

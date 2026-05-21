@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.34"
+APP_VERSION = "1.35"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -698,6 +698,10 @@ class MainWindow(QMainWindow):
         self._auto_translate_out_dir: str = ""
         self._auto_translate_count: int = 5
         self._auto_translate_until_last: bool = False
+        # 翻譯後端與 API 設定（金鑰另存於加密檔，不在 cache）
+        self._translate_backend: str = "browser"
+        self._gemini_api_model: str = "gemini-2.5-pro"
+        self._gemini_api_system_prompt: str = ""
         self._auto_translate_running: bool = False
         self._auto_stop_event = None  # threading.Event，執行中時設定
         self._author_only: bool = False
@@ -1547,6 +1551,24 @@ class MainWindow(QMainWindow):
         self._nav_bar.show()
         self._action_bar.hide()
 
+    def save_connection_settings(self, params: dict) -> None:
+        """由連線設定分頁的「儲存」鈕進來：持久化後端／模型／系統指令與 API 金鑰。
+
+        金鑰存進 DPAPI 加密檔（aa_api_keys.dat），其餘存進一般 cache。
+        """
+        self._translate_backend = params.get("backend", "browser") or "browser"
+        self._gemini_api_model = (
+            params.get("api_model") or "gemini-2.5-pro")
+        self._gemini_api_system_prompt = params.get("api_system_prompt", "")
+        self.save_cache()
+        try:
+            from aa_tool import secure_store
+            secure_store.save_keys(
+                os.path.dirname(os.path.abspath(__file__)),
+                params.get("api_keys", []))
+        except Exception as e:  # noqa: BLE001 — 金鑰寫入失敗回報但不崩潰
+            self.show_status(f"⚠️ 金鑰儲存失敗：{e}", "#dc3545")
+
     def start_auto_translate_from_panel(self, params: dict) -> None:
         """從 AutoTranslatePanel 的「開始」按鈕進來。"""
         if self._auto_translate_running:
@@ -1583,7 +1605,11 @@ class MainWindow(QMainWindow):
         self._auto_stop_event = threading.Event()
         self._auto_banner_stop_btn.setEnabled(True)
         self._auto_banner_stop_btn.setText("■ 停止")
-        self._auto_banner_label.setText("⚡ 自動翻譯啟動中（請在彈出的瀏覽器完成登入）…")
+        if self._translate_backend == "api":
+            self._auto_banner_label.setText("⚡ 自動翻譯啟動中（API 模式）…")
+        else:
+            self._auto_banner_label.setText(
+                "⚡ 自動翻譯啟動中（請在彈出的瀏覽器完成登入）…")
         self._auto_banner.show()
         if self._auto_window is not None:
             self._auto_window.set_running(True)
@@ -1613,6 +1639,7 @@ class MainWindow(QMainWindow):
                 result = run_auto_translate(
                     start_url, count, out_dir,
                     base_dir=os.path.dirname(os.path.abspath(__file__)),
+                    backend=self._translate_backend,
                     gem_url=gem_url,
                     profile_dir=self._gemini_profile_dir or None,
                     max_per_session=max_per_session,
@@ -2049,6 +2076,9 @@ class MainWindow(QMainWindow):
             auto_translate_out_dir=self._auto_translate_out_dir,
             auto_translate_count=self._auto_translate_count,
             auto_translate_until_last=self._auto_translate_until_last,
+            translate_backend=self._translate_backend,
+            gemini_api_model=self._gemini_api_model,
+            gemini_api_system_prompt=self._gemini_api_system_prompt,
         )
 
     def _apply_cache(self, cache: AppCache) -> None:
@@ -2123,6 +2153,11 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             self._auto_translate_count = 5
         self._auto_translate_until_last = bool(cache.auto_translate_until_last)
+        self._translate_backend = str(cache.translate_backend or "browser")
+        self._gemini_api_model = str(
+            cache.gemini_api_model or "gemini-2.5-pro")
+        self._gemini_api_system_prompt = str(
+            cache.gemini_api_system_prompt or "")
         try:
             v = int(cache.pad_space_count)
             self._pad_space_count = v if v in (1, 2, 3) else 2

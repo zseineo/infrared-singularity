@@ -245,6 +245,13 @@ class AutoTranslatePanel(QWidget):
         self.backend_combo.currentIndexChanged.connect(self._on_backend_changed)
         form.addRow("翻譯方式：", self.backend_combo)
 
+        self.use_gem_cb = QCheckBox("瀏覽器模式使用 Gem（不發送 Prompt）")
+        self.use_gem_cb.setToolTip(
+            "勾選：瀏覽器模式靠 Gem 內建人設翻譯，不送出下方 Prompt。\n"
+            "取消勾選：瀏覽器模式也會送 Prompt（適合不用 Gem 的使用者）。\n"
+            "API 模式一律會送 Prompt，不受此選項影響。")
+        form.addRow("", self.use_gem_cb)
+
         self.api_model_combo = QComboBox()
         self.api_model_combo.addItems(API_MODELS)
         form.addRow("API 模型：", self.api_model_combo)
@@ -345,6 +352,7 @@ class AutoTranslatePanel(QWidget):
         bidx = next((i for i, (_, v) in enumerate(_BACKEND_OPTIONS)
                      if v == backend), 0)
         self.backend_combo.setCurrentIndex(bidx)
+        self.use_gem_cb.setChecked(bool(getattr(m, "_browser_use_gem", True)))
         model = getattr(m, "_gemini_api_model", "") or API_MODELS[0]
         midx = self.api_model_combo.findText(model)
         self.api_model_combo.setCurrentIndex(midx if midx >= 0 else 0)
@@ -360,6 +368,7 @@ class AutoTranslatePanel(QWidget):
                 self.api_keys_edit.toPlainText().splitlines() if l.strip()]
         params = {
             "backend": self.backend_combo.currentData(),
+            "browser_use_gem": self.use_gem_cb.isChecked(),
             "api_model": self.api_model_combo.currentText(),
             "api_system_prompt": self.api_prompt_edit.toPlainText(),
             "api_keys": keys,

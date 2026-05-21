@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.36"
+APP_VERSION = "1.37"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -702,6 +702,7 @@ class MainWindow(QMainWindow):
         self._translate_backend: str = "browser"
         self._gemini_api_model: str = "gemini-2.5-pro"
         self._gemini_api_system_prompt: str = ""
+        self._browser_use_gem: bool = True
         self._auto_translate_running: bool = False
         self._auto_stop_event = None  # threading.Event，執行中時設定
         self._author_only: bool = False
@@ -1560,6 +1561,7 @@ class MainWindow(QMainWindow):
         self._gemini_api_model = (
             params.get("api_model") or "gemini-2.5-pro")
         self._gemini_api_system_prompt = params.get("api_system_prompt", "")
+        self._browser_use_gem = bool(params.get("browser_use_gem", True))
         self.save_cache()
         try:
             from aa_tool import secure_store
@@ -2079,6 +2081,7 @@ class MainWindow(QMainWindow):
             translate_backend=self._translate_backend,
             gemini_api_model=self._gemini_api_model,
             gemini_api_system_prompt=self._gemini_api_system_prompt,
+            browser_use_gem=self._browser_use_gem,
         )
 
     def _apply_cache(self, cache: AppCache) -> None:
@@ -2158,6 +2161,7 @@ class MainWindow(QMainWindow):
             cache.gemini_api_model or "gemini-2.5-pro")
         self._gemini_api_system_prompt = str(
             cache.gemini_api_system_prompt or "")
+        self._browser_use_gem = bool(cache.browser_use_gem)
         try:
             v = int(cache.pad_space_count)
             self._pad_space_count = v if v in (1, 2, 3) else 2

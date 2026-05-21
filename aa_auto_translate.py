@@ -429,7 +429,9 @@ def run_auto_translate(
                              else cache.gemini_max_per_session),
             selectors=cache.gemini_selectors or None,
             required_model=required_model or cache.gemini_required_model,
-            prepend_prompt=cache.gemini_api_system_prompt,
+            # 使用 Gem（內建人設）時，瀏覽器模式不送 prompt；否則才附加。
+            prepend_prompt=("" if cache.browser_use_gem
+                            else cache.gemini_api_system_prompt),
             stop_event=stop_event,
             headless=headless, log=log)
         open_log = "開啟瀏覽器並登入 Gemini…"

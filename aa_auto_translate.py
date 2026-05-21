@@ -343,6 +343,25 @@ def preview_first_filename(
     return os.path.basename(path)
 
 
+def _record_url_history(sm, url: str, page_title: str, nav_links: list,
+                        source: str, log: Callable[[str], None]) -> None:
+    """把讀過的網址寫入讀取紀錄（與手動流程一致）。
+
+    沿用多程序安全的 `append_url_history` / `update_url_related_links`：
+    主程式的 1.5 秒檔案監看會自動把新紀錄刷新到 UI。失敗只記 log，不中斷翻譯。
+    """
+    try:
+        entry: dict = {"url": url, "title": page_title or url}
+        fp = original_cache.compute_fingerprint(source)
+        if fp:
+            entry["fingerprint"] = fp
+        # work_title / author / 既有 fingerprint 由 append_url_history 自動沿用
+        sm.append_url_history(entry)
+        sm.update_url_related_links(url, nav_links)
+    except Exception as e:  # noqa: BLE001 — 紀錄寫入失敗不該影響翻譯
+        log(f"  ⚠️ 寫入網址讀取紀錄失敗（不影響翻譯）：{e}")
+
+
 def _next_chapter_url(nav_links: list) -> str:
     """從關聯連結找「下一話」的 URL（邏輯同 aa_main_qt._fetch_adjacent_chapter）。"""
     if not nav_links:
@@ -390,7 +409,8 @@ def run_auto_translate(
     base_dir = base_dir or os.path.dirname(os.path.abspath(__file__))
 
     cfg = load_config(base_dir)
-    cache = settings_manager.SettingsManager(base_dir).load_cache()
+    sm = settings_manager.SettingsManager(base_dir)
+    cache = sm.load_cache()
     backend = (backend or cache.translate_backend or "browser").lower()
     if fetch_auto_fill_title is None:
         fetch_auto_fill_title = cache.fetch_auto_fill_title
@@ -467,6 +487,8 @@ def run_auto_translate(
                 result.failed.append((url, str(e)))
                 log(f"  ❌ {e} → 無法取得下一話，中斷。")
                 break
+            # 讀過的網址寫入讀取紀錄（與手動流程一致）
+            _record_url_history(sm, url, page_title, nav_links, source, log)
             next_url = _next_chapter_url(nav_links)
 
             # 2) 提取 → 翻譯 → 替換 → 存檔

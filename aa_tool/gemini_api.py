@@ -61,6 +61,10 @@ class GeminiApiSession:
     def close(self) -> None:
         pass
 
+    def start_new_session(self) -> None:
+        """API 無對話狀態（每次請求獨立、金鑰已輪換），無需重開；保留同名介面。"""
+        return
+
     def __enter__(self) -> "GeminiApiSession":
         self.open()
         return self

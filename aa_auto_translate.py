@@ -537,9 +537,13 @@ def run_auto_translate(
                     reason = ("回覆與原文幾乎一致（疑似未翻譯）" if untranslated
                               else "翻譯驗證警告：" + "  ".join(warnings))
                     log(f"  ⚠️ {reason} → 重試一次（再送一次 Gemini）")
+                    # 未翻譯時：同一對話重送很可能吐相同結果，先開新對話再重試
+                    if untranslated:
+                        log("  （未翻譯：先開新對話再重試，避免重複相同結果）")
+                        session.start_new_session()
                     translated = _translate(session, extracted, log, stop_event)
                     if _looks_untranslated(extracted, translated):
-                        raise UntranslatedResponse("重試後回覆仍與原文幾乎一致")
+                        raise UntranslatedResponse("重試（已換新對話）後仍與原文幾乎一致")
                 log("  替換翻譯中…")
                 result_text = translation_engine.apply_translation(
                     source, extracted, translated, cfg.glossary,

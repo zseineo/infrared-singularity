@@ -320,7 +320,18 @@ class GeminiWebSession:
             time.sleep(_POST_GEN_SETTLE)
         return self._latest_response_text()
 
-    # ── 內部：對話管理 ──
+    # ── 對話管理 ──
+
+    def start_new_session(self) -> None:
+        """公開：強制開一個全新對話（重試前用，避免同一對話重複吐相同結果）。
+
+        重開後重新確認登入與模型（與 session 輪替走同一套）。
+        """
+        if self._page is None:
+            return
+        self._open_new_chat()
+        self._ensure_logged_in(60)
+        self._ensure_model()
 
     def _open_new_chat(self) -> None:
         """重新導向 Gem URL 開啟全新對話，重置送出計數（不讀模型，呼叫端自行決定何時 log）。"""

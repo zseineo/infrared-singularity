@@ -109,6 +109,15 @@ DEFAULT_SELECTORS: dict[str, list[str]] = {
         "[class*='model-switcher'] button",
         "[class*='mode-switcher']",
     ],
+    # 模型選單項目（點開模型指示器後出現的清單），用於自動切換模型。
+    "model_menu_item": [
+        "[role='menuitemradio']",
+        "[role='menuitem']",
+        "mat-option",
+        ".mat-mdc-menu-item",
+        "button.bard-mode-list-button",
+        "[class*='mode-list'] button",
+    ],
 }
 
 # 額度上限訊息關鍵字（命中即視為撞額度，全小寫比對）。
@@ -143,10 +152,18 @@ _GEN_START_TIMEOUT = 25     # 送出後等待「開始生成」的最長秒數
 # （等同「按下複製鍵到實際取得內容之間的緩衝」）。
 _POST_GEN_SETTLE = 3.0
 
-# 模型不符時，暫停等使用者在瀏覽器手動切換模型的最長秒數。
+# 自動切換模型失敗（選單選擇器失效）時，退回等使用者手動切換的最長秒數。
 _MODEL_WAIT_TIMEOUT = 300   # 5 分鐘
 _MODEL_WAIT_POLL = 3        # 每 3 秒重讀一次模型字串
 _MODEL_REMIND_EVERY = 30    # 每 30 秒於 Log 提醒一次「請切換模型」
+# 要求的模型額度已滿時，長時間等待額度恢復（每隔一段時間重試自動切換）。
+_QUOTA_WAIT_TIMEOUT = 12 * 3600   # 最長等 12 小時
+_QUOTA_POLL_INTERVAL = 600        # 每 10 分鐘重試一次自動切換
+# 模型選單上「額度已滿／將於某時恢復」的字樣（命中代表該模型暫時不可用）。
+_QUOTA_RESET_PHRASES = [
+    "用量額度將於", "額度將於", "額度已滿", "已達上限",
+    "quota will reset", "available again", "resets ",
+]
 
 
 class GeminiWebSession:
@@ -225,7 +242,7 @@ class GeminiWebSession:
         self._page = pages[0] if pages else self._context.new_page()
         self._open_new_chat()
         self._ensure_logged_in(login_timeout)
-        self._log_current_model()
+        self._ensure_model()
 
     def close(self) -> None:
         """關閉瀏覽器與 Playwright。"""
@@ -265,7 +282,7 @@ class GeminiWebSession:
             self._log(f"已達 session 上限（{self.max_per_session} 次），開啟新對話")
             self._open_new_chat()
             self._ensure_logged_in(60)
-            self._log_current_model()
+            self._ensure_model()
 
         reply = self._send_and_collect(prompt_text)
         if not reply.strip():
@@ -273,7 +290,7 @@ class GeminiWebSession:
                 f"⏳ Gemini 卡住超過 {_GEN_TIMEOUT}s 無回應，開新對話重試一次…")
             self._open_new_chat()
             self._ensure_logged_in(60)
-            self._log_current_model()
+            self._ensure_model()
             reply = self._send_and_collect(prompt_text)
             if not reply.strip():
                 raise GeminiStuck(
@@ -311,58 +328,153 @@ class GeminiWebSession:
         self._send_count = 0
         self._session_index += 1
 
-    def _log_current_model(self) -> None:
-        """讀取目前使用的模型；若不符 ``required_model``，暫停等使用者在瀏覽器
-        手動切換最多 ``_MODEL_WAIT_TIMEOUT`` 秒；逾時丟 GeminiModelMismatch，
-        途中 stop_event 被設則丟 GeminiAborted。
+    def _ensure_model(self) -> None:
+        """確認目前模型符合 ``required_model``；不符時嘗試自動從選單切換。
 
-        讀不到模型字串時不阻擋（Gemini 改版後讀不到才不至於把使用者整批鎖死），
-        改以警告 Log 提示。
+        - 符合 / 不檢查 / 讀不到模型 → 只 log，不阻擋。
+        - 不符 → 自動點開模型選單選到要求的模型。
+        - 要求的模型「額度已滿」→ 長時間輪詢等額度恢復後再自動切換（可按停止中止）。
+        - 選單選擇器失效 → 退回等使用者手動切換（短逾時）。
         """
+        req = self.required_model
         try:
             self._page.wait_for_timeout(400)
         except Exception:
             pass
         model = self._read_current_model()
-        req = self.required_model
+        if not req or req == "any":
+            self._log(f"目前模型：{model or '(讀不到)'}")
+            return
         if not model:
-            self._log("⚠️ 無法讀取模型名稱（Gemini 可能改版），請在瀏覽器自行確認")
+            self._log("⚠️ 無法讀取模型名稱（Gemini 可能改版），略過模型檢查")
             return
         if model_matches(model, req):
-            tag = f"（符合需求：{req}）" if req and req != "any" else ""
-            self._log(f"目前使用模型：{model}{tag}")
+            self._log(f"目前使用模型：{model}（符合需求：{req}）")
             return
-        # 不符 → 暫停等使用者重選
-        self._wait_for_correct_model(model, req)
+        self._log(f"目前模型「{model}」不符需求「{req}」，嘗試自動切換…")
+        self._switch_model_with_wait(req)
 
-    def _wait_for_correct_model(self, initial: str, req: str) -> None:
-        """暫停等使用者在瀏覽器把模型切換成 ``req``；逾時或被外部中止才丟例外。"""
-        self._log(
-            f"⏸️ 目前模型「{initial}」與要求「{req}」不符 — "
-            f"請在瀏覽器切換到正確模型，最多等 {_MODEL_WAIT_TIMEOUT // 60} 分鐘")
-        deadline = time.time() + _MODEL_WAIT_TIMEOUT
-        last_remind = time.time()
-        last_seen = initial
-        while time.time() < deadline:
+    def _switch_model_with_wait(self, req: str) -> None:
+        """自動切換到 req；額度滿則長等、選單失效則退回等手動切換。"""
+        quota_deadline = time.time() + _QUOTA_WAIT_TIMEOUT
+        manual_deadline = time.time() + _MODEL_WAIT_TIMEOUT
+        announced_quota = False
+        last_remind = 0.0
+        while True:
             if self.stop_event is not None and self.stop_event.is_set():
-                raise GeminiAborted("使用者於模型等待期間中止")
-            time.sleep(_MODEL_WAIT_POLL)
+                raise GeminiAborted("使用者於切換模型期間中止")
+            status, info = self._try_select_model(req)
+            if status == "ok":
+                cur = self._read_current_model()
+                self._log(f"✅ 已自動切換到「{cur or req}」，繼續翻譯")
+                return
+            if status == "quota":
+                if not announced_quota:
+                    self._log(
+                        f"⏸️ 「{req}」額度已滿（{info}）。將等額度恢復後自動切換，"
+                        f"最長等 {_QUOTA_WAIT_TIMEOUT // 3600} 小時；可按停止中止。")
+                    announced_quota = True
+                if time.time() >= quota_deadline:
+                    raise GeminiModelMismatch(
+                        f"等待「{req}」額度恢復逾時（超過 "
+                        f"{_QUOTA_WAIT_TIMEOUT // 3600} 小時）")
+                self._sleep_with_stop(_QUOTA_POLL_INTERVAL)
+                continue
+            # status == "fail"：選單操作或選擇器失效 → 退回等使用者手動切換
+            now = time.time()
+            if now - last_remind >= _MODEL_REMIND_EVERY:
+                self._log("⚠️ 無法自動切換模型（選單選擇器可能失效），"
+                          "請在瀏覽器手動切換到正確模型…")
+                last_remind = now
+            if now >= manual_deadline:
+                raise GeminiModelMismatch(
+                    f"無法自動切換到「{req}」，且等待手動切換逾時")
+            self._sleep_with_stop(_MODEL_WAIT_POLL)
             cur = self._read_current_model()
             if cur and model_matches(cur, req):
-                self._log(f"✅ 模型已切換為「{cur}」，繼續翻譯")
+                self._log(f"✅ 偵測到已切換為「{cur}」，繼續翻譯")
                 return
-            if cur and cur != last_seen:
-                self._log(f"  仍未符合要求（目前：{cur}）")
-                last_seen = cur
-            if time.time() - last_remind >= _MODEL_REMIND_EVERY:
-                remaining = int(deadline - time.time())
-                self._log(
-                    f"  ⏳ 還在等待切換到「{req}」… 剩餘 {remaining} 秒")
-                last_remind = time.time()
-        final = self._read_current_model() or initial
-        raise GeminiModelMismatch(
-            f"等待 {_MODEL_WAIT_TIMEOUT} 秒後模型仍為「{final}」，"
-            f"不符需求「{req}」")
+
+    def _sleep_with_stop(self, seconds: float) -> None:
+        """可被 stop_event 中斷的睡眠（每秒檢查一次）。"""
+        end = time.time() + seconds
+        while True:
+            remaining = end - time.time()
+            if remaining <= 0:
+                return
+            if self.stop_event is not None and self.stop_event.is_set():
+                raise GeminiAborted("使用者中止")
+            time.sleep(min(1.0, remaining))
+
+    def _dismiss_menu(self) -> None:
+        try:
+            self._page.keyboard.press("Escape")
+        except Exception:
+            pass
+
+    def _try_select_model(self, req: str) -> tuple[str, str]:
+        """點開模型選單、找符合 req 的項目並點選。
+
+        回傳 (status, info)：
+          - 'ok'    成功選到（且未顯示額度滿）
+          - 'quota' 找到該模型但顯示額度已滿；info 為額度恢復時間那行
+          - 'fail'  找不到選單／項目，或點選失敗
+        """
+        picker = self._find("model_indicator")
+        if picker is None:
+            return "fail", ""
+        try:
+            picker.click()
+            self._page.wait_for_timeout(700)
+        except Exception:
+            return "fail", ""
+
+        target = None
+        target_txt = ""
+        for sel in self.selectors.get("model_menu_item", []):
+            try:
+                loc = self._page.locator(sel)
+                count = loc.count()
+            except Exception:
+                continue
+            for i in range(count):
+                try:
+                    item = loc.nth(i)
+                    if not item.is_visible():
+                        continue
+                    txt = (item.inner_text() or "").strip()
+                except Exception:
+                    continue
+                if not txt:
+                    continue
+                name = txt.splitlines()[0].strip()  # 首行＝模型名
+                if model_matches(name, req):
+                    target = item
+                    target_txt = txt
+                    break
+            if target is not None:
+                break
+
+        if target is None:
+            self._dismiss_menu()
+            return "fail", ""
+
+        low = target_txt.lower()
+        if any(p.lower() in low for p in _QUOTA_RESET_PHRASES):
+            info = next(
+                (ln.strip() for ln in target_txt.splitlines()
+                 if any(p.lower() in ln.lower() for p in _QUOTA_RESET_PHRASES)),
+                "額度已滿")
+            self._dismiss_menu()
+            return "quota", info
+
+        try:
+            target.click()
+            self._page.wait_for_timeout(800)
+        except Exception:
+            self._dismiss_menu()
+            return "fail", ""
+        return "ok", ""
 
     def _read_current_model(self) -> str:
         """讀取頁面上顯示的目前模型名稱（例如 '2.5 Pro'）。讀不到回空字串。"""

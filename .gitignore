@@ -6,6 +6,9 @@
 # API 金鑰（DPAPI 加密；雙重保險也不進 git）
 aa_api_keys.dat
 
+# Claude Code 本機設定／skills（不進 repo）
+.claude/
+
 # Python 快取
 __pycache__/
 *.pyc

@@ -40,6 +40,11 @@ _CENSOR_REPLY_MAX_LINES = 4
 _CENSOR_SOURCE_MIN_LINES = 4
 _ID_LINE_RE = re.compile(r'^\s*\d+-\d+\s*\|')
 
+# 未翻譯偵測：可比對的 ID 中，譯文與原文「完全相同」的比例 ≥ 此值 → 視為沒翻譯。
+_UNTRANSLATED_RATIO = 0.9
+# 可比對 ID 數少於此值時不做未翻譯判定（樣本太少容易誤判，交給其他檢查）。
+_UNTRANSLATED_MIN_IDS = 3
+
 _URL_CACHE_DIR = os.path.join(tempfile.gettempdir(), "aa_url_cache")
 
 
@@ -55,6 +60,10 @@ class StopRequested(RuntimeError):
 
 class CensoredResponse(RuntimeError):
     """偵測到 Gemini 回覆疑似被審查（極短且非翻譯格式），該話跳過。"""
+
+
+class UntranslatedResponse(RuntimeError):
+    """偵測到回覆與原文幾乎一致（疑似沒翻譯，只是把原文吐回來），該話跳過。"""
 
 
 # ── 設定載入 ──
@@ -207,6 +216,31 @@ def _looks_censored(extracted_chunk: str, reply: str) -> bool:
         return False
     matched = sum(1 for l in reply_lines if _ID_LINE_RE.match(l))
     return matched <= 1
+
+
+def _parse_id_map(text: str) -> dict[str, str]:
+    """把 'ID|文字' 每行解析成 {ID: 文字}。"""
+    out: dict[str, str] = {}
+    for line in text.split("\n"):
+        if "|" in line:
+            k, v = line.split("|", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def _looks_untranslated(extracted: str, translated: str) -> bool:
+    """回覆是否「幾乎等於原文」（疑似沒翻譯，只把原文吐回來）。
+
+    以 ID 對齊比對：可比對的 ID 中，譯文與原文完全相同的比例 ≥
+    `_UNTRANSLATED_RATIO` 即視為未翻譯。可比對 ID 太少則不判定（回 False）。
+    """
+    orig = _parse_id_map(extracted)
+    trans = _parse_id_map(translated)
+    common = [k for k in orig if k in trans]
+    if len(common) < _UNTRANSLATED_MIN_IDS:
+        return False
+    same = sum(1 for k in common if orig[k] == trans[k])
+    return same / len(common) >= _UNTRANSLATED_RATIO
 
 
 def _translate(session: GeminiWebSession, extracted: str,
@@ -498,10 +532,14 @@ def run_auto_translate(
                 log(f"  提取 {n_lines} 行，開始翻譯…")
                 translated = _translate(session, extracted, log, stop_event)
                 warnings = text_extraction.validate_ai_text(translated)
-                if warnings:
-                    log("  ⚠️ 翻譯驗證警告：" + "  ".join(warnings)
-                        + " → 重試一次（會再送一次 Gemini）")
+                untranslated = _looks_untranslated(extracted, translated)
+                if warnings or untranslated:
+                    reason = ("回覆與原文幾乎一致（疑似未翻譯）" if untranslated
+                              else "翻譯驗證警告：" + "  ".join(warnings))
+                    log(f"  ⚠️ {reason} → 重試一次（再送一次 Gemini）")
                     translated = _translate(session, extracted, log, stop_event)
+                    if _looks_untranslated(extracted, translated):
+                        raise UntranslatedResponse("重試後回覆仍與原文幾乎一致")
                 log("  替換翻譯中…")
                 result_text = translation_engine.apply_translation(
                     source, extracted, translated, cfg.glossary,
@@ -541,6 +579,10 @@ def run_auto_translate(
             except CensoredResponse as e:
                 result.failed.append((url, f"可能被審查：{e}"))
                 log(f"  🚫 {e} → 跳過此話，繼續下一話。")
+                url = next_url
+            except UntranslatedResponse as e:
+                result.failed.append((url, f"疑似未翻譯：{e}"))
+                log(f"  ⚠️ {e} → 跳過此話（不存檔），繼續下一話。")
                 url = next_url
             except StopRequested:
                 result.stopped = True

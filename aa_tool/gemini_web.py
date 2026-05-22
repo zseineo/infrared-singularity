@@ -138,6 +138,10 @@ _POLL_INTERVAL = 1.0
 _STABLE_CHECKS = 3
 _GEN_TIMEOUT = 600          # 單次生成最長等待秒數
 _GEN_START_TIMEOUT = 25     # 送出後等待「開始生成」的最長秒數
+# 生成判定完成後，再多等這秒數才讀取回覆文字。
+# 目的：避免串流尾端／DOM 尚未完全 render 時就讀走半截或舊內容
+# （等同「按下複製鍵到實際取得內容之間的緩衝」）。
+_POST_GEN_SETTLE = 3.0
 
 # 模型不符時，暫停等使用者在瀏覽器手動切換模型的最長秒數。
 _MODEL_WAIT_TIMEOUT = 300   # 5 分鐘
@@ -294,6 +298,9 @@ class GeminiWebSession:
         prev_count = self._response_count()
         self._click_send()
         self._wait_generation_done(prev_count)
+        # 生成判定完成後再沉澱數秒，確保讀到的是完整最終回覆
+        if _POST_GEN_SETTLE > 0:
+            time.sleep(_POST_GEN_SETTLE)
         return self._latest_response_text()
 
     # ── 內部：對話管理 ──

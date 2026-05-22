@@ -7,6 +7,7 @@
   - blog105.fc2.com（textar-aa div + relate_dl，FC2 舊版模板，含不帶引號 font color）
   - blog136.fc2.com（entryblock / AA div + relate_dl，FC2 舊版模板）
   - yaruobook.jp（author-res-dt / author-res 結構 + relatedPostsWrap）
+  - yaruohiroba.com（dt/dd 結構 + related-list 關聯清單）
   - yaruo-matome.com（entry-content div + nexe-prev-post ul）
   - blog.livedoor.jp（textar-aa / span.aa，無關聯記事、尾端嵌入下一話連結）
 """
@@ -801,12 +802,14 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
 # ════════════════════════════════════════════════════════════════
 
 def _parse_yaruobook(page_html: str, base_url: str, *, author_name: str = "", author_only: bool = False) -> tuple[str | None, list[dict], str]:
-    """解析 yaruobook.jp 格式。
+    """解析 yaruobook.jp 格式（亦涵蓋 yaruohiroba.com 等共用 dt/dd 結構的站點）。
 
     內文：<dt class="author-res-dt"> ... </dt><dd class="author-res"> ... </dd>
     標頭格式：「N ： AUTHOR ： YYYY/MM/DD(曜) HH:MM:SS.SS ID:XXX」
     標題：<title>...</title>
-    關聯：<ul class="relatedPostsWrap relatedPostsPrev/Next">，<li class="currentPost"> 標記當前話。
+    關聯：<ul class="relatedPostsWrap relatedPostsPrev/Next">，<li class="currentPost"> 標記當前話；
+          若無此結構，改解析 <ul class="related-list">（yaruohiroba.com，
+          <li class="related-current"> 標記當前話、清單已為時間順序）。
     """
     # ── 標題 ──
     title_m = re.search(r'<title>([^<]+)</title>', page_html)
@@ -825,7 +828,8 @@ def _parse_yaruobook(page_html: str, base_url: str, *, author_name: str = "", au
 
     end_m = re.search(
         r'<div\s+[^>]*class="[^"]*widget-single-content-bottom'
-        r'|<ul\s+[^>]*class="[^"]*relatedPostsWrap',
+        r'|<ul\s+[^>]*class="[^"]*relatedPostsWrap'
+        r'|<div\s+[^>]*class="[^"]*related-section',
         page_html[first_m.start():],
     )
     content_end = first_m.start() + end_m.start() if end_m else len(page_html)
@@ -872,6 +876,31 @@ def _parse_yaruobook(page_html: str, base_url: str, *, author_name: str = "", au
         nav_links.extend(reversed(_parse_related_ul(prev_m.group(1))))
     if next_m:
         nav_links.extend(_parse_related_ul(next_m.group(1)))
+
+    # ── related-list 變體（例：yaruohiroba.com）──
+    # 無 relatedPostsWrap 時，改解析 <ul class="related-list">：
+    #   <li class=""><a href="URL">TITLE</a></li>          → 其他話
+    #   <li class="related-current"><strong>TITLE</strong> → 當前話（無連結）
+    # 清單原始順序已是「舊 → 新」時間順序，不需反轉。
+    if not nav_links:
+        rl_m = re.search(
+            r'<ul\s+class="related-list">(.*?)</ul>', page_html, re.DOTALL)
+        if rl_m:
+            for li in re.finditer(
+                r'<li\s+class="([^"]*)"[^>]*>(.*?)</li>', rl_m.group(1), re.DOTALL):
+                li_class = li.group(1)
+                li_inner = li.group(2)
+                is_current = 'related-current' in li_class
+                a_m = re.search(r'<a\s+href="([^"]+)"[^>]*>(.*?)</a>', li_inner, re.DOTALL)
+                if a_m:
+                    href = urljoin(base_url, a_m.group(1))
+                    title = html.unescape(re.sub(r'<[^>]+>', '', a_m.group(2))).strip()
+                    if title:
+                        nav_links.append({'title': title, 'url': href, 'is_current': is_current})
+                else:
+                    title = html.unescape(re.sub(r'<[^>]+>', '', li_inner)).strip()
+                    if title:
+                        nav_links.append({'title': title, 'url': None, 'is_current': is_current})
 
     return text_content, nav_links, page_title
 
@@ -1151,6 +1180,7 @@ _DOMAIN_PARSERS: dict[str, callable] = {
     'blog105.fc2.com': _parse_fc2blog,
     'blog136.fc2.com': _parse_fc2blog,
     'yaruobook.jp': _parse_yaruobook,
+    'yaruohiroba.com': _parse_yaruobook,
     'yaruobook.net': _parse_yaruobook_net,
     'yaruo-matome.com': _parse_yaruo_matome,
 }

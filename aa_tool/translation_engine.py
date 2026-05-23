@@ -81,11 +81,39 @@ def expand_glossary_entry(key: str, value: str) -> list[tuple[str, str]]:
     return [(k, v) for k, v in zip(key_parts, val_parts) if k]
 
 
-def parse_glossary(glossary_str: str) -> dict[str, str]:
+# 平假名 (U+3041..U+3096) 與片假名 (U+30A1..U+30F6) 在 Unicode 中一一對應，
+# 差距固定為 0x60；長音符號 ー(U+30FC) 等不在此範圍內者原樣保留。
+_HIRA_LO, _HIRA_HI = 0x3041, 0x3096
+_KATA_LO, _KATA_HI = 0x30A1, 0x30F6
+_KANA_OFFSET = _KATA_LO - _HIRA_LO  # 0x60
+
+
+def _swap_kana(text: str) -> str:
+    """把字串中的平假名↔片假名互換，其餘字元（漢字、長音 ー、英數等）原樣保留。
+
+    例：'ライザ' → 'らいざ'、'らいざ' → 'ライザ'。
+    """
+    out = []
+    for ch in text:
+        code = ord(ch)
+        if _HIRA_LO <= code <= _HIRA_HI:
+            out.append(chr(code + _KANA_OFFSET))
+        elif _KATA_LO <= code <= _KATA_HI:
+            out.append(chr(code - _KANA_OFFSET))
+        else:
+            out.append(ch)
+    return ''.join(out)
+
+
+def parse_glossary(glossary_str: str, *, kana_fold: bool = False) -> dict[str, str]:
     """將 '日文=中文' 格式的術語表字串解析為 dict。
 
     Key 與 value 透過 `decode_glossary_term` 處理：預設剝外圍空白，
     若用 `"..."` 包覆則完整保留外圍空白（內部空白一律保留）。
+
+    `kana_fold=True` 時，對每條術語額外產生「key 平假名↔片假名互換」的變體
+    （例：`ライザ=萊莎` 會同時產生 `らいざ=萊莎`），使原文不論寫成哪種假名都能命中
+    同一個替換。變體只在不與既有明確條目衝突時加入（明確條目優先）。
     """
     glossary: dict[str, str] = {}
     for line in glossary_str.split('\n'):
@@ -97,6 +125,11 @@ def parse_glossary(glossary_str: str) -> dict[str, str]:
                 for k, v in expand_glossary_entry(key, val):
                     if k:
                         glossary[k] = v
+    if kana_fold:
+        for k, v in list(glossary.items()):
+            swapped = _swap_kana(k)
+            if swapped != k and swapped not in glossary:
+                glossary[swapped] = v
     return glossary
 
 

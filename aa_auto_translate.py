@@ -98,7 +98,8 @@ def load_config(base_dir: str) -> AutoConfig:
         invalid_regex=s.invalid_regex,
         symbol_regex=s.symbol_regex,
         filter_text=s.filter_text,
-        glossary=translation_engine.parse_glossary(glossary_text),
+        glossary=translation_engine.parse_glossary(
+            glossary_text, kana_fold=c.glossary_kana_fold),
         author_name=c.author_name,
         author_only=c.author_only,
         korean_mode=c.korean_mode,

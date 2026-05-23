@@ -63,6 +63,7 @@ class SettingsDialog(QDialog):
         experimental_extraction: bool,
         pad_right_aa: bool,
         glossary_avoid_aa: bool,
+        glossary_kana_fold: bool,
         glossary_translation_only: bool,
         fetch_auto_fill_title: bool,
         orig_cache_path: str,
@@ -81,7 +82,7 @@ class SettingsDialog(QDialog):
                        glossary_auto_search, diff_save_mode, embed_font_in_html,
                        embed_font_name, editor_default_wysiwyg, korean_mode,
                        experimental_extraction, pad_right_aa,
-                       glossary_avoid_aa,
+                       glossary_avoid_aa, glossary_kana_fold,
                        glossary_translation_only, fetch_auto_fill_title)
         self._refresh_cache_size()
 
@@ -91,6 +92,7 @@ class SettingsDialog(QDialog):
                   embed_font_name: str, editor_default_wysiwyg: bool,
                   korean_mode: bool, experimental_extraction: bool,
                   pad_right_aa: bool, glossary_avoid_aa: bool,
+                  glossary_kana_fold: bool,
                   glossary_translation_only: bool,
                   fetch_auto_fill_title: bool) -> None:
         root = QVBoxLayout(self)
@@ -148,6 +150,18 @@ class SettingsDialog(QDialog):
             "    （片假名敬稱 サン 等除外）。\n"
             "只影響全域術語覆蓋；提取出的譯文部分仍照常套用術語表。")
         root.addWidget(self.glossary_avoid_aa_cb)
+
+        self.glossary_kana_fold_cb = QCheckBox(
+            "套用術語表時：平假名／片假名互通")
+        self.glossary_kana_fold_cb.setFont(_ui_font(12))
+        self.glossary_kana_fold_cb.setChecked(glossary_kana_fold)
+        self.glossary_kana_fold_cb.setToolTip(
+            "開啟後，套用術語表時，原文（等號左側）的平假名與片假名視為相通：\n"
+            "  • 術語「ライザ=萊莎」會同時等同「らいざ=萊莎」（反之亦然）。\n"
+            "  • 變體只在不與既有術語條目衝突時自動加入（明確寫的條目優先）。\n"
+            "  • 漢字、長音符號 ー、英數等非假名字元維持原樣。\n"
+            "影響所有術語套用路徑（替換翻譯、重套術語、自動翻譯等）。")
+        root.addWidget(self.glossary_kana_fold_cb)
 
         self.fetch_auto_fill_title_cb = QCheckBox(
             "網址讀取成功時，自動填入作品名稱框")
@@ -352,6 +366,7 @@ class SettingsDialog(QDialog):
                 self.experimental_extraction_cb.isChecked(),
             'pad_right_aa': self.pad_right_aa_cb.isChecked(),
             'glossary_avoid_aa': self.glossary_avoid_aa_cb.isChecked(),
+            'glossary_kana_fold': self.glossary_kana_fold_cb.isChecked(),
             'glossary_translation_only':
                 self.glossary_translation_only_cb.isChecked(),
             'fetch_auto_fill_title': self.fetch_auto_fill_title_cb.isChecked(),

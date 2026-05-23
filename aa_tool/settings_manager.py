@@ -149,6 +149,9 @@ class AppCache:
     # 實驗性：套用術語表時，略過疑似落在 AA 圖上的命中，避免術語表把 AA 圖中
     # 剛好等於某術語 key 的片假名碎片誤替換掉。預設關閉。
     glossary_avoid_aa: bool = False
+    # 套用術語表時，原文 key 的平假名↔片假名互換變體也一併套用（例：術語
+    # `ライザ=萊莎` 同時等同 `らいざ=萊莎`）。預設關閉。
+    glossary_kana_fold: bool = False
     # 「補空白」按鈕在每個字元之間插入的全形空白數量（1~3）。
     pad_space_count: int = 2
     # 網址讀取成功且有正確辨識標題時，自動把標題填入作品名稱框。
@@ -361,6 +364,8 @@ class SettingsManager:
                 'pad_right_aa', cache.pad_right_aa))
             cache.glossary_avoid_aa = bool(data.get(
                 'glossary_avoid_aa', cache.glossary_avoid_aa))
+            cache.glossary_kana_fold = bool(data.get(
+                'glossary_kana_fold', cache.glossary_kana_fold))
             cache.fetch_auto_fill_title = bool(data.get(
                 'fetch_auto_fill_title', cache.fetch_auto_fill_title))
             cache.gemini_gem_url = str(data.get(
@@ -472,6 +477,7 @@ class SettingsManager:
                 'experimental_extraction': cache.experimental_extraction,
                 'pad_right_aa': cache.pad_right_aa,
                 'glossary_avoid_aa': cache.glossary_avoid_aa,
+                'glossary_kana_fold': cache.glossary_kana_fold,
                 'pad_space_count': cache.pad_space_count,
                 'fetch_auto_fill_title': cache.fetch_auto_fill_title,
                 'gemini_gem_url': cache.gemini_gem_url,

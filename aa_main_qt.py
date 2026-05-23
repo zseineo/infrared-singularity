@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.43"
+APP_VERSION = "1.44"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -682,6 +682,7 @@ class MainWindow(QMainWindow):
         self._experimental_extraction: bool = False
         self._pad_right_aa: bool = False
         self._glossary_avoid_aa: bool = False
+        self._glossary_kana_fold: bool = False
         self._glossary_translation_only: bool = False
         self._fetch_auto_fill_title: bool = False
 
@@ -974,6 +975,7 @@ class MainWindow(QMainWindow):
                 translation_only_provider=lambda: self._glossary_translation_only,
                 pad_right_aa_provider=lambda: self._pad_right_aa,
                 glossary_avoid_aa_provider=lambda: self._glossary_avoid_aa,
+                glossary_kana_fold_provider=lambda: self._glossary_kana_fold,
                 url_for_text_provider=self._find_url_for_text,
                 reload_original_for_file=self.load_original_with_url_fallback,
             )
@@ -1269,7 +1271,9 @@ class MainWindow(QMainWindow):
         self._record_work_history()
         # 覆蓋率檢查改為「貼入翻譯」即時顯示於填入翻譯區塊右側
         # （見 _update_ai_match_label），這裡不再跳 Toast。
-        glossary = parse_glossary(self._translate_panel.get_combined_glossary())
+        glossary = parse_glossary(
+            self._translate_panel.get_combined_glossary(),
+            kana_fold=self._glossary_kana_fold)
         result_text = _apply_translation(
             source, extracted, translated, glossary,
             append_mode=append_mode,
@@ -2076,6 +2080,7 @@ class MainWindow(QMainWindow):
             experimental_extraction=self._experimental_extraction,
             pad_right_aa=self._pad_right_aa,
             glossary_avoid_aa=self._glossary_avoid_aa,
+            glossary_kana_fold=self._glossary_kana_fold,
             glossary_translation_only=self._glossary_translation_only,
             pad_space_count=self._pad_space_count,
             fetch_auto_fill_title=self._fetch_auto_fill_title,
@@ -2153,6 +2158,7 @@ class MainWindow(QMainWindow):
         self._experimental_extraction = bool(cache.experimental_extraction)
         self._pad_right_aa = bool(cache.pad_right_aa)
         self._glossary_avoid_aa = bool(cache.glossary_avoid_aa)
+        self._glossary_kana_fold = bool(cache.glossary_kana_fold)
         self._glossary_translation_only = bool(cache.glossary_translation_only)
         self._fetch_auto_fill_title = bool(cache.fetch_auto_fill_title)
         self._gemini_gem_url = str(cache.gemini_gem_url or "")
@@ -2207,6 +2213,7 @@ class MainWindow(QMainWindow):
             experimental_extraction=self._experimental_extraction,
             pad_right_aa=self._pad_right_aa,
             glossary_avoid_aa=self._glossary_avoid_aa,
+            glossary_kana_fold=self._glossary_kana_fold,
             glossary_translation_only=self._glossary_translation_only,
             fetch_auto_fill_title=self._fetch_auto_fill_title,
             orig_cache_path=os.path.join(
@@ -2242,6 +2249,8 @@ class MainWindow(QMainWindow):
             'pad_right_aa', self._pad_right_aa))
         self._glossary_avoid_aa = bool(values.get(
             'glossary_avoid_aa', self._glossary_avoid_aa))
+        self._glossary_kana_fold = bool(values.get(
+            'glossary_kana_fold', self._glossary_kana_fold))
         self._glossary_translation_only = bool(values.get(
             'glossary_translation_only', self._glossary_translation_only))
         self._fetch_auto_fill_title = bool(values.get(

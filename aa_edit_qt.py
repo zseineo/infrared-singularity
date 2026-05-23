@@ -186,6 +186,7 @@ class EditWindow(QMainWindow):
         translation_only_provider=None,  # () -> bool；對應主程式「術語表只套用於譯文部分」設定
         pad_right_aa_provider=None,  # () -> bool；對應主程式「替換翻譯時偵測右側 AA 圖補空白」設定
         glossary_avoid_aa_provider=None,  # () -> bool；對應主程式「套用術語表時避免套用到 AA 圖」設定
+        glossary_kana_fold_provider=None,  # () -> bool；對應主程式「套用術語表時平假名／片假名互通」設定
         url_for_text_provider=None,  # (text: str) -> str | None；以指紋查 url_history 取得對應網址
         reload_original_for_file=None,  # (file_path: str) -> str | None；依指紋查原文暫存
     ) -> None:
@@ -238,6 +239,7 @@ class EditWindow(QMainWindow):
         self._translation_only_provider = translation_only_provider
         self._pad_right_aa_provider = pad_right_aa_provider
         self._glossary_avoid_aa_provider = glossary_avoid_aa_provider
+        self._glossary_kana_fold_provider = glossary_kana_fold_provider
         self._url_for_text_provider = url_for_text_provider
         self._reload_original_for_file = reload_original_for_file
 
@@ -978,6 +980,15 @@ class EditWindow(QMainWindow):
                 symbol_regex_str = None
         return avoid_aa, symbol_regex_str
 
+    def _glossary_kana_fold(self) -> bool:
+        """回傳是否啟用「套用術語表時平假名／片假名互通」；供術語表解析共用。"""
+        if self._glossary_kana_fold_provider is not None:
+            try:
+                return bool(self._glossary_kana_fold_provider())
+            except Exception:
+                return False
+        return False
+
     def _reapply_glossary(self) -> None:
         """向主程式請求目前術語表，收到後套用到編輯內容。"""
         if self._glossary_provider is not None:
@@ -999,7 +1010,8 @@ class EditWindow(QMainWindow):
         if not glossary_str:
             self._set_status("⚠️ 術語表為空", "#ffc107")
             return
-        glossary = parse_glossary(glossary_str)
+        glossary = parse_glossary(
+            glossary_str, kana_fold=self._glossary_kana_fold())
         if not glossary:
             self._set_status("⚠️ 術語表格式不正確", "#ffc107")
             return
@@ -1172,7 +1184,8 @@ class EditWindow(QMainWindow):
             self._set_status("⚠️ 請先選取要替換的文字", "#ffc107")
             return
         glossary_str = self._glossary_provider() or ""
-        glossary = parse_glossary(glossary_str)
+        glossary = parse_glossary(
+            glossary_str, kana_fold=self._glossary_kana_fold())
         if not glossary:
             self._set_status("⚠️ 術語表為空", "#ffc107")
             return
@@ -2291,7 +2304,8 @@ class EditWindow(QMainWindow):
                 glossary_str = self._glossary_provider() or ""
             except Exception:
                 glossary_str = ""
-        glossary = parse_glossary(glossary_str)
+        glossary = parse_glossary(
+            glossary_str, kana_fold=self._glossary_kana_fold())
 
         translation_only = False
         if self._translation_only_provider is not None:

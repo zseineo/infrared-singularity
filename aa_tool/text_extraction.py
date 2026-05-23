@@ -1104,24 +1104,64 @@ def analyze_extraction(
                 "[骰子格式預處理] 將句中 【NDN:N】 內的半形 `:` 暫換為 `：` 以維持整句連續匹配")
 
         if use_experimental:
+            # 完整鏡射 extract_text 的實驗性管線（保持結論一致）：
+            #   步驟 0 拉長念法／全形片假名整句（保留空白、不走邊界擴展與分數過濾）
+            #   步驟 1-2 錨點掃描 → 邊界擴展與合併
+            #   候選階段 allow_short 長度放行 → invalid → 分數 → 短純片假名括號閘
+            #   步驟 3 短候選孤立過濾
+            #   步驟 4 後處理 → allow_short 重檢 → 括號補完 → 自訂濾網
+            # 步驟 3 的倖存清單與步驟 4 的最終結果，皆取自與 extract_text 相同的
+            # `_extract_experimental_line()`，確保報告不會與實際提取分歧。
+            covered: list[tuple[int, int]] = []
+            spaced = _find_spaced_out(proc_line)
+            kata = _find_kata_sentence(proc_line)
+            if spaced or kata:
+                report.append(
+                    "[步驟 0] 拉長念法／全形片假名整句（保留空白，不走分數過濾）：")
+                for t, s, e in spaced:
+                    covered.append((s, e))
+                    mark = "剔除(invalid)" if invalid_regex.match(t) else "保留"
+                    report.append(f"  拉長念法 '{t}' (pos {s}-{e}) -> {mark}")
+                for t, s, e in kata:
+                    if any(ss <= s and e <= ee for ss, ee in covered):
+                        report.append(
+                            f"  片假名整句 '{t}' (pos {s}-{e}) -> 已被覆蓋，略過")
+                        continue
+                    covered.append((s, e))
+                    mark = "剔除(invalid)" if invalid_regex.match(t) else "保留"
+                    report.append(f"  片假名整句 '{t}' (pos {s}-{e}) -> {mark}")
+
             anchors = _find_anchors(proc_line)
             report.append(f"[步驟 1] 錨點掃描：找到 {len(anchors)} 個錨點")
             for ai, (s, e) in enumerate(anchors):
                 report.append(
                     f"  錨點 {ai+1}: ({s}, {e}) -> '{proc_line[s:e]}'")
-            if not anchors:
-                report.append("  -> ❌ 整行無錨點，剔除。")
+            if not anchors and not (spaced or kata):
+                report.append("  -> ❌ 整行無錨點、無拉長念法／片假名整句，剔除。")
                 report.append("\n" + "=" * 40 + "\n")
                 continue
             expanded = _merge_overlapping(
-                [_expand_boundary(proc_line, s, e) for s, e in anchors])
+                [_expand_boundary(proc_line, s, e) for s, e in anchors]
+            ) if anchors else []
             report.append(f"[步驟 2] 邊界擴展與合併：得到 {len(expanded)} 個 candidate")
             for ci, (s, e) in enumerate(expanded):
                 raw = proc_line[s:e]
                 report.append(f"\n  >> Candidate {ci+1} '{raw}' (pos {s}-{e})")
+                if any(ss <= s and e <= ee for ss, ee in covered):
+                    report.append("    -> ❌ 剔除：已被拉長念法／片假名整句覆蓋。")
+                    continue
                 t = raw.strip()
-                if len(t) < 3:
-                    report.append("    -> ❌ 剔除：長度 < 3。")
+                # 與 _extract_experimental_line 一致的「長度 2 特殊放行」
+                is_re = _is_right_edge_dialogue(proc_line, s, e)
+                allow_short = (bool(_SHORT_UTT_RE.fullmatch(t))
+                               or bool(_HIRAGANA_RUN_RE.fullmatch(t))
+                               or (bool(_KANJI_HIRA_RE.fullmatch(t)) and is_re)
+                               or (bool(_KANJI_END_PUNCT_RE.fullmatch(t)) and is_re))
+                min_len = 2 if allow_short else 3
+                if len(t) < min_len:
+                    report.append(
+                        f"    -> ❌ 剔除：長度 {len(t)} < {min_len}"
+                        f"（allow_short={allow_short}）。")
                     continue
                 if invalid_regex.match(t):
                     report.append("    -> ❌ 剔除：全句符合 invalid_regex。")
@@ -1137,23 +1177,64 @@ def analyze_extraction(
                 if score < 2:
                     report.append("    -> ❌ 剔除：score < 2。")
                     continue
-                t = _DICE_NOTATION_FW_RE.sub(r'\1:\2', t)
-                original_t = t
-                t = _postprocess_text(t, korean_mode=False, experimental=True)
-                report.append(f"    [後處理] '{original_t}' => '{t}'")
-                if len(t) <= 2:
-                    report.append("    -> ❌ 剔除：後處理後長度 <= 2。")
+                if (_SHORT_KATA_UTT_RE.match(t)
+                        and not _in_bracket_region(proc_line, s, e)):
+                    report.append(
+                        "    -> ❌ 剔除：短純片假名喊叫（2 片假名＋標點）在括號外，"
+                        "視為 AA 裝飾。")
                     continue
-                filtered_by_custom = False
-                for reg in custom_regexes:
-                    if reg.search(t):
+                report.append("    -> ☑ 通過候選階段（待短候選孤立過濾）。")
+
+            # 步驟 3：短候選孤立過濾。survivors 取自與 extract_text 相同的函式，
+            # 確保「倖存清單」「最終結果」與實際提取完全一致。
+            survivors = _extract_experimental_line(
+                proc_line, invalid_regex, symbol_regex)
+            survivor_spans = {(s, e) for _t, s, e in survivors}
+            has_companion = any(len(t) >= 5 for t, _s, _e in survivors)
+            report.append(
+                f"\n[步驟 3] 短候選孤立過濾 → 倖存 {len(survivors)} 個候選"
+                f"（同行有 ≥5 char 伴隨={has_companion}）")
+            for s, e in expanded:
+                if (s, e) not in survivor_spans and not any(
+                        ss <= s and e <= ee for ss, ee in covered):
+                    t = proc_line[s:e].strip()
+                    if t and _score_candidate(
+                            t, proc_line, s, e, symbol_regex) >= 2:
                         report.append(
-                            f"    -> ❌ 剔除：命中自訂濾網 ({reg.pattern})。")
-                        filtered_by_custom = True
-                        break
-                if filtered_by_custom:
+                            f"  - '{proc_line[s:e]}' 通過候選階段但被孤立過濾剔除"
+                            "（短候選且無強短信號／無長伴隨／非行尾／非對話框）。")
+
+            report.append(
+                "\n[步驟 4] 對倖存候選做後處理／allow_short 重檢／括號補完／自訂濾網：")
+            for raw_text, cand_s, cand_e in survivors:
+                text = _DICE_NOTATION_FW_RE.sub(r'\1:\2', raw_text)
+                original = text
+                text = _postprocess_text(
+                    text, korean_mode=False, experimental=True)
+                report.append(f"\n  >> '{raw_text}' (pos {cand_s}-{cand_e})")
+                if original != text:
+                    report.append(f"    [後處理] '{original}' => '{text}'")
+                is_re_post = _is_right_edge_dialogue(line, cand_s, cand_e)
+                allow_short = (_SHORT_UTT_RE.fullmatch(text)
+                               or _HIRAGANA_RUN_RE.fullmatch(text)
+                               or (_KANJI_HIRA_RE.fullmatch(text) and is_re_post)
+                               or (_KANJI_END_PUNCT_RE.fullmatch(text)
+                                   and is_re_post))
+                min_len = 2 if allow_short else 3
+                if len(text) < min_len:
+                    report.append(
+                        f"    -> ❌ 剔除：後處理後長度 {len(text)} < {min_len}"
+                        f"（allow_short={bool(allow_short)}）。")
                     continue
-                report.append(f"    -> ✅ 成功提取最終文字: '{t}'")
+                text = _complete_brackets(text, line, hint_pos=cand_s)
+                hit = next(
+                    (reg.pattern for reg in custom_regexes if reg.search(text)),
+                    None)
+                if hit:
+                    report.append(f"    -> ❌ 剔除：命中自訂濾網 ({hit})。")
+                    continue
+                if text:
+                    report.append(f"    -> ✅ 成功提取最終文字: '{text}'")
             report.append("\n" + "=" * 40 + "\n")
             continue
 

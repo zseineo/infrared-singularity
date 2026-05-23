@@ -30,8 +30,8 @@ from aa_tool import secure_store
 
 # 翻譯後端選項：(顯示文字, 內部值)
 _BACKEND_OPTIONS: list[tuple[str, str]] = [
-    ("現行（瀏覽器操控網頁 Gemini）", "browser"),
-    ("使用 Google API", "api"),
+    ("瀏覽器", "browser"),
+    ("API", "api"),
 ]
 
 
@@ -254,7 +254,7 @@ class AutoTranslatePanel(QWidget):
         self.gem_edit.setPlaceholderText("https://gemini.google.com/gem/...")
         form.addRow("Gemini Gem 網址：", self.gem_edit)
 
-        self.use_gem_cb = QCheckBox("瀏覽器模式使用 Gem（不發送 Prompt）")
+        self.use_gem_cb = QCheckBox("瀏覽器模式使用不發送 Prompt (使用Gem)")
         self.use_gem_cb.setToolTip(
             "勾選：瀏覽器模式靠 Gem 內建人設翻譯，不送出下方 Prompt。\n"
             "取消勾選：瀏覽器模式也會送 Prompt（適合不用 Gem 的使用者）。\n"
@@ -288,8 +288,7 @@ class AutoTranslatePanel(QWidget):
         form.addRow("API 金鑰：", self.api_keys_edit)
 
         enc_note = QLabel(
-            "🔒 金鑰以 Windows DPAPI 加密存於 aa_api_keys.dat（綁定本機帳號、"
-            "已列入 .gitignore，不會上傳）" if secure_store.is_real_encryption()
+            "🔒 金鑰以 Windows DPAPI 加密存於 aa_api_keys.dat" if secure_store.is_real_encryption()
             else "⚠️ 非 Windows：金鑰僅 base64 混淆儲存，安全性較低")
         enc_note.setWordWrap(True)
         enc_note.setStyleSheet("color:#6c757d; font-size:11px;")

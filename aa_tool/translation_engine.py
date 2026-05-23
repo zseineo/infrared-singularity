@@ -242,6 +242,50 @@ _KATAKANA_RE = re.compile(r'[ァ-ヺ・ー゠ｦ-ﾟ]')
 _KATAKANA_HONORIFICS = ('サン', 'チャン', 'クン', 'サマ', 'タン', 'ニキ', 'ネキ')
 # glossary_avoid_aa：命中位置左右視窗 AA 噪聲密度 >= 此值 → 視為落在 AA 圖上。
 _GLOSSARY_AA_DENSITY_TH = 0.5
+# glossary_avoid_aa 規則 C：命中緊鄰「相同裝飾標點」連續 >= 此長度的 run → 視為 AA。
+_GLOSSARY_DECO_RUN_MIN = 3
+# 可正當連續重複、不應視為 AA 裝飾的文字標點（省略號／破折號／長音／句讀點／
+# 對話括號等）。這些之外、非假名漢字英數的標點若連成 run，才當作 AA 裝飾線。
+_GLOSSARY_DECO_RUN_EXCLUDE = set('…‥―—–－‐ー・〜～。、，,．.！!？?「」『』（）()')
+
+
+def _is_deco_run_char(ch: str) -> bool:
+    """判斷 `ch` 是否屬「AA 裝飾標點」：非文字本體（假名／漢字／英數）、非空白，
+    且不在 `_GLOSSARY_DECO_RUN_EXCLUDE`（可正當重複的句讀／破折號等）內。
+
+    典型如半形/全形分號 `;`／`；`、底線 `_` 等 —— 這些不在 symbol_regex 與
+    AA 標點集內，連續重複時是 AA 裝飾線，卻會稀釋 `_local_aa_density` 的密度。
+    """
+    if ch.isalnum() or ch.isspace():
+        return False
+    return ch not in _GLOSSARY_DECO_RUN_EXCLUDE
+
+
+def _glossary_hit_flanked_by_deco_run(line: str, start: int, end: int) -> bool:
+    """命中位置左側或右側是否緊鄰 `>= _GLOSSARY_DECO_RUN_MIN` 個相同裝飾標點。
+
+    例：`;;;;;;ノイ` 中 `ノイ` 左鄰 6 個 `;` → True（分號是 AA 裝飾線，但不被
+    `_local_aa_density` 計入噪聲，會把密度稀釋到門檻以下而漏判）。
+    """
+    if start > 0 and _is_deco_run_char(line[start - 1]):
+        ch = line[start - 1]
+        cnt = 0
+        i = start - 1
+        while i >= 0 and line[i] == ch:
+            cnt += 1
+            i -= 1
+        if cnt >= _GLOSSARY_DECO_RUN_MIN:
+            return True
+    if end < len(line) and _is_deco_run_char(line[end]):
+        ch = line[end]
+        cnt = 0
+        i = end
+        while i < len(line) and line[i] == ch:
+            cnt += 1
+            i += 1
+        if cnt >= _GLOSSARY_DECO_RUN_MIN:
+            return True
+    return False
 
 
 def _is_katakana_fragment_hit(line: str, start: int, end: int, key: str) -> bool:
@@ -273,8 +317,12 @@ def _glossary_hit_on_aa(line: str, start: int, end: int, key: str,
       中的 `アム`，周圍全是 `:` 等 AA 字元）。
     規則 B — 緊鄰片假名：見 `_is_katakana_fragment_hit`（疑似把更長的片假名
       詞硬切成術語碎片）。
+    規則 C — 緊鄰裝飾標點 run：見 `_glossary_hit_flanked_by_deco_run`（命中左/右
+      緊鄰 `;;;;` 這類連續重複裝飾標點，屬 AA 裝飾線但不被密度規則計入）。
     """
     if _local_aa_density(line, start, end, symbol_regex) >= _GLOSSARY_AA_DENSITY_TH:
+        return True
+    if _glossary_hit_flanked_by_deco_run(line, start, end):
         return True
     return _is_katakana_fragment_hit(line, start, end, key)
 

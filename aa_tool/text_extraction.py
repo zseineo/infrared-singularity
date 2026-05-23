@@ -291,6 +291,18 @@ _VALID_CHAR_RE = re.compile(
 
 _PARTICLES = set('のはをにがでとへやかもだねよわ')
 
+
+def _is_all_particles(text: str) -> bool:
+    """text 是否「整段都是助詞」（每個字元都在 `_PARTICLES`、且非空）。
+
+    多重助詞之所以是強對話信號，是因為助詞通常附著在實詞上（如「私には」的
+    に＋は，有實詞「私」）。但整段都是助詞、無任何實詞的短候選（如 AA 圖裡
+    `r､にへﾉ∧` 中的「にへ」）並非真實語句，不應享有「多重助詞」的分數加成
+    與局部密度豁免。注意：`でも`/`のに` 等合法全助詞詞與此同型，靠「低 AA
+    密度脈絡」「同行長伴隨」「行尾位置」等其他信號成立，而非多助詞信號。
+    """
+    return bool(text) and all(ch in _PARTICLES for ch in text)
+
 # 連續 ≥3 個相同片假名 — AA 圖邊框/裝飾的強烈特徵（如「ニニニ」「ンンン」）。
 # 真實日文片假名詞幾乎不會有 3 個連續相同字元；少數擬聲詞如「ガガガ！」會
 # 帶句末標點觸發 +2 分補償。
@@ -460,10 +472,12 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     if has_run:
         s += 3
     particle_count = sum(1 for ch in text if ch in _PARTICLES)
+    all_particles = _is_all_particles(text)
     if particle_count >= 1:
         s += 2
-    if particle_count >= 2:
-        s += 2  # 多重助詞 = 強烈日文對話信號（容忍局部 AA 噪聲）
+    if particle_count >= 2 and not all_particles:
+        s += 2  # 多重助詞 = 強烈日文對話信號（容忍局部 AA 噪聲）；
+                # 整段都是助詞、無實詞（如 AA 裡的「にへ」）不算
     if len(text) >= 5:
         s += 1
     # 送り仮名 pattern（漢字+1平假名+漢字）— 動詞活用形 + 後接漢字的強日文信號，
@@ -516,7 +530,7 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     # 不可僅靠長度被視為強日文信號；真實長對話幾乎必含平假名。
     # strong_jp 的句末標點只認**全形** `！？。` — 半形 `!?` 信號不足以豁免
     # 局部 AA 密度懲罰（避免「ンへ!」這類含半形 `!` 的 AA 碎片被放行）。
-    strong_jp = (particle_count >= 2
+    strong_jp = ((particle_count >= 2 and not all_particles)
                  or (has_run and len(text) >= 7 and any_hira)
                  or any(ch in text for ch in '！？。')
                  or has_num_option
@@ -637,7 +651,8 @@ def _is_strong_short_candidate(text: str) -> bool:
         return True
     # 計算「不同種」助詞數量（不重複）：避免「へへ」這類同字假名重複
     # 因 `へ` 是助詞被 count=2 觸發，把 AA 裝飾誤判為強短信號。
-    if len({c for c in text if c in _PARTICLES}) >= 2:
+    # 並排除「整段都是助詞」（無實詞，如「にへ」）— 多助詞信號需附著實詞才成立。
+    if not _is_all_particles(text) and len({c for c in text if c in _PARTICLES}) >= 2:
         return True
     if _NUMBER_OPTION_RE.search(text):
         return True

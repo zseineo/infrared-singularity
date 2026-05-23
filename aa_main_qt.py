@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.44"
+APP_VERSION = "1.45"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -683,6 +683,7 @@ class MainWindow(QMainWindow):
         self._pad_right_aa: bool = False
         self._glossary_avoid_aa: bool = False
         self._glossary_kana_fold: bool = False
+        self._glossary_auto_persist: bool = False
         self._glossary_translation_only: bool = False
         self._fetch_auto_fill_title: bool = False
 
@@ -1111,7 +1112,15 @@ class MainWindow(QMainWindow):
         g_text += f"{encode_glossary_term(original)}={encode_glossary_term(translation)}"
         self._translate_panel.glossary_text.setPlainText(g_text)
         self.schedule_save()
-        self.show_status(f"📖 已存入術語：{original} → {translation}", "#17a2b8")
+        suffix = ""
+        if self._glossary_auto_persist:
+            try:
+                self.save_glossary_only()
+                suffix = "（已寫入設定檔）"
+            except Exception as e:
+                suffix = f"（⚠️ 設定檔寫入失敗：{e}）"
+        self.show_status(
+            f"📖 已存入術語：{original} → {translation}{suffix}", "#17a2b8")
 
     # ════════════════════════════════════════════════════════════
     #  提取 / 翻譯
@@ -2081,6 +2090,7 @@ class MainWindow(QMainWindow):
             pad_right_aa=self._pad_right_aa,
             glossary_avoid_aa=self._glossary_avoid_aa,
             glossary_kana_fold=self._glossary_kana_fold,
+            glossary_auto_persist=self._glossary_auto_persist,
             glossary_translation_only=self._glossary_translation_only,
             pad_space_count=self._pad_space_count,
             fetch_auto_fill_title=self._fetch_auto_fill_title,
@@ -2159,6 +2169,7 @@ class MainWindow(QMainWindow):
         self._pad_right_aa = bool(cache.pad_right_aa)
         self._glossary_avoid_aa = bool(cache.glossary_avoid_aa)
         self._glossary_kana_fold = bool(cache.glossary_kana_fold)
+        self._glossary_auto_persist = bool(cache.glossary_auto_persist)
         self._glossary_translation_only = bool(cache.glossary_translation_only)
         self._fetch_auto_fill_title = bool(cache.fetch_auto_fill_title)
         self._gemini_gem_url = str(cache.gemini_gem_url or "")
@@ -2214,6 +2225,7 @@ class MainWindow(QMainWindow):
             pad_right_aa=self._pad_right_aa,
             glossary_avoid_aa=self._glossary_avoid_aa,
             glossary_kana_fold=self._glossary_kana_fold,
+            glossary_auto_persist=self._glossary_auto_persist,
             glossary_translation_only=self._glossary_translation_only,
             fetch_auto_fill_title=self._fetch_auto_fill_title,
             orig_cache_path=os.path.join(
@@ -2251,6 +2263,8 @@ class MainWindow(QMainWindow):
             'glossary_avoid_aa', self._glossary_avoid_aa))
         self._glossary_kana_fold = bool(values.get(
             'glossary_kana_fold', self._glossary_kana_fold))
+        self._glossary_auto_persist = bool(values.get(
+            'glossary_auto_persist', self._glossary_auto_persist))
         self._glossary_translation_only = bool(values.get(
             'glossary_translation_only', self._glossary_translation_only))
         self._fetch_auto_fill_title = bool(values.get(

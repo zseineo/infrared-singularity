@@ -64,6 +64,7 @@ class SettingsDialog(QDialog):
         pad_right_aa: bool,
         glossary_avoid_aa: bool,
         glossary_kana_fold: bool,
+        glossary_auto_persist: bool,
         glossary_translation_only: bool,
         fetch_auto_fill_title: bool,
         orig_cache_path: str,
@@ -83,6 +84,7 @@ class SettingsDialog(QDialog):
                        embed_font_name, editor_default_wysiwyg, korean_mode,
                        experimental_extraction, pad_right_aa,
                        glossary_avoid_aa, glossary_kana_fold,
+                       glossary_auto_persist,
                        glossary_translation_only, fetch_auto_fill_title)
         self._refresh_cache_size()
 
@@ -93,6 +95,7 @@ class SettingsDialog(QDialog):
                   korean_mode: bool, experimental_extraction: bool,
                   pad_right_aa: bool, glossary_avoid_aa: bool,
                   glossary_kana_fold: bool,
+                  glossary_auto_persist: bool,
                   glossary_translation_only: bool,
                   fetch_auto_fill_title: bool) -> None:
         root = QVBoxLayout(self)
@@ -162,6 +165,18 @@ class SettingsDialog(QDialog):
             "  • 漢字、長音符號 ー、英數等非假名字元維持原樣。\n"
             "影響所有術語套用路徑（替換翻譯、重套術語、自動翻譯等）。")
         root.addWidget(self.glossary_kana_fold_cb)
+
+        self.glossary_auto_persist_cb = QCheckBox(
+            "存入術語後自動儲存到設定檔")
+        self.glossary_auto_persist_cb.setFont(_ui_font(12))
+        self.glossary_auto_persist_cb.setChecked(glossary_auto_persist)
+        self.glossary_auto_persist_cb.setToolTip(
+            "開啟後，凡是「存入術語」（編輯器全文替換勾選『存入術語』、批次搜尋\n"
+            "『加入術語』等）把術語加進主術語表時，會自動把一般術語表永久寫入\n"
+            "AA_Settings.json（依「儲存設定時僅合併差異」設定決定合併或覆蓋），\n"
+            "不必再另外按「儲存設定／儲存用語」。\n"
+            "關閉時（預設）只更新主畫面術語表與暫存，正式設定檔需手動儲存。")
+        root.addWidget(self.glossary_auto_persist_cb)
 
         self.fetch_auto_fill_title_cb = QCheckBox(
             "網址讀取成功時，自動填入作品名稱框")
@@ -367,6 +382,8 @@ class SettingsDialog(QDialog):
             'pad_right_aa': self.pad_right_aa_cb.isChecked(),
             'glossary_avoid_aa': self.glossary_avoid_aa_cb.isChecked(),
             'glossary_kana_fold': self.glossary_kana_fold_cb.isChecked(),
+            'glossary_auto_persist':
+                self.glossary_auto_persist_cb.isChecked(),
             'glossary_translation_only':
                 self.glossary_translation_only_cb.isChecked(),
             'fetch_auto_fill_title': self.fetch_auto_fill_title_cb.isChecked(),

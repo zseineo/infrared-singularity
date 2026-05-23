@@ -4,19 +4,30 @@
 / ``close`` 與同一組例外），讓 ``aa_auto_translate`` 的協調器能在「瀏覽器操控」
 與「API」兩種後端間直接抽換。
 
-多把 API 金鑰以 round-robin 輪換：每送一次請求就換下一把，把用量平均分散；
-遇到 429（額度上限）會自動換下一把重試，整輪都滿才丟 GeminiQuotaExceeded。
+多把 API 金鑰以 round-robin 輪換：每送一次請求就換下一把，把用量平均分散。
+
+額度（429）處理採「冷卻 + RPD 偵測」：
+  * 某把金鑰回 429 → 解析回應分辨「每分鐘速率上限(RPM)」與「每日配額(RPD)」，
+    為該金鑰設定一段「冷卻時間」並換下一把；冷卻中的金鑰在輪換時跳過，
+    避免每個 chunk 都重複試探已用盡的金鑰。
+      - RPM：短冷卻（優先用伺服器建議的 retryDelay／Retry-After，否則 60 秒），
+        稍後自動歸隊。
+      - RPD：長冷卻（視同本次執行用盡），不再重試該金鑰。
+  * 當所有金鑰都在冷卻中：若最近解除時間在可接受範圍內（多為 RPM）→ stop-aware
+    等待後重試；若是長冷卻（RPD）或反覆全滿 → 丟 GeminiQuotaExceeded（協調器中止整批）。
 
 只用標準庫 urllib，不引入第三方 SDK。
 """
 from __future__ import annotations
 
 import json
+import re
+import time
 import urllib.error
 import urllib.request
 from typing import Callable
 
-from .gemini_web import GeminiQuotaExceeded, GeminiWebError
+from .gemini_web import GeminiAborted, GeminiQuotaExceeded, GeminiWebError
 
 # 可選模型（依使用者指定）。下拉選單與此清單一致。
 API_MODELS = [
@@ -32,6 +43,16 @@ _ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/"
              "models/{model}:generateContent")
 _TIMEOUT = 300
 
+# 額度冷卻參數
+_RPM_COOLDOWN = 60.0          # 每分鐘速率上限的預設冷卻（無伺服器建議時）
+_RPD_COOLDOWN = 24 * 3600.0   # 每日配額：本次執行內視同用盡的長冷卻
+# 所有金鑰皆冷卻時，最近解除時間若 ≤ 此秒數就等待後重試（多為 RPM）；超過則終止
+_ALL_COOLDOWN_MAX_WAIT = 120.0
+_MAX_WAIT_ROUNDS = 3          # 「全部冷卻→等待→重試」最多幾輪，避免反覆 ping-pong
+
+# 從 retryDelay（"30s" / "1.5s"）抽秒數
+_DURATION_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE)
+
 
 class GeminiApiSession:
     """以 Google Gemini API 進行翻譯，多金鑰輪換。"""
@@ -43,12 +64,16 @@ class GeminiApiSession:
         *,
         system_prompt: str = "",
         log: Callable[[str], None] | None = None,
+        stop_event=None,
     ) -> None:
         self._keys = [k.strip() for k in (api_keys or []) if k.strip()]
         self._model = (model or DEFAULT_API_MODEL).strip()
         self._system_prompt = system_prompt or ""
         self._log = log or (lambda m: print(f"[gemini_api] {m}"))
+        self._stop_event = stop_event
         self._idx = 0  # round-robin 游標
+        # 每把金鑰的「冷卻到期」單調時鐘值（0 = 可用）；輪換時跳過未到期者
+        self._cooldown_until = [0.0] * len(self._keys)
 
     # ── 生命週期（對齊 GeminiWebSession 介面） ──
 
@@ -75,25 +100,50 @@ class GeminiApiSession:
     # ── 翻譯 ──
 
     def translate(self, prompt_text: str) -> str:
-        """送一次請求並回傳譯文。金鑰輪換 + 429 自動換把重試。"""
+        """送一次請求並回傳譯文。
+
+        金鑰輪換並跳過冷卻中的金鑰；遇 429 依 RPM/RPD 設定冷卻後換下一把。
+        所有金鑰皆冷卻時：最近解除在可接受範圍（多為 RPM）→ 等待後重試；
+        否則（RPD／反覆全滿）→ 丟 GeminiQuotaExceeded。
+        """
         if not prompt_text.strip():
             return ""
         if not self._keys:
             raise GeminiWebError("API 模式但未設定任何 API 金鑰")
+        n = len(self._keys)
         last_quota: Exception | None = None
-        for _ in range(len(self._keys)):
-            key_no = (self._idx % len(self._keys)) + 1
-            key = self._keys[self._idx % len(self._keys)]
-            self._idx += 1
-            self._log(f"API 送出（金鑰 #{key_no}/{len(self._keys)}，模型 {self._model}）")
-            try:
-                return self._request(key, prompt_text)
-            except GeminiQuotaExceeded as e:
-                last_quota = e
-                self._log(f"  金鑰 #{key_no} 額度滿，換下一把…")
-                continue
-        raise GeminiQuotaExceeded(
-            f"所有 {len(self._keys)} 把金鑰皆達額度上限（{last_quota}）")
+        waits = 0
+        while True:
+            # 繞一圈，只試「目前未冷卻」的金鑰
+            for _ in range(n):
+                i = self._idx % n
+                self._idx += 1
+                if self._cooldown_until[i] > self._now():
+                    continue  # 冷卻中，跳過
+                self._log(f"API 送出（金鑰 #{i + 1}/{n}，模型 {self._model}）")
+                try:
+                    return self._request(self._keys[i], prompt_text)
+                except GeminiQuotaExceeded as e:
+                    last_quota = e
+                    cooldown, kind = self._cooldown_for(e)
+                    self._cooldown_until[i] = self._now() + cooldown
+                    self._log(
+                        f"  金鑰 #{i + 1} {kind}，冷卻約 {int(cooldown)}s，換下一把…")
+                    continue
+            # 這一圈沒有任何金鑰可用（全部冷卻中）
+            soonest = min(self._cooldown_until)
+            wait = soonest - self._now()
+            if wait > _ALL_COOLDOWN_MAX_WAIT or waits >= _MAX_WAIT_ROUNDS:
+                if wait > _ALL_COOLDOWN_MAX_WAIT:
+                    raise GeminiQuotaExceeded(
+                        f"所有 {n} 把金鑰皆達額度上限（含每日配額 RPD），終止")
+                raise GeminiQuotaExceeded(
+                    f"所有 {n} 把金鑰反覆達速率上限，終止（{last_quota}）")
+            wait = max(1.0, wait) + 0.5
+            self._log(f"  所有金鑰暫時冷卻中，等待約 {int(wait)}s 後重試…")
+            if not self._sleep_with_stop(wait):
+                raise GeminiAborted("等待金鑰冷卻時收到停止指令")
+            waits += 1
 
     def _request(self, key: str, prompt_text: str) -> str:
         body: dict = {"contents": [{"parts": [{"text": prompt_text}]}]}
@@ -108,17 +158,94 @@ class GeminiApiSession:
             with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            if e.code == 429:
-                raise GeminiQuotaExceeded("HTTP 429（額度上限）") from e
-            detail = ""
+            body = ""
             try:
-                detail = e.read().decode("utf-8", "replace")[:300]
+                body = e.read().decode("utf-8", "replace")
             except Exception:
                 pass
-            raise GeminiWebError(f"API 錯誤 HTTP {e.code}：{detail}") from e
+            if e.code == 429:
+                retry_after, is_daily = self._parse_quota_error(e, body)
+                exc = GeminiQuotaExceeded("HTTP 429（額度上限）")
+                # 供 _cooldown_for 判斷冷卻長度（RPM 用 retry_after，RPD 用長冷卻）
+                exc.retry_after = retry_after  # type: ignore[attr-defined]
+                exc.is_daily = is_daily        # type: ignore[attr-defined]
+                raise exc from e
+            raise GeminiWebError(f"API 錯誤 HTTP {e.code}：{body[:300]}") from e
         except urllib.error.URLError as e:
             raise GeminiWebError(f"API 連線失敗：{e}") from e
         return self._extract_text(payload)
+
+    # ── 額度冷卻輔助 ──
+
+    @staticmethod
+    def _now() -> float:
+        return time.monotonic()
+
+    def _sleep_with_stop(self, seconds: float) -> bool:
+        """睡 ``seconds`` 秒，期間每 0.5s 檢查 stop_event。回傳 True=睡滿、False=被停止。"""
+        if self._stop_event is None:
+            time.sleep(max(0.0, seconds))
+            return True
+        end = self._now() + seconds
+        while True:
+            remaining = end - self._now()
+            if remaining <= 0:
+                return True
+            if self._stop_event.is_set():
+                return False
+            time.sleep(min(0.5, remaining))
+
+    def _cooldown_for(self, exc: Exception) -> tuple[float, str]:
+        """依 429 例外決定（冷卻秒數, 說明文字）。RPD 一律長冷卻；RPM 用伺服器建議。"""
+        if getattr(exc, "is_daily", False):
+            return _RPD_COOLDOWN, "已達每日配額(RPD)，本次執行不再使用"
+        retry_after = getattr(exc, "retry_after", None)
+        cd = retry_after if (retry_after and retry_after > 0) else _RPM_COOLDOWN
+        return float(cd), "達速率上限(RPM)"
+
+    @staticmethod
+    def _parse_quota_error(
+        err: urllib.error.HTTPError, body: str) -> tuple[float | None, bool]:
+        """解析 429 回應，回傳 (建議重試秒數 or None, 是否為每日配額 RPD)。
+
+        判斷依據（任一命中即可，全程容錯，解析失敗回 (None, False)）：
+          * `error.details[].QuotaFailure.violations[].quotaId/quotaMetric` 含 "PerDay" → RPD
+          * `error.details[].RetryInfo.retryDelay`（如 "30s"）→ 建議重試秒數
+          * HTTP `Retry-After` 標頭（秒）→ 建議重試秒數（次要）
+        """
+        retry_after: float | None = None
+        is_daily = False
+        # HTTP Retry-After 標頭（純秒數）
+        try:
+            ra = err.headers.get("Retry-After") if err.headers else None
+            if ra and ra.strip().isdigit():
+                retry_after = float(ra.strip())
+        except Exception:
+            pass
+        try:
+            data = json.loads(body) if body else {}
+            details = (data.get("error", {}) or {}).get("details", []) or []
+            for d in details:
+                if not isinstance(d, dict):
+                    continue
+                dtype = str(d.get("@type", ""))
+                if dtype.endswith("QuotaFailure"):
+                    for v in d.get("violations", []) or []:
+                        ident = (str(v.get("quotaId", ""))
+                                 + " " + str(v.get("quotaMetric", ""))).lower()
+                        if "perday" in ident or "per_day" in ident:
+                            is_daily = True
+                elif dtype.endswith("RetryInfo"):
+                    m = _DURATION_RE.search(str(d.get("retryDelay", "")))
+                    if m:
+                        retry_after = float(m.group(1))
+            # 部分回應只在 message 提到 per day
+            msg = str((data.get("error", {}) or {}).get("message", "")).lower()
+            if "per day" in msg or "perday" in msg or "daily" in msg:
+                is_daily = True
+        except Exception:
+            pass
+        return retry_after, is_daily
 
     @staticmethod
     def _extract_text(payload: dict) -> str:

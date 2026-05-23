@@ -468,7 +468,8 @@ def run_auto_translate(
             raise ValueError("API 模式但未設定任何 API 金鑰（請到「連線設定」輸入）")
         session = gemini_api.GeminiApiSession(
             keys, cache.gemini_api_model,
-            system_prompt=cache.gemini_api_system_prompt, log=log)
+            system_prompt=cache.gemini_api_system_prompt, log=log,
+            stop_event=stop_event)
         open_log = f"使用 Google API（模型 {cache.gemini_api_model}）…"
     else:
         gem_url = gem_url or cache.gemini_gem_url

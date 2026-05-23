@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.46"
+APP_VERSION = "1.47"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -851,6 +851,15 @@ class MainWindow(QMainWindow):
         btn_back.clicked.connect(self.show_translate_panel)
         hl.addWidget(btn_back)
 
+        # 連線設定鈕：僅自動翻譯面板顯示，開合該面板的連線設定浮層。
+        self._nav_conn_btn = _make_btn("⚙ 連線設定", "#6f42c1", "#5a32a3",
+                                       font=_ui_font(11), width=100)
+        self._nav_conn_btn.setFixedHeight(28)
+        self._nav_conn_btn.setToolTip("切換翻譯方式（瀏覽器／API）、Gem 網址、模型與 API 金鑰")
+        self._nav_conn_btn.clicked.connect(self._toggle_auto_conn_panel)
+        self._nav_conn_btn.hide()
+        hl.addWidget(self._nav_conn_btn)
+
         self._nav_label = QLabel("")
         self._nav_label.setFont(_ui_font(12))
         self._nav_label.setStyleSheet("color:white;")
@@ -1071,6 +1080,7 @@ class MainWindow(QMainWindow):
         self._update_work_title("批次搜尋")
         self.stack.setCurrentIndex(2)
         self._nav_bar.show()
+        self._nav_conn_btn.hide()
         self._action_bar.hide()
 
     def _on_batch_open_file(self, file_path: str, line: int, folder: str) -> None:
@@ -1571,7 +1581,13 @@ class MainWindow(QMainWindow):
         self._update_work_title("自動翻譯")
         self.stack.setCurrentIndex(4)
         self._nav_bar.show()
+        self._nav_conn_btn.show()
         self._action_bar.hide()
+
+    def _toggle_auto_conn_panel(self) -> None:
+        """導覽列「⚙ 連線設定」鈕：開合自動翻譯面板的連線設定浮層。"""
+        if self._auto_window is not None:
+            self._auto_window.toggle_conn_panel()
 
     def save_connection_settings(self, params: dict) -> None:
         """由連線設定分頁的「儲存」鈕進來：持久化後端／模型／系統指令與 API 金鑰。
@@ -1583,6 +1599,14 @@ class MainWindow(QMainWindow):
             params.get("api_model") or "gemini-2.5-pro")
         self._gemini_api_system_prompt = params.get("api_system_prompt", "")
         self._browser_use_gem = bool(params.get("browser_use_gem", True))
+        # 已從主頁移入連線設定浮層的瀏覽器後端參數，一併持久化。
+        if "gem_url" in params:
+            self._gemini_gem_url = params.get("gem_url", "") or ""
+        if "required_model" in params:
+            self._gemini_required_model = params.get("required_model") or "pro"
+        if "max_per_session" in params:
+            self._gemini_max_per_session = max(
+                1, int(params.get("max_per_session") or 3))
         self.save_cache()
         try:
             from aa_tool import secure_store
@@ -1782,6 +1806,7 @@ class MainWindow(QMainWindow):
         self._update_work_title("網址讀取")
         self.stack.setCurrentIndex(3)
         self._nav_bar.show()
+        self._nav_conn_btn.hide()
         self._action_bar.hide()
 
     def _url_fetch_win_visible(self) -> bool:

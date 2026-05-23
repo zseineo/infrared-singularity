@@ -2,8 +2,12 @@
 
 對應使用者流程：在主畫面工具列按「⚡ 自動翻譯」→ 切換到本面板（index 4）。
 面板分上下兩部分：
-  上：設定欄位（起始網址、話數＋翻譯到最後一話、Gem 網址、每 N 次換新對話、輸出資料夾）。
+  上：設定欄位（起始網址、話數＋翻譯到最後一話、作品名稱、檔名預覽、輸出資料夾）。
   下：執行 Log（即時顯示 :func:`aa_auto_translate.run_auto_translate` 的進度）。
+
+「連線設定」（翻譯方式／Gem 網址／要求模型／換新對話次數／API 金鑰與 Prompt）改以
+浮層面板呈現，由主視窗導覽列「⚙ 連線設定」鈕（返回首頁鈕右側）開合，作法比照
+網址讀取頁的「展開標題按鈕面板」。
 
 執行緒生命週期、stop_event、橫幅由 ``MainWindow`` 統籌；本面板只負責收集
 參數、顯示 Log，並提供 Start / Stop 按鈕，避免狀態散落兩處。
@@ -17,8 +21,8 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPlainTextEdit, QPushButton, QSpinBox, QSplitter,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
+    QSplitter, QVBoxLayout, QWidget,
 )
 
 from aa_tool.gemini_api import API_MODELS
@@ -70,7 +74,7 @@ class AutoTranslatePanel(QWidget):
         self._running = False
         self._build_ui()
         self._load_from_main()
-        # ESC：連線設定分頁→退回主分頁；主分頁→返回首頁。
+        # ESC：連線設定浮層開著→關浮層；否則→返回首頁。
         # 用 WidgetWithChildren context，子欄位（QLineEdit / QPlainTextEdit）
         # 有焦點時 ESC 也能觸發。
         esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
@@ -78,8 +82,8 @@ class AutoTranslatePanel(QWidget):
         esc.activated.connect(self._on_escape)
 
     def _on_escape(self) -> None:
-        if self._pages.currentIndex() == 1:
-            self._pages.setCurrentIndex(0)
+        if self._conn_panel.isVisible():
+            self._conn_panel.hide()
         else:
             self._main.show_translate_panel()
 
@@ -87,19 +91,11 @@ class AutoTranslatePanel(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        self._pages = QStackedWidget()
-        root.addWidget(self._pages)
-
-        # ── 主頁（翻譯設定 + Log） ──
-        main_page = QWidget()
-        main_v = QVBoxLayout(main_page)
-        main_v.setContentsMargins(10, 10, 10, 10)
-        main_v.setSpacing(8)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.setChildrenCollapsible(False)
-        main_v.addWidget(splitter, 1)
+        root.addWidget(splitter, 1)
 
         # ── 上半：設定 ──
         top = QWidget()
@@ -126,26 +122,6 @@ class AutoTranslatePanel(QWidget):
         count_hl.addWidget(self.until_last)
         count_hl.addStretch()
         form.addRow("連續話數：", count_row)
-
-        self.gem_edit = QLineEdit()
-        self.gem_edit.setPlaceholderText("https://gemini.google.com/gem/...")
-        form.addRow("Gemini Gem 網址：", self.gem_edit)
-
-        self.model_combo = QComboBox()
-        for label, value in _MODEL_OPTIONS:
-            self.model_combo.addItem(label, value)
-        self.model_combo.setToolTip(
-            "若偵測到 Gemini 目前使用的模型與此不符，整批自動中止。\n"
-            "讀不到模型字串時不會阻擋（會在 Log 顯示警告，請自行於瀏覽器確認）。")
-        form.addRow("要求模型：", self.model_combo)
-
-        self.max_session_spin = QSpinBox()
-        self.max_session_spin.setRange(1, 99)
-        self.max_session_spin.setSuffix(" 次")
-        self.max_session_spin.setToolTip(
-            "同一對話內最多送幾次給 Gemini，達上限自動開新對話。\n"
-            "目的：避免單一對話累積太多上下文使翻譯品質下降。")
-        form.addRow("每 N 次送出後換新對話：", self.max_session_spin)
 
         self.doc_title_edit = QLineEdit()
         self.doc_title_edit.setPlaceholderText("（手動模式必填，作為檔名前綴）")
@@ -203,10 +179,6 @@ class AutoTranslatePanel(QWidget):
         btn_clear.clicked.connect(self._clear_log)
         btn_hl.addWidget(btn_clear)
         btn_hl.addStretch()
-        btn_conn = _btn("⚙ 連線設定", "#6f42c1", "#5a32a3", width=110)
-        btn_conn.setToolTip("切換翻譯方式（瀏覽器／API）、API 金鑰與模型")
-        btn_conn.clicked.connect(self._show_conn_page)
-        btn_hl.addWidget(btn_conn)
         form.addRow(btn_row)
 
         splitter.addWidget(top)
@@ -232,14 +204,33 @@ class AutoTranslatePanel(QWidget):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([240, 480])
 
-        self._pages.addWidget(main_page)                # index 0
-        self._pages.addWidget(self._build_conn_page())  # index 1
+        self._build_conn_panel()
 
-    def _build_conn_page(self) -> QWidget:
-        """連線設定分頁：翻譯方式（瀏覽器／API）、API 金鑰、模型、系統指令。"""
-        page = QWidget()
-        v = QVBoxLayout(page)
-        v.setContentsMargins(10, 10, 10, 10)
+    def _build_conn_panel(self) -> None:
+        """連線設定浮層：翻譯方式／Gem 網址／要求模型／換新對話次數／API 金鑰、模型、Prompt。
+
+        作法比照網址讀取頁的「展開標題按鈕面板」——`self` 的浮層子元件，預設隱藏，
+        由主視窗導覽列「⚙ 連線設定」鈕呼叫 :meth:`toggle_conn_panel` 開合。
+        """
+        self._conn_panel = QWidget(self)
+        self._conn_panel.setObjectName("autoConnPanel")
+        self._conn_panel.setStyleSheet(
+            "#autoConnPanel { background:#f1f3f5; border:1px solid #adb5bd;"
+            " border-radius:6px; }")
+        self._conn_panel.hide()
+        outer = QVBoxLayout(self._conn_panel)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border:none; background:transparent; }")
+        outer.addWidget(scroll, 1)
+
+        inner = QWidget()
+        scroll.setWidget(inner)
+        v = QVBoxLayout(inner)
+        v.setContentsMargins(12, 12, 12, 12)
         v.setSpacing(8)
 
         title = QLabel("連線設定")
@@ -257,12 +248,32 @@ class AutoTranslatePanel(QWidget):
         self.backend_combo.currentIndexChanged.connect(self._on_backend_changed)
         form.addRow("翻譯方式：", self.backend_combo)
 
+        self.gem_edit = QLineEdit()
+        self.gem_edit.setPlaceholderText("https://gemini.google.com/gem/...")
+        form.addRow("Gemini Gem 網址：", self.gem_edit)
+
         self.use_gem_cb = QCheckBox("瀏覽器模式使用 Gem（不發送 Prompt）")
         self.use_gem_cb.setToolTip(
             "勾選：瀏覽器模式靠 Gem 內建人設翻譯，不送出下方 Prompt。\n"
             "取消勾選：瀏覽器模式也會送 Prompt（適合不用 Gem 的使用者）。\n"
             "API 模式一律會送 Prompt，不受此選項影響。")
         form.addRow("", self.use_gem_cb)
+
+        self.model_combo = QComboBox()
+        for label, value in _MODEL_OPTIONS:
+            self.model_combo.addItem(label, value)
+        self.model_combo.setToolTip(
+            "若偵測到 Gemini 目前使用的模型與此不符，整批自動中止。\n"
+            "讀不到模型字串時不會阻擋（會在 Log 顯示警告，請自行於瀏覽器確認）。")
+        form.addRow("要求模型：", self.model_combo)
+
+        self.max_session_spin = QSpinBox()
+        self.max_session_spin.setRange(1, 99)
+        self.max_session_spin.setSuffix(" 次")
+        self.max_session_spin.setToolTip(
+            "同一對話內最多送幾次給 Gemini，達上限自動開新對話。\n"
+            "目的：避免單一對話累積太多上下文使翻譯品質下降。")
+        form.addRow("每 N 次送出後換新對話：", self.max_session_spin)
 
         self.api_model_combo = QComboBox()
         self.api_model_combo.addItems(API_MODELS)
@@ -298,17 +309,37 @@ class AutoTranslatePanel(QWidget):
         btn_save = _btn("💾 儲存連線設定", "#28a745", "#218838", width=140)
         btn_save.clicked.connect(self._save_conn_settings)
         bh.addWidget(btn_save)
-        btn_back = _btn("← 返回", "#6c757d", "#5a6268", width=80)
-        btn_back.clicked.connect(lambda: self._pages.setCurrentIndex(0))
-        bh.addWidget(btn_back)
+        btn_close = _btn("← 關閉", "#6c757d", "#5a6268", width=80)
+        btn_close.clicked.connect(self._conn_panel.hide)
+        bh.addWidget(btn_close)
         bh.addStretch()
         v.addWidget(btn_row)
         v.addStretch()
-        return page
 
-    def _show_conn_page(self) -> None:
+    def toggle_conn_panel(self) -> None:
+        """開合連線設定浮層（由主視窗導覽列「⚙ 連線設定」鈕呼叫）。"""
+        if self._conn_panel.isVisible():
+            self._conn_panel.hide()
+            return
         self._load_conn_from_main()
-        self._pages.setCurrentIndex(1)
+        self._position_conn_panel()
+        self._conn_panel.show()
+        self._conn_panel.raise_()
+
+    def _position_conn_panel(self) -> None:
+        """把浮層放在面板左上角，覆蓋大部分可用空間（比照展開標題面板）。"""
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            return
+        pw = min(600, max(360, w - 16))
+        ph = min(640, max(300, h - 16))
+        self._conn_panel.setGeometry(8, 8, pw, ph)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        if (getattr(self, "_conn_panel", None) is not None
+                and self._conn_panel.isVisible()):
+            self._position_conn_panel()
 
     def _on_backend_changed(self, _idx: int = 0) -> None:
         """API 模型／金鑰只在 API 模式啟用；翻譯 Prompt 兩模式都可編輯。"""
@@ -384,6 +415,10 @@ class AutoTranslatePanel(QWidget):
             "api_model": self.api_model_combo.currentText(),
             "api_system_prompt": self.api_prompt_edit.toPlainText(),
             "api_keys": keys,
+            # 隨連線設定一併持久化的瀏覽器後端參數（已從主頁移入本浮層）
+            "gem_url": self.gem_edit.text().strip(),
+            "required_model": self.model_combo.currentData(),
+            "max_per_session": self.max_session_spin.value(),
         }
         self._main.save_connection_settings(params)
         kn = len(keys)

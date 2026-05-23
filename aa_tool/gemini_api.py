@@ -50,8 +50,17 @@ _RPD_COOLDOWN = 24 * 3600.0   # 每日配額：本次執行內視同用盡的長
 _ALL_COOLDOWN_MAX_WAIT = 120.0
 _MAX_WAIT_ROUNDS = 3          # 「全部冷卻→等待→重試」最多幾輪，避免反覆 ping-pong
 
+# 伺服器暫時性錯誤（5xx，如 503 高負載）：等待後重試，不視為金鑰問題、不進冷卻
+_TRANSIENT_HTTP = {500, 502, 503, 504}
+_BUSY_RETRY_WAIT = 120.0     # 503 等暫時性錯誤的重試間隔（2 分鐘）
+_MAX_BUSY_RETRIES = 5        # 暫時性錯誤最多重試幾次，仍失敗才跳過該話
+
 # 從 retryDelay（"30s" / "1.5s"）抽秒數
 _DURATION_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE)
+
+
+class GeminiServerBusy(GeminiWebError):
+    """伺服器暫時無法服務（HTTP 5xx，如 503 高負載）——可等待後重試。"""
 
 
 class GeminiApiSession:
@@ -113,7 +122,9 @@ class GeminiApiSession:
         n = len(self._keys)
         last_quota: Exception | None = None
         waits = 0
+        busy_retries = 0
         while True:
+            busy_wait = False
             # 繞一圈，只試「目前未冷卻」的金鑰
             for _ in range(n):
                 i = self._idx % n
@@ -130,6 +141,23 @@ class GeminiApiSession:
                     self._log(
                         f"  金鑰 #{i + 1} {kind}，冷卻約 {int(cooldown)}s，換下一把…")
                     continue
+                except GeminiServerBusy as e:
+                    # 503 等暫時性錯誤：伺服器高負載，非金鑰問題、不進冷卻；
+                    # 等待後重試整輪，超過上限才放棄（往外拋 → 協調器跳過該話）。
+                    busy_retries += 1
+                    if busy_retries > _MAX_BUSY_RETRIES:
+                        raise GeminiWebError(
+                            f"伺服器暫時性錯誤重試 {_MAX_BUSY_RETRIES} 次仍失敗，"
+                            f"跳過此話：{e}") from e
+                    self._log(
+                        f"  伺服器忙碌/暫時無法服務（{e}）→ {int(_BUSY_RETRY_WAIT)}s "
+                        f"後重試（第 {busy_retries}/{_MAX_BUSY_RETRIES} 次）…")
+                    if not self._sleep_with_stop(_BUSY_RETRY_WAIT):
+                        raise GeminiAborted("等待伺服器恢復(5xx)時收到停止指令")
+                    busy_wait = True
+                    break  # 跳出 for，重新繞一圈重試
+            if busy_wait:
+                continue  # 已等待暫時性錯誤，重試整輪（不進入「全部冷卻」判斷）
             # 這一圈沒有任何金鑰可用（全部冷卻中）
             soonest = min(self._cooldown_until)
             wait = soonest - self._now()
@@ -170,6 +198,9 @@ class GeminiApiSession:
                 exc.retry_after = retry_after  # type: ignore[attr-defined]
                 exc.is_daily = is_daily        # type: ignore[attr-defined]
                 raise exc from e
+            if e.code in _TRANSIENT_HTTP:
+                raise GeminiServerBusy(
+                    f"HTTP {e.code}（伺服器忙碌/暫時無法服務）：{body[:200]}") from e
             raise GeminiWebError(f"API 錯誤 HTTP {e.code}：{body[:300]}") from e
         except urllib.error.URLError as e:
             raise GeminiWebError(f"API 連線失敗：{e}") from e

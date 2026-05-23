@@ -1053,7 +1053,14 @@ def extract_text(
 
 
 def format_extraction_output(extracted: list[tuple[str, int]]) -> str:
-    """將提取結果格式化為 '001-1|text' 格式。"""
+    """將提取結果格式化為 '001-1|text' 格式，依來源行號排序輸出。
+
+    依行號**穩定排序**：主提取本就是行號遞增（對其為 no-op），但呼叫端常把
+    額外單字提取（`extract_single_kana`）的結果「後 append」到主提取之後；
+    若不排序，這些項目即使行號很小也會排在輸出末尾。穩定排序把它們插回正確
+    行號位置，同時保證同一行內主提取項目仍排在額外單字項目之前、sub-index 連號。
+    """
+    extracted = sorted(extracted, key=lambda item: item[1])
     line_sub_index: dict[int, int] = {}
     output = ""
     for text, ln in extracted:

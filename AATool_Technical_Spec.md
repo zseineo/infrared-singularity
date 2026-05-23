@@ -118,7 +118,8 @@
     *   第二字元：ア/あ、ハ/は、ン/ん、オ/お、で（共五種字元）
     *   第三字元：**全形**句號（`。`）／問號（`？`）／驚嘆號（`！`）；**不含空白與半形 `?` `!`**（AA 圖常以半形驚嘆/問號作裝飾，如「 ン!」會被誤判）
     *   提取結果為完整三字元序列（含前後邊界符號），而非只取中間假名。
-    *   主程式在 `MainWindow.extract_text()` 中呼叫此函式，結果合併進主提取的 `extracted_set`（不重複加入），一同排版輸出。
+    *   主程式在 `MainWindow.extract_text()` 中呼叫此函式（自動翻譯流程 `aa_auto_translate.py: _extract()` 亦同），結果**後 append** 進主提取清單（不重複加入），一同交給 `format_extraction_output()` 排版輸出。
+    *   **依 ID（行號）排序輸出**：`format_extraction_output()` 對輸入清單以來源行號做**穩定排序**後才編號輸出。主提取本就是行號遞增（對其為 no-op），但額外單字提取是「後 append」在末尾，若不排序其 ID 即使行號很小也會排在輸出最底下；排序後會插回正確行號位置。穩定排序保證同一行內主提取項目仍排在額外單字項目之前、sub-index 連號。
 
 ### 4.2a 加入自訂過濾器 (`add_selection_to_filter()`)
 *   **對應 Function**: `MainWindow.add_selection_to_filter()`；按鈕位於「提取結果」標題列左側（「複製全部」左邊）。

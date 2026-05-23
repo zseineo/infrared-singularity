@@ -164,6 +164,13 @@ class AutoTranslatePanel(QWidget):
         out_hl.addWidget(btn_browse)
         form.addRow("輸出資料夾：", out_row)
 
+        # 翻譯方式（瀏覽器／API）——常用切換，放主頁；其餘連線細節在浮層
+        self.backend_combo = QComboBox()
+        for label, value in _BACKEND_OPTIONS:
+            self.backend_combo.addItem(label, value)
+        self.backend_combo.currentIndexChanged.connect(self._on_backend_changed)
+        form.addRow("翻譯方式：", self.backend_combo)
+
         # 動作按鈕列
         btn_row = QWidget()
         btn_hl = QHBoxLayout(btn_row)
@@ -228,6 +235,7 @@ class AutoTranslatePanel(QWidget):
         outer.addWidget(scroll, 1)
 
         inner = QWidget()
+        self._conn_inner = inner  # 供 _position_conn_panel 依內容高度收掉底部空白
         scroll.setWidget(inner)
         v = QVBoxLayout(inner)
         v.setContentsMargins(12, 12, 12, 12)
@@ -241,12 +249,6 @@ class AutoTranslatePanel(QWidget):
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(8)
         v.addLayout(form)
-
-        self.backend_combo = QComboBox()
-        for label, value in _BACKEND_OPTIONS:
-            self.backend_combo.addItem(label, value)
-        self.backend_combo.currentIndexChanged.connect(self._on_backend_changed)
-        form.addRow("翻譯方式：", self.backend_combo)
 
         self.gem_edit = QLineEdit()
         self.gem_edit.setPlaceholderText("https://gemini.google.com/gem/...")
@@ -314,7 +316,6 @@ class AutoTranslatePanel(QWidget):
         bh.addWidget(btn_close)
         bh.addStretch()
         v.addWidget(btn_row)
-        v.addStretch()
 
     def toggle_conn_panel(self) -> None:
         """開合連線設定浮層（由主視窗導覽列「⚙ 連線設定」鈕呼叫）。"""
@@ -327,12 +328,16 @@ class AutoTranslatePanel(QWidget):
         self._conn_panel.raise_()
 
     def _position_conn_panel(self) -> None:
-        """把浮層放在面板左上角，覆蓋大部分可用空間（比照展開標題面板）。"""
+        """把浮層放在面板左上角；寬度固定上限、高度依內容收緊（不留底部空白）。"""
         w, h = self.width(), self.height()
         if w <= 0 or h <= 0:
             return
-        pw = min(600, max(360, w - 16))
-        ph = min(640, max(300, h - 16))
+        # 寬度：較先前上限再寬約 10%（600 → 660）
+        pw = min(660, max(360, w - 16))
+        # 高度依內容實際所需，避免「儲存設定」鈕下方出現過大空白；
+        # 內容超過可用高度時才由 QScrollArea 捲動（上限 h-16）。
+        content_h = self._conn_inner.sizeHint().height() + 16
+        ph = min(max(300, content_h), h - 16)
         self._conn_panel.setGeometry(8, 8, pw, ph)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
@@ -364,6 +369,11 @@ class AutoTranslatePanel(QWidget):
         self.model_combo.setCurrentIndex(idx)
         self.max_session_spin.setValue(int(
             getattr(m, "_gemini_max_per_session", 3) or 3))
+        # 翻譯方式現於主頁，須在開啟面板時就反映已存後端（不必先開連線設定）
+        backend = (getattr(m, "_translate_backend", "browser") or "browser")
+        bidx = next((i for i, (_, v) in enumerate(_BACKEND_OPTIONS)
+                     if v == backend), 0)
+        self.backend_combo.setCurrentIndex(bidx)
         self.out_edit.setText(getattr(m, "_auto_translate_out_dir", "")
                               or getattr(m, "_last_dir", "") or "")
         # 作品名稱：與首頁同步——優先用首頁 doc_title，沒有就空
@@ -389,12 +399,8 @@ class AutoTranslatePanel(QWidget):
         self._load_from_main()
 
     def _load_conn_from_main(self) -> None:
-        """把主視窗的連線設定載入連線分頁欄位。"""
+        """把主視窗的連線設定載入浮層欄位（翻譯方式在主頁，見 _load_from_main）。"""
         m = self._main
-        backend = (getattr(m, "_translate_backend", "browser") or "browser")
-        bidx = next((i for i, (_, v) in enumerate(_BACKEND_OPTIONS)
-                     if v == backend), 0)
-        self.backend_combo.setCurrentIndex(bidx)
         self.use_gem_cb.setChecked(bool(getattr(m, "_browser_use_gem", True)))
         model = getattr(m, "_gemini_api_model", "") or API_MODELS[0]
         midx = self.api_model_combo.findText(model)
@@ -434,10 +440,12 @@ class AutoTranslatePanel(QWidget):
         url = self.url_edit.text().strip()
         gem = self.gem_edit.text().strip()
         out_dir = self.out_edit.text().strip()
+        backend = self.backend_combo.currentData()
         if not url:
             self._main.show_status("⚠️ 請填入起始網址", "#f39c12")
             return None
-        if not gem:
+        # Gem 網址僅瀏覽器模式必填；API 模式不需要 Gem
+        if backend == "browser" and not gem:
             self._main.show_status("⚠️ 請填入 Gemini Gem 網址", "#f39c12")
             return None
         if not out_dir:
@@ -447,6 +455,7 @@ class AutoTranslatePanel(QWidget):
             "start_url": url,
             "count": self.count_spin.value(),
             "until_last": self.until_last.isChecked(),
+            "backend": backend,
             "gem_url": gem,
             "required_model": self.model_combo.currentData(),
             "max_per_session": self.max_session_spin.value(),
@@ -542,7 +551,7 @@ class AutoTranslatePanel(QWidget):
         # 執行中鎖住設定欄位，避免使用者中途改值造成混亂
         for w in (self.url_edit, self.count_spin, self.until_last,
                   self.gem_edit, self.model_combo, self.max_session_spin,
-                  self.doc_title_edit, self.out_edit):
+                  self.doc_title_edit, self.out_edit, self.backend_combo):
             w.setEnabled(not running)
         # until_last 勾選時保持 count 灰
         if not running:

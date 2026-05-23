@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.47"
+APP_VERSION = "1.48"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -1622,6 +1622,9 @@ class MainWindow(QMainWindow):
             self.show_status("⚠️ 自動翻譯正在執行中…", "#f39c12")
             return
         # 持久化到 cache（下次打開面板自動帶入）
+        # 翻譯方式現於主頁，開始時即以面板選擇為準（不必先按「儲存連線設定」）
+        if params.get("backend"):
+            self._translate_backend = params["backend"]
         self._gemini_gem_url = params["gem_url"]
         self._auto_translate_out_dir = params["out_dir"]
         self._auto_translate_count = params["count"]

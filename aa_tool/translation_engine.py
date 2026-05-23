@@ -244,6 +244,26 @@ _KATAKANA_HONORIFICS = ('サン', 'チャン', 'クン', 'サマ', 'タン', '�
 _GLOSSARY_AA_DENSITY_TH = 0.5
 
 
+def _is_katakana_fragment_hit(line: str, start: int, end: int, key: str) -> bool:
+    """判斷術語表這次命中是否疑似「把更長的片假名詞硬切成術語碎片」。
+
+    `key` 本身含片假名（`_KATAKANA_RE`）、且命中後緊鄰（前一字或後一字）
+    仍是片假名 → True（如 AI 譯文保留的 `レオリオ` 中的 `リオ`，左鄰 `オ`）。
+    但後方緊接片假名敬稱（`サン` 等）時排除（屬正常的「名字＋敬稱」）。
+    """
+    if not _KATAKANA_RE.search(key):
+        return False
+    before = line[start - 1] if start > 0 else ''
+    after = line[end] if end < len(line) else ''
+    if before and _KATAKANA_RE.match(before):
+        return True
+    if after and _KATAKANA_RE.match(after):
+        tail = line[end:end + 4]
+        if not any(tail.startswith(h) for h in _KATAKANA_HONORIFICS):
+            return True
+    return False
+
+
 def _glossary_hit_on_aa(line: str, start: int, end: int, key: str,
                         symbol_regex: 're.Pattern') -> bool:
     """判斷術語表的這次命中位置是否疑似落在 AA 圖上（experimental）。
@@ -251,22 +271,12 @@ def _glossary_hit_on_aa(line: str, start: int, end: int, key: str,
     規則 A — 周圍 AA 噪聲密度：命中位置左右視窗（`_local_aa_density`）的 AA
       噪聲密度 >= `_GLOSSARY_AA_DENSITY_TH` → 視為 AA 圖（例：`::::アム::::`
       中的 `アム`，周圍全是 `:` 等 AA 字元）。
-    規則 B — 緊鄰片假名：`key` 本身含片假名，且命中後緊鄰（前一字或後一字）
-      仍是片假名 → 疑似把一個更長的片假名詞硬切成術語碎片。但後方緊接片假名
-      敬稱（`サン` 等）時排除（屬正常的「名字＋敬稱」）。
+    規則 B — 緊鄰片假名：見 `_is_katakana_fragment_hit`（疑似把更長的片假名
+      詞硬切成術語碎片）。
     """
     if _local_aa_density(line, start, end, symbol_regex) >= _GLOSSARY_AA_DENSITY_TH:
         return True
-    if _KATAKANA_RE.search(key):
-        before = line[start - 1] if start > 0 else ''
-        after = line[end] if end < len(line) else ''
-        if before and _KATAKANA_RE.match(before):
-            return True
-        if after and _KATAKANA_RE.match(after):
-            tail = line[end:end + 4]
-            if not any(tail.startswith(h) for h in _KATAKANA_HONORIFICS):
-                return True
-    return False
+    return _is_katakana_fragment_hit(line, start, end, key)
 
 
 def apply_glossary_to_text(text: str, glossary: dict[str, str], *,
@@ -359,6 +369,32 @@ def apply_reverse_glossary_to_text(text: str, glossary: dict[str, str]) -> str:
     return '\n'.join(lines)
 
 
+def _apply_glossary_to_segment(text: str, sorted_glossary: list) -> str:
+    """對單段譯文套用術語表（單輪掃描）。
+
+    與全域覆蓋 `apply_glossary_to_text` 不同：此處只負責替換、不做 Auto-Padding
+    （補空白由後續 `_replace_with_padding` 統一處理）。會略過
+    `_is_katakana_fragment_hit` 判定為「硬切片假名碎片」的命中（如 AI 譯文保留
+    的 `レオリオ` 中的 `リオ`，左鄰 `オ` 仍是片假名 → 保留原文不替換）。
+
+    採單輪掃描（`sorted_glossary` 已依 key 長度遞減排序，最長者優先匹配），
+    避免多輪 `str.replace()` 時「短 key 命中前一輪長 key 替換結果」的問題，
+    也讓緊鄰片假名的判定能在未被前一輪改寫的原始字串上正確進行。
+    """
+    if not sorted_glossary:
+        return text
+    term_map = {k: v for k, v in sorted_glossary}
+    pattern = re.compile('|'.join(re.escape(k) for k, _ in sorted_glossary))
+
+    def repl(m):
+        jp = m.group(0)
+        if _is_katakana_fragment_hit(text, m.start(), m.end(), jp):
+            return jp
+        return term_map[jp]
+
+    return pattern.sub(repl, text)
+
+
 def apply_translation(
     source: str,
     extracted: str,
@@ -448,9 +484,10 @@ def apply_translation(
         original = orig_map[_id]
         final_translated = trans_text
 
-        # 對翻譯文套用術語表
-        for jp_term, tw_term in sorted_glossary:
-            final_translated = final_translated.replace(jp_term, tw_term)
+        # 對翻譯文套用術語表（單輪掃描；略過「key 含片假名且緊鄰片假名」的硬切
+        # 碎片命中，如 AI 譯文保留的 `レオリオ` 中的 `リオ`，見 _apply_glossary_to_segment）
+        final_translated = _apply_glossary_to_segment(
+            final_translated, sorted_glossary)
 
         if append_mode:
             # 附加模式：以「原文 + 半形空白 + 翻譯文」取代原文位置；不補/不消空白

@@ -174,6 +174,12 @@ class EditWindow(QMainWindow):
         init_side_panel_width: int = 0,   # Alt+4 面板寬度（px，0=預設）
         init_side_auto_scroll: bool = False,  # Alt+4 面板「自動捲動」初始狀態
         on_side_state_change=None,  # (width: int|None, auto_scroll: bool|None) -> None
+        # ── 用語集面板（Alt+5）：與主程式一般術語表雙向同步 ──
+        glossary_text_provider=None,  # () -> str；取得主程式「一般術語表」文字
+        glossary_text_setter=None,  # (text: str) -> None；把面板內容同步回主程式
+        glossary_save=None,  # (force_overwrite: bool) -> None；只儲存術語到 AA_Settings.json
+        init_glossary_panel_width: int = 0,  # 用語集面板寬度（px，0=預設）
+        on_glossary_panel_width_change=None,  # (width: int) -> None
         init_pad_count: int = 2,  # 「補空白」每字之間插入的全形空白數（1~3）
         on_pad_count_change=None,  # (count: int) -> None
         default_wysiwyg_provider=None,  # () -> bool；對應主程式「進入編輯器時預設 WYSIWYG」設定
@@ -215,6 +221,13 @@ class EditWindow(QMainWindow):
         self._init_side_panel_width = int(init_side_panel_width or 0)
         self._init_side_auto_scroll = bool(init_side_auto_scroll)
         self._on_side_state_change = on_side_state_change
+        self._glossary_text_provider = glossary_text_provider
+        self._glossary_text_setter = glossary_text_setter
+        self._glossary_save = glossary_save
+        self._init_glossary_panel_width = int(init_glossary_panel_width or 0)
+        self._on_glossary_panel_width_change = on_glossary_panel_width_change
+        # 同步護欄：載入主程式術語到面板時，避免 textChanged 又寫回主程式
+        self._glossary_syncing = False
         try:
             ipc = int(init_pad_count)
         except (TypeError, ValueError):
@@ -351,6 +364,9 @@ class EditWindow(QMainWindow):
         # 行以下的部分**，可視行以上的編輯成果保留不動。
         self._translate_side = self._build_translate_side_panel()
         self._translate_side.hide()
+        # 用語集面板（Alt+5）：編輯一般術語表，與主程式雙向同步
+        self._glossary_side = self._build_glossary_side_panel()
+        self._glossary_side.hide()
         # 自動捲動：依使用者在 editor / preview_view 的選取與捲軸事件觸發
         self.editor.selectionChanged.connect(self._on_editor_selection_changed)
         self.preview_view.selectionChanged.connect(
@@ -363,8 +379,10 @@ class EditWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.stack)
         splitter.addWidget(self._translate_side)
+        splitter.addWidget(self._glossary_side)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(2, 2)
         splitter.setChildrenCollapsible(False)
         # 持久化：使用者拖動分隔線時通知主程式存檔（只在面板可見時記錄寬度，
         # 避免面板關閉時 sizes()[1]=0 把預設寬度蓋掉）
@@ -391,6 +409,8 @@ class EditWindow(QMainWindow):
                   activated=self._enter_preview_mode)
         QShortcut(QKeySequence("Alt+4"), self,
                   activated=self._toggle_translate_side)
+        QShortcut(QKeySequence("Alt+5"), self,
+                  activated=self._toggle_glossary_side)
         QShortcut(QKeySequence("Alt+E"), self,
                   activated=self._reverse_glossary_replace)
         QShortcut(QKeySequence("Alt+C"), self,
@@ -448,6 +468,11 @@ class EditWindow(QMainWindow):
         btn_reapply = _make_button("重套術語", "#28a745", "#218838", width=75)
         btn_reapply.clicked.connect(self._reapply_glossary)
         tb.addWidget(btn_reapply)
+
+        btn_glossary = _make_button("📕 用語集", "#6f42c1", "#5a32a3", width=85)
+        btn_glossary.setToolTip("開關「用語集」面板（Alt+5）：編輯一般術語表，與主畫面雙向同步")
+        btn_glossary.clicked.connect(self._toggle_glossary_side)
+        tb.addWidget(btn_glossary)
 
         # 分隔
         tb.addSpacing(10)
@@ -1745,45 +1770,175 @@ class EditWindow(QMainWindow):
                 pass
 
     def _restore_side_panel_width(self) -> None:
-        """把 splitter 第二欄寬度設為使用者上次記住的值。
+        """依目前可見的側欄（Alt+4 局部重套用／Alt+5 用語集）設定 splitter 各欄寬度。
 
-        只在 _init_side_panel_width > 0 且 splitter 已有合理寬度時套用，
-        避免在視窗尚未 layout 時把寬度設成負值。
+        splitter 共三欄：[編輯器, 局部重套用, 用語集]。隱藏的欄寬度設 0。
+        只在 splitter 已有合理寬度時套用，避免視窗尚未 layout 時把寬度設成負值。
         """
-        target = self._init_side_panel_width
-        if target <= 0:
-            return
         sp = getattr(self, "_main_splitter", None)
         if sp is None:
             return
         total = sp.width()
         if total <= 0:
             return
-        # 第一欄至少留 200px 給編輯器，避免 setSizes 把右側塞滿
-        right = max(120, min(target, total - 200))
-        left = max(200, total - right)
-        sp.setSizes([left, right])
+        right_alt4 = 0
+        right_gloss = 0
+        if self._translate_side.isVisible():
+            target = self._init_side_panel_width or int(total * 0.4)
+            right_alt4 = max(120, min(target, total - 200))
+        if self._glossary_side.isVisible():
+            target = self._init_glossary_panel_width or int(total * 0.33)
+            right_gloss = max(120, min(target, total - 200))
+        # 第一欄至少留 200px 給編輯器
+        left = max(200, total - right_alt4 - right_gloss)
+        sp.setSizes([left, right_alt4, right_gloss])
 
     def _on_splitter_moved(self, pos: int, index: int) -> None:
-        """splitter 拖動 → 把右側面板寬度告訴主程式存檔。
+        """splitter 拖動 → 把可見側欄的寬度告訴主程式存檔。
 
-        只在面板實際可見時記錄，避免關閉狀態下 sizes()[1]=0 把上次的寬度
-        蓋成 0（下次開啟會回退到 setStretchFactor 預設）。
+        只記錄實際可見的欄，避免關閉狀態下 sizes()=0 把上次的寬度蓋成 0
+        （下次開啟會回退到 setStretchFactor 預設）。
         """
-        if not self._translate_side.isVisible():
-            return
-        if self._on_side_state_change is None:
-            return
         sizes = self._main_splitter.sizes()
-        if len(sizes) < 2:
+        if len(sizes) < 3:
             return
-        width = int(sizes[1])
-        if width <= 0:
+        if self._translate_side.isVisible() and int(sizes[1]) > 0:
+            self._init_side_panel_width = int(sizes[1])
+            if self._on_side_state_change is not None:
+                try:
+                    self._on_side_state_change(int(sizes[1]), None)
+                except Exception:
+                    pass
+        if self._glossary_side.isVisible() and int(sizes[2]) > 0:
+            self._init_glossary_panel_width = int(sizes[2])
+            if self._on_glossary_panel_width_change is not None:
+                try:
+                    self._on_glossary_panel_width_change(int(sizes[2]))
+                except Exception:
+                    pass
+
+    # ────────────────────────────────────────────────────────────
+    #  用語集面板（Alt+5）
+    # ────────────────────────────────────────────────────────────
+
+    def _build_glossary_side_panel(self) -> QWidget:
+        """構建右側「用語集」面板：編輯一般術語表，與主程式雙向同步。"""
+        w = QWidget()
+        w.setStyleSheet("background:#262a2f;")
+        vl = QVBoxLayout(w)
+        vl.setContentsMargins(6, 6, 6, 6)
+        vl.setSpacing(4)
+
+        head = QHBoxLayout()
+        title = QLabel("用語集（Alt+5）")
+        title.setFont(QFont("MS PGothic", 11))
+        title.setStyleSheet("color:#ddd; font-weight:bold;")
+        head.addWidget(title)
+        head.addStretch()
+        btn_save = _make_button("💾 儲存用語", "#28a745", "#218838", width=95)
+        btn_save.setToolTip(
+            "只把「術語」寫入 AA_Settings.json（不動 filter／正則／其他設定）。\n"
+            "左鍵：依設定「僅儲存差異」決定合併或覆蓋\n"
+            "右鍵：強制以覆蓋方式儲存")
+        btn_save.clicked.connect(lambda: self._save_glossary_panel(False))
+        btn_save.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        btn_save.customContextMenuRequested.connect(
+            lambda _pos: self._save_glossary_panel(True))
+        head.addWidget(btn_save)
+        vl.addLayout(head)
+
+        self.glossary_search = QLineEdit()
+        self.glossary_search.setPlaceholderText("搜尋用語（Enter 找下一個）")
+        self.glossary_search.setStyleSheet(
+            "background:#1e1e1e; color:#ddd; border:1px solid #555; padding:3px;")
+        self.glossary_search.returnPressed.connect(self._find_in_glossary)
+        vl.addWidget(self.glossary_search)
+
+        hint = QLabel("格式：原文=替代，每行一條；編輯內容會即時同步回主畫面術語表")
+        hint.setFont(QFont("MS UI Gothic", 9))
+        hint.setStyleSheet("color:#888;")
+        hint.setWordWrap(True)
+        vl.addWidget(hint)
+
+        self.glossary_edit = QTextEdit()
+        self.glossary_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.glossary_edit.setAcceptRichText(False)
+        self.glossary_edit.setStyleSheet("background:#2a3b4c; color:#ddd;")
+        self.glossary_edit.setFont(QFont(self._font_family, self._font_size))
+        self.glossary_edit.textChanged.connect(self._on_glossary_panel_changed)
+        vl.addWidget(self.glossary_edit, 1)
+
+        return w
+
+    def _load_glossary_into_panel(self) -> None:
+        """從主程式載入最新的一般術語表到面板（不觸發回寫）。"""
+        if self._glossary_text_provider is None:
             return
         try:
-            self._on_side_state_change(width, None)
+            text = self._glossary_text_provider() or ""
         except Exception:
-            pass
+            text = ""
+        self._glossary_syncing = True
+        try:
+            self.glossary_edit.setPlainText(text)
+        finally:
+            self._glossary_syncing = False
+
+    def _on_glossary_panel_changed(self) -> None:
+        """面板內容變更 → 即時同步回主程式的一般術語表。"""
+        if self._glossary_syncing:
+            return
+        if self._glossary_text_setter is not None:
+            try:
+                self._glossary_text_setter(self.glossary_edit.toPlainText())
+            except Exception:
+                pass
+
+    def _find_in_glossary(self) -> None:
+        """在用語集文字框中尋找下一個符合的字串（找不到則循環回開頭）。"""
+        text = self.glossary_search.text().strip()
+        if not text:
+            return
+        if not self.glossary_edit.find(text):
+            cursor = self.glossary_edit.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            self.glossary_edit.setTextCursor(cursor)
+            if not self.glossary_edit.find(text):
+                self._set_status(f"找不到「{text}」", "#ffc107")
+
+    def _save_glossary_panel(self, force_overwrite: bool) -> None:
+        """儲存用語：只寫入術語部分，依主程式「僅儲存差異」設定決定行為。"""
+        if self._glossary_save is None:
+            self._set_status("⚠️ 無法儲存用語（未連接主程式）", "#ffc107")
+            return
+        # 先把面板內容同步回主程式，確保儲存的是最新文字
+        if self._glossary_text_setter is not None:
+            try:
+                self._glossary_text_setter(self.glossary_edit.toPlainText())
+            except Exception:
+                pass
+        try:
+            tag = self._glossary_save(force_overwrite) or ""
+            self._set_status(f"✅ 已儲存用語{tag}", "#0f0")
+        except Exception as e:
+            self._set_status(f"❌ 用語儲存失敗：{e}", "#dc3545")
+
+    def _toggle_glossary_side(self) -> None:
+        """Alt+5：開關右側「用語集」面板。開啟時從主程式載入最新術語。"""
+        if self._compare_active:
+            self._set_status("⚠️ 請先回到編輯模式（Alt+1）", "#ffc107")
+            return
+        if self._glossary_side.isVisible():
+            self._glossary_side.hide()
+            self._active_edit_widget().setFocus()
+            self._restore_side_panel_width()
+            self._set_status("關閉用語集面板", "#0f0")
+            return
+        self._load_glossary_into_panel()
+        self._glossary_side.show()
+        self._restore_side_panel_width()
+        self.glossary_edit.setFocus()
+        self._set_status("開啟用語集面板（Alt+5）", "#0f0")
 
     def _toggle_translate_side(self) -> None:
         """Alt+4：開關右側翻譯面板。開啟時若目前在編輯器有選取文字，
@@ -1796,6 +1951,7 @@ class EditWindow(QMainWindow):
         if self._translate_side.isVisible():
             self._translate_side.hide()
             self._active_edit_widget().setFocus()
+            self._restore_side_panel_width()
             self._set_status("關閉局部重套用面板", "#0f0")
             return
 

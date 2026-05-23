@@ -136,6 +136,8 @@ class AppCache:
     # - side_auto_scroll：「自動捲動」勾選框狀態
     side_panel_width: int = 0
     side_auto_scroll: bool = False
+    # 編輯器「用語集」面板（Alt+5）寬度（px）；0 表示沿用預設 splitter 比例
+    glossary_panel_width: int = 0
     # 韓文提取模式：開啟後 base_regex 改用 DEFAULT_BASE_REGEX_KO
     korean_mode: bool = False
     # 實驗性日文提取演算法：錨點掃描 + 邊界擴展 + 分數制過濾。
@@ -346,6 +348,11 @@ class SettingsManager:
                 pass
             cache.side_auto_scroll = bool(data.get(
                 'side_auto_scroll', cache.side_auto_scroll))
+            try:
+                cache.glossary_panel_width = int(data.get(
+                    'glossary_panel_width', cache.glossary_panel_width) or 0)
+            except (TypeError, ValueError):
+                pass
             cache.korean_mode = bool(data.get(
                 'korean_mode', cache.korean_mode))
             cache.experimental_extraction = bool(data.get(
@@ -460,6 +467,7 @@ class SettingsManager:
                 'embed_font_name': cache.embed_font_name,
                 'side_panel_width': cache.side_panel_width,
                 'side_auto_scroll': cache.side_auto_scroll,
+                'glossary_panel_width': cache.glossary_panel_width,
                 'korean_mode': cache.korean_mode,
                 'experimental_extraction': cache.experimental_extraction,
                 'pad_right_aa': cache.pad_right_aa,

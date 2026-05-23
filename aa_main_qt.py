@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.42"
+APP_VERSION = "1.43"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -727,6 +727,7 @@ class MainWindow(QMainWindow):
         self._editor_default_wysiwyg: bool = False
         # 編輯器右側「局部重套用」面板（Alt+4）的持久化狀態
         self._side_panel_width: int = 0
+        self._glossary_panel_width: int = 0
         self._side_auto_scroll: bool = False
         # 編輯器「補空白」每字之間插入的全形空白數量（1~3）
         self._pad_space_count: int = 2
@@ -960,6 +961,13 @@ class MainWindow(QMainWindow):
                 init_side_panel_width=self._side_panel_width,
                 init_side_auto_scroll=self._side_auto_scroll,
                 on_side_state_change=self._on_side_state_changed,
+                glossary_text_provider=self._translate_panel.get_glossary_text,
+                glossary_text_setter=lambda t: (
+                    self._translate_panel.glossary_text.setPlainText(t)),
+                glossary_save=self.save_glossary_only,
+                init_glossary_panel_width=self._glossary_panel_width,
+                on_glossary_panel_width_change=(
+                    self._on_glossary_panel_width_changed),
                 init_pad_count=self._pad_space_count,
                 on_pad_count_change=self._on_pad_count_changed,
                 default_wysiwyg_provider=lambda: self._editor_default_wysiwyg,
@@ -2063,6 +2071,7 @@ class MainWindow(QMainWindow):
             editor_default_wysiwyg=self._editor_default_wysiwyg,
             side_panel_width=self._side_panel_width,
             side_auto_scroll=self._side_auto_scroll,
+            glossary_panel_width=self._glossary_panel_width,
             korean_mode=self._korean_mode,
             experimental_extraction=self._experimental_extraction,
             pad_right_aa=self._pad_right_aa,
@@ -2135,6 +2144,10 @@ class MainWindow(QMainWindow):
             self._side_panel_width = int(cache.side_panel_width or 0)
         except (TypeError, ValueError):
             self._side_panel_width = 0
+        try:
+            self._glossary_panel_width = int(cache.glossary_panel_width or 0)
+        except (TypeError, ValueError):
+            self._glossary_panel_width = 0
         self._side_auto_scroll = bool(cache.side_auto_scroll)
         self._korean_mode = bool(cache.korean_mode)
         self._experimental_extraction = bool(cache.experimental_extraction)
@@ -2466,6 +2479,34 @@ class MainWindow(QMainWindow):
         if auto_scroll is not None:
             self._side_auto_scroll = bool(auto_scroll)
         self.schedule_save()
+
+    def _on_glossary_panel_width_changed(self, width: int) -> None:
+        """編輯器「用語集」面板（Alt+5）寬度變更（splitterMoved）→ 持久化。"""
+        try:
+            self._glossary_panel_width = int(width)
+        except (TypeError, ValueError):
+            return
+        self.schedule_save()
+
+    def save_glossary_only(self, force_overwrite: bool = False) -> str:
+        """只把「一般術語表」寫入 AA_Settings.json，其他設定保留原檔不動。
+
+        依「僅儲存差異」設定決定合併或覆蓋（force_overwrite=True 強制覆蓋）。
+        供編輯器「用語集」面板的「儲存用語」按鈕呼叫；回傳狀態尾註字串。
+        """
+        existing = self.settings_mgr.load_settings()
+        cur_glossary = self._translate_panel.get_glossary_text().strip()
+        diff_mode = self._diff_save_mode and not force_overwrite
+        if diff_mode:
+            cur_glossary = merge_glossary_diff(existing.glossary, cur_glossary)
+        existing.glossary = cur_glossary
+        self.settings_mgr.save_settings(existing)
+        self._saved_glossary_lines = self._count_nonempty(cur_glossary)
+        if diff_mode:
+            return "（合併差異）"
+        if force_overwrite and self._diff_save_mode:
+            return "（強制覆蓋）"
+        return ""
 
     def _on_pad_count_changed(self, count: int) -> None:
         try:

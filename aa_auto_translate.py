@@ -119,6 +119,7 @@ class AutoResult:
     failed: list = field(default_factory=list)      # [(url, 原因), ...]
     quota_paused: bool = False                      # 是否因額度上限暫停
     pending_url: str = ""                           # 暫停／停止時未完成的話網址
+    next_url: str = ""                              # 自然跑滿話數後的下一話續接網址
     remaining: int = 0                              # 尚未處理的話數
     stopped: bool = False                           # 是否被使用者手動停止
     reached_end: bool = False                       # 是否因為沒有下一話而結束
@@ -606,6 +607,12 @@ def run_auto_translate(
                 result.failed.append((url, str(e)))
                 log(f"  ❌ 失敗：{e} → 跳過此話，繼續下一話。")
                 url = next_url
+        else:
+            # 迴圈跑滿設定話數而自然結束（非 break）→ url 為下一話續接網址，
+            # 供 GUI 把它帶回「起始網址」直接接續下一批（已是最後一話時 url 為空）。
+            if url:
+                result.next_url = url
+                log(f"▶ 已達設定話數；下一話接續網址：{url}")
     finally:
         session.close()
 

@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.67"
+APP_VERSION = "1.68"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -1774,9 +1774,12 @@ class MainWindow(QMainWindow):
             self.show_status(f"❌ 自動翻譯失敗：{error}", "#dc3545")
             QMessageBox.critical(self, "自動翻譯失敗", error)
             return
-        # 停止／暫停／中止時，把最後一次未完成的網址回填到「起始網址」，方便直接接續
-        if self._auto_window is not None and getattr(result, "pending_url", ""):
-            self._auto_window.set_start_url(result.pending_url)
+        # 把接續網址回填到「起始網址」，方便直接接續：
+        #   pending_url＝停止／暫停／中止時未完成的話；next_url＝跑滿話數後的下一話。
+        fill_url = (getattr(result, "pending_url", "")
+                    or getattr(result, "next_url", ""))
+        if self._auto_window is not None and fill_url:
+            self._auto_window.set_start_url(fill_url)
         lines = [f"成功翻譯 {len(result.done)} 話。"]
         for p in result.done:
             lines.append(f"  ✅ {p}")
@@ -1786,6 +1789,10 @@ class MainWindow(QMainWindow):
         if result.reached_end:
             lines.append("")
             lines.append("🏁 已翻到最後一話。")
+        if getattr(result, "next_url", ""):
+            lines.append("")
+            lines.append("▶ 已達設定話數；下一話網址已帶入「起始網址」，可直接按開始接續：")
+            lines.append(result.next_url)
         if result.quota_paused:
             lines.append("")
             lines.append("⏸️ 因撞到 Gemini 額度上限而暫停。")

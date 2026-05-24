@@ -3,6 +3,12 @@
 以版號為單位彙整每次更新的摘要。最新版本置於最上方。
 逐筆技術細節請見 git commit 歷史；本檔僅記人類可讀的更新重點。
 
+## v1.58
+
+- API 連線模式的每日配額（RPD）冷卻改良：
+  - 改用實際重置時間計算冷卻長度（每日 GMT+8 下午 3 點重置），Log 不再顯示倒數秒數，而是直接提示「額度將於 MM/DD 15:00（GMT+8）重置」。
+  - 該金鑰的重置時間會持久化保存（以金鑰指紋為索引，不存明文金鑰，檔案不上傳）。下次開啟程式跑自動翻譯時：若已過重置時間 → 自動視為可用（重算）；若尚未到 → 沿用剩餘冷卻，不重複試探。
+
 ## v1.57
 
 - API 連線模式使用 `gemini-3.5-flash` 時，預設帶入 thinking level = high（對應官方 `ThinkingConfig(thinking_level="high")`，REST 為 `generationConfig.thinkingConfig.thinkingLevel`）。其他模型不受影響。

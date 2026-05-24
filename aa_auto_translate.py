@@ -469,7 +469,7 @@ def run_auto_translate(
         session = gemini_api.GeminiApiSession(
             keys, cache.gemini_api_model,
             system_prompt=cache.gemini_api_system_prompt, log=log,
-            stop_event=stop_event)
+            stop_event=stop_event, base_dir=base_dir)
         open_log = f"使用 Google API（模型 {cache.gemini_api_model}）…"
     else:
         gem_url = gem_url or cache.gemini_gem_url

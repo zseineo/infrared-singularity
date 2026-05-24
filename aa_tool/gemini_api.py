@@ -12,7 +12,9 @@
     避免每個 chunk 都重複試探已用盡的金鑰。
       - RPM：短冷卻（優先用伺服器建議的 retryDelay／Retry-After，否則 60 秒），
         稍後自動歸隊。
-      - RPD：長冷卻（視同本次執行用盡），不再重試該金鑰。
+      - RPD：冷卻到下一個每日重置時刻（GMT+8 每天 15:00），log 顯示重置時間而非倒數；
+        並把該金鑰的重置時間持久化（以金鑰指紋為索引，不存明文金鑰）。下次開啟（新
+        session）載入時，已過重置時間者自動視為可用、未過者沿用剩餘冷卻。
   * 當所有金鑰都在冷卻中：若最近解除時間在可接受範圍內（多為 RPM）→ stop-aware
     等待後重試；若是長冷卻（RPD）或反覆全滿 → 丟 GeminiQuotaExceeded（協調器中止整批）。
 
@@ -20,11 +22,14 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from .gemini_web import GeminiAborted, GeminiQuotaExceeded, GeminiWebError
@@ -52,7 +57,6 @@ _TIMEOUT = 300
 
 # 額度冷卻參數
 _RPM_COOLDOWN = 60.0          # 每分鐘速率上限的預設冷卻（無伺服器建議時）
-_RPD_COOLDOWN = 24 * 3600.0   # 每日配額：本次執行內視同用盡的長冷卻
 # 所有金鑰皆冷卻時，最近解除時間若 ≤ 此秒數就等待後重試（多為 RPM）；超過則終止
 _ALL_COOLDOWN_MAX_WAIT = 120.0
 _MAX_WAIT_ROUNDS = 3          # 「全部冷卻→等待→重試」最多幾輪，避免反覆 ping-pong
@@ -64,6 +68,26 @@ _MAX_BUSY_RETRIES = 5        # 暫時性錯誤最多重試幾次，仍失敗才�
 
 # 從 retryDelay（"30s" / "1.5s"）抽秒數
 _DURATION_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE)
+
+# 每日配額（RPD）重置時間：GMT+8 每天 15:00。冷卻長度＝距下一個重置時刻。
+_RESET_TZ = timezone(timedelta(hours=8))
+_RESET_HOUR = 15
+# RPD 冷卻狀態持久化檔（只存金鑰雜湊→重置時間，不存明文金鑰）
+_QUOTA_STATE_FILENAME = "aa_api_quota.json"
+
+
+def _next_rpd_reset(now: datetime | None = None) -> datetime:
+    """回傳下一個 RPD 重置時刻（GMT+8 15:00）。now 之後最近的那一個。"""
+    now = (now or datetime.now(_RESET_TZ)).astimezone(_RESET_TZ)
+    reset = now.replace(hour=_RESET_HOUR, minute=0, second=0, microsecond=0)
+    if now >= reset:
+        reset += timedelta(days=1)
+    return reset
+
+
+def _key_fingerprint(key: str) -> str:
+    """金鑰指紋（sha256 前 16 碼），作為持久化索引；不外洩明文金鑰。"""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
 class GeminiServerBusy(GeminiWebError):
@@ -81,21 +105,27 @@ class GeminiApiSession:
         system_prompt: str = "",
         log: Callable[[str], None] | None = None,
         stop_event=None,
+        base_dir: str | None = None,
     ) -> None:
         self._keys = [k.strip() for k in (api_keys or []) if k.strip()]
         self._model = (model or DEFAULT_API_MODEL).strip()
         self._system_prompt = system_prompt or ""
         self._log = log or (lambda m: print(f"[gemini_api] {m}"))
         self._stop_event = stop_event
+        self._base_dir = base_dir
         self._idx = 0  # round-robin 游標
         # 每把金鑰的「冷卻到期」單調時鐘值（0 = 可用）；輪換時跳過未到期者
         self._cooldown_until = [0.0] * len(self._keys)
+        # 每把金鑰的 RPD（每日配額）重置時刻（datetime，None=非 RPD 冷卻）；
+        # 供 log 顯示與跨程式持久化用
+        self._rpd_reset: list[datetime | None] = [None] * len(self._keys)
 
     # ── 生命週期（對齊 GeminiWebSession 介面） ──
 
     def open(self, *_a, **_kw) -> None:
         if not self._keys:
             raise GeminiWebError("API 模式但未設定任何 API 金鑰")
+        self._load_quota_state()  # 載入上次未過重置時間的 RPD 冷卻；過期者自動清除
         self._log(f"API 後端就緒：模型 {self._model}，"
                   f"共 {len(self._keys)} 把金鑰輪換")
 
@@ -143,10 +173,19 @@ class GeminiApiSession:
                     return self._request(self._keys[i], prompt_text)
                 except GeminiQuotaExceeded as e:
                     last_quota = e
-                    cooldown, kind = self._cooldown_for(e)
+                    cooldown, reset_dt = self._cooldown_for(e)
                     self._cooldown_until[i] = self._now() + cooldown
-                    self._log(
-                        f"  金鑰 #{i + 1} {kind}，冷卻約 {int(cooldown)}s，換下一把…")
+                    if reset_dt is not None:
+                        # RPD（每日配額）：顯示重置時間、持久化，本次執行不再用此金鑰
+                        self._rpd_reset[i] = reset_dt
+                        self._save_quota_state()
+                        self._log(
+                            f"  金鑰 #{i + 1} 已達每日配額(RPD)，額度將於 "
+                            f"{reset_dt:%m/%d %H:%M}（GMT+8）重置，換下一把…")
+                    else:
+                        self._log(
+                            f"  金鑰 #{i + 1} 達速率上限(RPM)，"
+                            f"冷卻約 {int(cooldown)}s，換下一把…")
                     continue
                 except GeminiServerBusy as e:
                     # 503 等暫時性錯誤：伺服器高負載，非金鑰問題、不進冷卻；
@@ -170,8 +209,11 @@ class GeminiApiSession:
             wait = soonest - self._now()
             if wait > _ALL_COOLDOWN_MAX_WAIT or waits >= _MAX_WAIT_ROUNDS:
                 if wait > _ALL_COOLDOWN_MAX_WAIT:
+                    resets = [r for r in self._rpd_reset if r is not None]
+                    when = (f"，最快將於 {min(resets):%m/%d %H:%M}（GMT+8）重置"
+                            if resets else "")
                     raise GeminiQuotaExceeded(
-                        f"所有 {n} 把金鑰皆達額度上限（含每日配額 RPD），終止")
+                        f"所有 {n} 把金鑰皆達額度上限（含每日配額 RPD）{when}，終止")
                 raise GeminiQuotaExceeded(
                     f"所有 {n} 把金鑰反覆達速率上限，終止（{last_quota}）")
             wait = max(1.0, wait) + 0.5
@@ -237,13 +279,19 @@ class GeminiApiSession:
                 return False
             time.sleep(min(0.5, remaining))
 
-    def _cooldown_for(self, exc: Exception) -> tuple[float, str]:
-        """依 429 例外決定（冷卻秒數, 說明文字）。RPD 一律長冷卻；RPM 用伺服器建議。"""
+    def _cooldown_for(self, exc: Exception) -> tuple[float, datetime | None]:
+        """依 429 例外決定（冷卻秒數, RPD 重置時刻｜None）。
+
+        RPD：冷卻到下一個 GMT+8 15:00 重置時刻（回傳該 datetime 供 log／持久化）；
+        RPM：短冷卻（伺服器建議的 retryDelay，否則 60s），回傳 None。
+        """
         if getattr(exc, "is_daily", False):
-            return _RPD_COOLDOWN, "已達每日配額(RPD)，本次執行不再使用"
+            reset_dt = _next_rpd_reset()
+            secs = max(1.0, (reset_dt - datetime.now(_RESET_TZ)).total_seconds())
+            return secs, reset_dt
         retry_after = getattr(exc, "retry_after", None)
         cd = retry_after if (retry_after and retry_after > 0) else _RPM_COOLDOWN
-        return float(cd), "達速率上限(RPM)"
+        return float(cd), None
 
     @staticmethod
     def _parse_quota_error(
@@ -288,6 +336,70 @@ class GeminiApiSession:
         except Exception:
             pass
         return retry_after, is_daily
+
+    # ── RPD 冷卻持久化（跨程式記住每日配額狀態，過了重置時間自動失效） ──
+
+    def _quota_state_path(self) -> str | None:
+        if not self._base_dir:
+            return None
+        return os.path.join(self._base_dir, _QUOTA_STATE_FILENAME)
+
+    def _load_quota_state(self) -> None:
+        """載入上次存的 RPD 冷卻：以金鑰指紋對映重置時間。
+
+        重置時間「未過」→ 設回冷卻（換算成單調時鐘剩餘秒數）；「已過」→ 視為可用
+        （自動重算），不載入。載入後重寫檔案以清掉過期項目。
+        """
+        path = self._quota_state_path()
+        if not path or not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return
+        if not isinstance(data, dict):
+            return
+        now = datetime.now(_RESET_TZ)
+        loaded = 0
+        for i, key in enumerate(self._keys):
+            iso = data.get(_key_fingerprint(key))
+            if not iso:
+                continue
+            try:
+                reset_dt = datetime.fromisoformat(iso)
+            except Exception:
+                continue
+            remaining = (reset_dt - now).total_seconds()
+            if remaining > 0:  # 尚未到重置時間 → 仍在 RPD 冷卻
+                self._cooldown_until[i] = self._now() + remaining
+                self._rpd_reset[i] = reset_dt
+                loaded += 1
+                self._log(f"  金鑰 #{i + 1} 仍在每日配額冷卻中，"
+                          f"額度將於 {reset_dt:%m/%d %H:%M}（GMT+8）重置")
+            # remaining <= 0：已過重置時間 → 自動重算為可用，不載入
+        if loaded < len([v for v in data.values() if v]):
+            self._save_quota_state()  # 清掉過期／無關的項目
+
+    def _save_quota_state(self) -> None:
+        """把目前仍有效（未過重置時間）的 RPD 冷卻寫檔；空則刪檔。"""
+        path = self._quota_state_path()
+        if not path:
+            return
+        now = datetime.now(_RESET_TZ)
+        state = {
+            _key_fingerprint(self._keys[i]): r.isoformat()
+            for i, r in enumerate(self._rpd_reset)
+            if r is not None and (r - now).total_seconds() > 0
+        }
+        try:
+            if state:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(state, f, ensure_ascii=False, indent=2)
+            elif os.path.exists(path):
+                os.remove(path)
+        except Exception as e:  # noqa: BLE001 — 持久化失敗不影響翻譯
+            self._log(f"  （RPD 冷卻狀態寫入失敗，不影響翻譯：{e}）")
 
     @staticmethod
     def _extract_text(payload: dict) -> str:

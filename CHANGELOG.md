@@ -3,6 +3,10 @@
 以版號為單位彙整每次更新的摘要。最新版本置於最上方。
 逐筆技術細節請見 git commit 歷史；本檔僅記人類可讀的更新重點。
 
+## v1.57
+
+- API 連線模式使用 `gemini-3.5-flash` 時，預設帶入 thinking level = high（對應官方 `ThinkingConfig(thinking_level="high")`，REST 為 `generationConfig.thinkingConfig.thinkingLevel`）。其他模型不受影響。
+
 ## v1.56
 
 - 提取演算法 failcase 維護：修好三個案例。

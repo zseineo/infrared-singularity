@@ -39,6 +39,13 @@ API_MODELS = [
 ]
 DEFAULT_API_MODEL = API_MODELS[0]
 
+# 特定模型的預設 thinking level。對應官方 SDK 的
+# ThinkingConfig(thinking_level=...)；REST 對映 generationConfig.thinkingConfig.thinkingLevel。
+# 3.5 Flash 預設 high（key 一律小寫比對）。
+_DEFAULT_THINKING_LEVEL = {
+    "gemini-3.5-flash": "high",
+}
+
 _ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/"
              "models/{model}:generateContent")
 _TIMEOUT = 300
@@ -178,6 +185,10 @@ class GeminiApiSession:
         if self._system_prompt.strip():
             body["systemInstruction"] = {
                 "parts": [{"text": self._system_prompt}]}
+        # 特定模型套用預設 thinking level（如 3.5 Flash → high）
+        level = _DEFAULT_THINKING_LEVEL.get(self._model.lower())
+        if level:
+            body["generationConfig"] = {"thinkingConfig": {"thinkingLevel": level}}
         url = _ENDPOINT.format(model=self._model) + f"?key={key}"
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(

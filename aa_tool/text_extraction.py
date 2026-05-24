@@ -187,6 +187,10 @@ _SHORT_KATA_UTT_RE = re.compile(r'^[゠-ーヿ]{2}[！？]+$')
 # 真實日文罕見此模式（片假名詞會整串寫，不會單字夾入平假名）；AA 圖則常見。
 # `゠-ヺ`(U+30A0-30FA) 排除 `ー`(U+30FC 長音符號) — 避免「だーか」這類拉長口吻誤判。
 _HIRA_KATA_HIRA_RE = re.compile(r'[ぁ-゜ゟ][゠-ヺ][ぁ-゜ゟ]')
+# 片假名夾真平假名（kata-hira-kata，如 AA 圖的「モもト」）— 與 _HIRA_KATA_HIRA_RE
+# 對稱。真實日文罕見單一平假名夾在兩片假名間（片假名詞不會這樣插平假名），多為
+# AA 圖把不同腳本字元拼在一起的碎片。
+_KATA_HIRA_KATA_RE = re.compile(r'[゠-ヺ][ぁ-゜ゟ][゠-ヺ]')
 
 # 漢字 + 句末標點 anchor：純漢字片語 + 日文標點（如「自分？」「諸君！」「認…」）。
 # 純漢字短語在 AA 圖中極少出現（AA 用半形片假名／符號），通常是省略平假名的
@@ -559,7 +563,7 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     # 類別跳轉率懲罰：只在較長文字、且無強日文信號時才套用。
     # 門檻從 5 升到 6 — 避免「お腹痛い）」這類 5-char 日文短句（漢字-平假名
     # -漢字-平假名-閉括號，類別頻繁跳轉但合法）被誤殺。
-    if (len(text) >= 6 and _class_transitions(text) / len(text) > 0.5
+    if (len(text) >= 6 and _class_transitions(text) / len(text) >= 0.5
             and not strong_jp):
         s -= 2
     # 連續相同片假名懲罰：AA 圖邊框/裝飾特徵；行尾對話豁免（涵蓋「ハハハ」笑聲）
@@ -585,6 +589,9 @@ def _score_candidate(text: str, line: str, start: int, end: int,
         s -= 4
     # 平假名夾真片假名懲罰：「とつこンっ」的「こンっ」這類片假名單字夾在平假名間。
     if _HIRA_KATA_HIRA_RE.search(text):
+        s -= 3
+    # 片假名夾真平假名懲罰（kata-hira-kata，如「モもト」）— 對稱的 AA 碎片特徵
+    if _KATA_HIRA_KATA_RE.search(text):
         s -= 3
     # 純片假名長候選（無平假名）懲罰：「ニニー―――ニ」這類純 kata + 裝飾片段。
     # 真實日文 ≥5 char 句子幾乎都含平假名（即使片假名為主的詞也常接助詞 の/だ
@@ -701,7 +708,10 @@ def _is_right_edge_dialogue(line: str, start: int, end: int) -> bool:
     判定條件：
     - 右側：候選 end 之後到行尾僅含空白與「行尾標誌」（如 `＞」』）` 等
       對話框收尾符號，不視為內容）
-    - 左側：候選 start 之前 ≥ 3 個連續半形/全形空白（與 AA 圖隔開）
+    - 左側：候選 start 之前 ≥ 3 個連續空白（與 AA 圖隔開）。空白判定用
+      `str.isspace()`，涵蓋半形 ` `、全形 `　`，以及 AA 作者偶爾插入的窄空白
+      （如 thin space ` `、nbsp ` `）— 否則這類字元會中斷空白 run
+      使右端對話被誤判為非右端（例「…{,　　　　　　 あ、みっけ」漏抓）。
     """
     rest = line[end:].rstrip()
     while rest and rest[-1] in _RIGHT_EDGE_CLOSERS:
@@ -710,7 +720,7 @@ def _is_right_edge_dialogue(line: str, start: int, end: int) -> bool:
         return False
     space_count = 0
     i = start - 1
-    while i >= 0 and line[i] in (' ', '　'):
+    while i >= 0 and line[i].isspace():
         space_count += 1
         i -= 1
     return space_count >= 3

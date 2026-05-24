@@ -528,14 +528,14 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     # 注意：`_OKURIGANA_RE` 與 `_KANJI_HIRA_RE` 雖然有分數 bonus，但不列入
     # strong_jp — AA 圖中「kanji+hira」「kanji-hira-kanji」三字偶然碰撞時
     # （如「灯な心」「彡く弍」）若也豁免局部 AA 密度懲罰，會放掉大量假陽性。
-    # has_run + len 門檻從 8 降到 7（為了 `じゃあオープン`）。
     any_hira = any(0x3041 <= ord(c) <= 0x309F for c in text)
-    # `has_run + len>=7` 條件需要含平假名 — 純片假名長候選（如「ニニー―――ニ」）
-    # 不可僅靠長度被視為強日文信號；真實長對話幾乎必含平假名。
+    # 註：曾把「`has_run` 且 len≥7 且含平假名」也列入 strong_jp（讓長對話豁免局部
+    # 密度懲罰），但這會讓 AA 雜湊（如「にう--ｒぅ.」局部密度 1.0、含 `--` 與全形
+    # latin）逃過懲罰；真實長對話幾乎都另含 ≥2 助詞或 `！？。`，已由其他 strong_jp
+    # 條件涵蓋，故移除此弱豁免（base 無任何條目單靠它成立）。
     # strong_jp 的句末標點只認**全形** `！？。` — 半形 `!?` 信號不足以豁免
     # 局部 AA 密度懲罰（避免「ンへ!」這類含半形 `!` 的 AA 碎片被放行）。
     strong_jp = ((particle_count >= 2 and not all_particles)
-                 or (has_run and len(text) >= 7 and any_hira)
                  or any(ch in text for ch in '！？。')
                  or has_num_option
                  or is_right_edge
@@ -593,11 +593,12 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     # 片假名夾真平假名懲罰（kata-hira-kata，如「モもト」）— 對稱的 AA 碎片特徵
     if _KATA_HIRA_KATA_RE.search(text):
         s -= 3
-    # 純片假名長候選（無平假名）懲罰：「ニニー―――ニ」這類純 kata + 裝飾片段。
-    # 真實日文 ≥5 char 句子幾乎都含平假名（即使片假名為主的詞也常接助詞 の/だ
-    # 等）；right_edge / box_bounded / spaced-out 等強信號可豁免（涵蓋
-    # 「ハハハハッ」笑聲在行尾的情況）。
-    if len(text) >= 5 and not any_hira and not strong_jp:
+    # 無平假名候選（純片假名＋裝飾，無平假名）懲罰：「ニニー―――ニ」「ニニァ-」
+    # 這類片段。真實日文 ≥4 char 內容幾乎都含平假名（即使片假名為主的詞也常接
+    # 助詞 の/だ 等）；right_edge / box_bounded / spaced-out 等強信號可豁免（涵蓋
+    # 「ハハハハッ」笑聲在行尾、「（クソ！」含全形 `！` 等情況）。門檻取 ≥4 以擋下
+    # 「ニニァ-」這類 4 字純片假名＋小字＋標點碎片。
+    if len(text) >= 4 and not any_hira and not strong_jp:
         s -= 3
     return s
 
@@ -781,6 +782,16 @@ def _extract_experimental_line(
         if any(ss <= s and e <= ee for ss, ee in covered_ranges):
             continue
         text = line[s:e].strip()
+        # 邊界擴展可能把結尾的「孤立 AA 筆畫片假名」（ノ/ミ/ヽ 等命中 symbol_regex
+        # 者）一起吃進來（如「弋でりノ」的 ノ）；剝除之讓候選回到真實邊界（剝除後
+        # 若縮短到 ≤3 char，會被後續短候選孤立過濾擋下）。前一字仍是片假名時不剝
+        # （屬片假名詞的一部分，如「メモ」）。
+        while (len(text) >= 2
+               and 0x30A0 <= ord(text[-1]) <= 0x30FF
+               and symbol_regex.match(text[-1])
+               and not (0x30A0 <= ord(text[-2]) <= 0x30FF)):
+            text = text[:-1]
+            e -= 1
         # 一般候選需 ≥ 3 char。長度 2 的特殊放行：
         # - `_SHORT_UTT_RE` 匹配（假名+句末標點，如「ま！」「あ？」）
         # - `_HIRAGANA_RUN_RE` 匹配（純平假名 run，如「さぁ」「はい」）

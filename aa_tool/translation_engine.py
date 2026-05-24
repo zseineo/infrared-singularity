@@ -317,35 +317,47 @@ def _glossary_hit_flanked_by_deco_run(line: str, start: int, end: int) -> bool:
     return False
 
 
-def _is_katakana_fragment_hit(line: str, start: int, end: int, key: str) -> bool:
+def _is_katakana_fragment_hit(
+        line: str, start: int, end: int, key: str,
+        covered: 'frozenset[int] | None' = None) -> bool:
     """判斷術語表這次命中是否疑似「把更長的片假名詞硬切成術語碎片」。
 
     `key` 本身含片假名（`_KATAKANA_RE`）、且命中後緊鄰（前一字或後一字）
     仍是片假名 → True（如 AI 譯文保留的 `レオリオ` 中的 `リオ`，左鄰 `オ`）。
     但後方緊接片假名敬稱（`サン` 等）時排除（屬正常的「名字＋敬稱」）。
+
+    `covered`：本行所有術語命中範圍的字元位置集合（由呼叫端預先算好）。
+    若相鄰的片假名字元也在 `covered` 裡，代表它同樣是本輪被替換的術語，
+    兩術語合起來完整覆蓋整段片假名詞（如 `ハクタイ`＋`ジム`），不視為碎片。
     """
     if not _KATAKANA_RE.search(key):
         return False
-    before = line[start - 1] if start > 0 else ''
-    after = line[end] if end < len(line) else ''
+    before_pos = start - 1
+    after_pos = end
+    before = line[before_pos] if before_pos >= 0 else ''
+    after = line[after_pos] if after_pos < len(line) else ''
     if before and _KATAKANA_RE.match(before):
-        return True
+        if covered is None or before_pos not in covered:
+            return True
     if after and _KATAKANA_RE.match(after):
         tail = line[end:end + 4]
         if not any(tail.startswith(h) for h in _KATAKANA_HONORIFICS):
-            return True
+            if covered is None or after_pos not in covered:
+                return True
     return False
 
 
 def _glossary_hit_on_aa(line: str, start: int, end: int, key: str,
-                        symbol_regex: 're.Pattern') -> bool:
+                        symbol_regex: 're.Pattern',
+                        covered: 'frozenset[int] | None' = None) -> bool:
     """判斷術語表的這次命中位置是否疑似落在 AA 圖上（experimental）。
 
     規則 A — 周圍 AA 噪聲密度：命中位置左右視窗（`_local_aa_density`）的 AA
       噪聲密度 >= `_GLOSSARY_AA_DENSITY_TH` → 視為 AA 圖（例：`::::アム::::`
       中的 `アム`，周圍全是 `:` 等 AA 字元）。
     規則 B — 緊鄰片假名：見 `_is_katakana_fragment_hit`（疑似把更長的片假名
-      詞硬切成術語碎片）。
+      詞硬切成術語碎片）。`covered` 為本行所有命中範圍的位置集合，
+      相鄰片假名若也在覆蓋範圍內（同輪另一術語）則不觸發。
     規則 C — 緊鄰裝飾標點 run：見 `_glossary_hit_flanked_by_deco_run`（命中左/右
       緊鄰 `;;;;` 這類連續重複裝飾標點，屬 AA 裝飾線但不被密度規則計入）。
     """
@@ -353,7 +365,7 @@ def _glossary_hit_on_aa(line: str, start: int, end: int, key: str,
         return True
     if _glossary_hit_flanked_by_deco_run(line, start, end):
         return True
-    return _is_katakana_fragment_hit(line, start, end, key)
+    return _is_katakana_fragment_hit(line, start, end, key, covered)
 
 
 def apply_glossary_to_text(text: str, glossary: dict[str, str], *,
@@ -382,11 +394,20 @@ def apply_glossary_to_text(text: str, glossary: dict[str, str], *,
 
     lines = text.split('\n')
     for i, line in enumerate(lines):
-        def repl(m, _line=line):
+        # avoid_aa 時預先蒐集本行所有術語命中範圍，供 Rule B 判定
+        # 「相鄰片假名是否也被同輪另一術語覆蓋」（如 ハクタイ＋ジム 連排）。
+        covered: 'frozenset[int] | None' = None
+        if avoid_aa:
+            covered_set: set[int] = set()
+            for m in pattern.finditer(line):
+                covered_set.update(range(m.start(), m.end()))
+            covered = frozenset(covered_set)
+
+        def repl(m, _line=line, _covered=covered):
             jp = m.group(0)
             tw = term_map[jp]
             if avoid_aa and _glossary_hit_on_aa(
-                    _line, m.start(), m.end(), jp, sym):
+                    _line, m.start(), m.end(), jp, sym, _covered):
                 return jp  # 疑似 AA 圖，保留原文不套用
             len_diff = len(jp) - len(tw)
             rest = _line[m.end():]

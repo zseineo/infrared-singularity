@@ -139,6 +139,91 @@ def _make_button(text: str, color: str, hover: str, *,
     return btn
 
 
+def _char_script(ch: str) -> str:
+    """判斷單一字元所屬的書寫系統類別，供雙擊同類選取使用。
+
+    回傳值作為「邊界標籤」：相同回傳值的連續字元視為同一段。
+    - 'hiragana' / 'katakana' / 'cjk' / 'latin' / 'digit'：Unicode 書寫系統
+    - 'cp_N'：其他字元（標點、符號等），每個 codepoint 各自為一類，
+      相同字元會聚集（如 ―― 兩個連字號同類），不同標點不會跨邊界。
+    """
+    cp = ord(ch)
+    if 0x3040 <= cp <= 0x309F:                          # Hiragana
+        return 'hiragana'
+    if (0x30A0 <= cp <= 0x30FF                          # Katakana
+            or 0x31F0 <= cp <= 0x31FF                   # Katakana Phonetic Extensions
+            or 0xFF65 <= cp <= 0xFF9F):                 # Halfwidth Katakana
+        return 'katakana'
+    if (0x4E00 <= cp <= 0x9FFF                          # CJK Unified Ideographs
+            or 0x3400 <= cp <= 0x4DBF                   # CJK Extension A
+            or 0xF900 <= cp <= 0xFAFF                   # CJK Compatibility Ideographs
+            or 0x20000 <= cp <= 0x2A6DF):               # CJK Extension B
+        return 'cjk'
+    if (0x0041 <= cp <= 0x007A                          # Basic Latin letters (A–z)
+            or 0x00C0 <= cp <= 0x024F                   # Latin Extended-A/B
+            or 0xFF21 <= cp <= 0xFF3A                   # Fullwidth Latin Capital
+            or 0xFF41 <= cp <= 0xFF5A):                 # Fullwidth Latin Small
+        return 'latin'
+    if 0x0030 <= cp <= 0x0039 or 0xFF10 <= cp <= 0xFF19:  # ASCII / Fullwidth digits
+        return 'digit'
+    return f'cp_{cp}'                                   # 標點、空白、換行等各自獨立
+
+
+class CustomTextEdit(QTextEdit):
+    """QTextEdit 子類別：雙擊優先選取同類書寫系統的連續字元。
+
+    行為：
+    - 第一次雙擊：選取游標所在位置的同類連續字元段（連續假名、漢字、拉丁…）
+    - 在已選取範圍內再次雙擊：退回 Qt 原生 WordUnderCursor 選取行為
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._script_sel_range: tuple[int, int] | None = None  # (start, end_exclusive)
+
+    def mouseDoubleClickEvent(self, ev) -> None:
+        click_pos = self.cursorForPosition(ev.pos()).position()
+
+        # 若點擊位置在上次同類選取範圍內 → 退回 Qt 原生 word 選取並重置
+        if (self._script_sel_range is not None
+                and self._script_sel_range[0] <= click_pos < self._script_sel_range[1]):
+            self._script_sel_range = None
+            super().mouseDoubleClickEvent(ev)
+            return
+
+        # 換行符號位置：退回 Qt 原生行為
+        text = self.toPlainText()
+        p = click_pos
+        if not (0 <= p < len(text)) or text[p] == '\n':
+            self._script_sel_range = None
+            super().mouseDoubleClickEvent(ev)
+            return
+
+        # 向兩側展開，找出同類連續字元的邊界
+        script = _char_script(text[p])
+        start = p
+        while start > 0 and _char_script(text[start - 1]) == script:
+            start -= 1
+        end = p + 1
+        while end < len(text) and _char_script(text[end]) == script:
+            end += 1
+
+        c = self.cursorForPosition(ev.pos())
+        c.setPosition(start)
+        c.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        self.setTextCursor(c)
+        self._script_sel_range = (start, end)
+
+    def keyPressEvent(self, ev) -> None:
+        # Tab → 4 個半形空白（取代預設插入 tab 字元的行為）
+        if (ev.key() == Qt.Key.Key_Tab
+                and ev.modifiers() == Qt.KeyboardModifier.NoModifier
+                and not self.isReadOnly()):
+            self.insertPlainText('    ')
+            return
+        super().keyPressEvent(ev)
+
+
 class EditWindow(QMainWindow):
     def __init__(
         self,
@@ -322,7 +407,7 @@ class EditWindow(QMainWindow):
         aa_font.setStyleHint(QFont.StyleHint.TypeWriter)
         self._measurer = QtFontMeasurer(aa_font)
 
-        self.editor = QTextEdit()
+        self.editor = CustomTextEdit()
         self.editor.setAcceptRichText(False)
         self.editor.setPlainText(text)
         # 清除「空 → 初始內容」這條 undo entry，避免使用者一打開檔案按 Ctrl+Z
@@ -332,7 +417,7 @@ class EditWindow(QMainWindow):
         self.editor.setTabChangesFocus(False)
         self.editor.setFont(aa_font)
 
-        self.orig_view = QTextEdit()
+        self.orig_view = CustomTextEdit()
         self.orig_view.setAcceptRichText(False)
         self.orig_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.orig_view.setReadOnly(True)
@@ -342,7 +427,7 @@ class EditWindow(QMainWindow):
             self.orig_view.document().clearUndoRedoStacks()
             self._apply_line_height_to(self.orig_view)
 
-        self.preview_view = QTextEdit()
+        self.preview_view = CustomTextEdit()
         self.preview_view.setAcceptRichText(False)
         # WYSIWYG 模式下需可編輯；進入時於 _toggle_preview 切為 readonly=False，
         # 預設仍 readonly 確保 stack 切到 idx 2 之前不會被誤觸打字。

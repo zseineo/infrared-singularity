@@ -145,6 +145,31 @@ _TRAILING_CLOSERS = set('」』）)】〕〉》｝}］]')
 # 用的分隔線而非 AA 圖，不應觸發右側補空白（例：`─── `）。
 _HORIZONTAL_RULE_CHARS = set('─━═╌╍┄┅┈┉╴╶╾╼-－‐‑‒–—―')
 
+# 右側殘留「假名文字」判定允許夾雜的括號（擬聲詞常加括號，如「（ﾅﾃﾞﾅﾃﾞ）」）。
+_KANA_TAIL_BRACKETS = set('（）()「」『』【】〈〉《》｛｝{}［］[]')
+
+
+def _tail_is_kana_text(tail: str) -> bool:
+    """右側殘留 `tail` 是否整段都是「假名文字」（可能含括號／空白）。
+
+    用於把擬聲詞等右側文字（如「（ﾅﾃﾞﾅﾃﾞ」「（ﾆﾔﾘ）」）與 AA 圖區分開：每個非空白
+    字元都是平假名／片假名／半形片假名（可夾雜括號）即視為文字而非 AA —— 即使
+    其中某些半形片假名（如 `ﾘ`/`ﾊ`/`ｿ`）同時被列在 AA 裝飾符號集，全為假名時仍
+    當文字。至少含一個假名才成立（純括號不算）。
+    """
+    seen_kana = False
+    for ch in tail:
+        if ch in (' ', '　') or ch in _KANA_TAIL_BRACKETS:
+            continue
+        cp = ord(ch)
+        is_kana = (0x3040 <= cp <= 0x309F      # 平假名（含小書假名）
+                   or 0x30A0 <= cp <= 0x30FF   # 片假名（含小書、長音 ー、・）
+                   or 0xFF66 <= cp <= 0xFF9F)  # 半形片假名（含濁點 ﾞ ﾟ）
+        if not is_kana:
+            return False
+        seen_kana = True
+    return seen_kana
+
 
 def _right_side_has_aa(
     rest: str,
@@ -173,6 +198,10 @@ def _right_side_has_aa(
     # 純橫線分隔線（如 `─── `）不算 AA 圖：去空白後若只剩橫線字元，不補空白。
     tail_nospace = [c for c in tail if c not in (' ', '　')]
     if tail_nospace and all(c in _HORIZONTAL_RULE_CHARS for c in tail_nospace):
+        return False
+    # 右側若整段都是假名文字（擬聲詞等，可能含括號，如「（ﾅﾃﾞﾅﾃﾞ」）→ 視為文字
+    # 而非 AA，不補空白。
+    if _tail_is_kana_text(tail):
         return False
     return aa_noise_ratio(tail, symbol_regex) >= _RIGHT_AA_NOISE_THRESHOLD
 

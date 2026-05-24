@@ -521,6 +521,7 @@ def run_auto_translate(
                     url, cfg)
             except ChapterError as e:
                 result.failed.append((url, str(e)))
+                result.pending_url = url  # 這一話未完成 → 供 GUI 回填起始網址接續
                 log(f"  ❌ {e} → 無法取得下一話，中斷。")
                 break
             # 讀過的網址寫入讀取紀錄（與手動流程一致）

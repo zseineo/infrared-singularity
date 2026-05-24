@@ -402,6 +402,14 @@ class AutoTranslatePanel(QWidget):
         """從主視窗目前狀態重整欄位（每次 show_auto_translate_panel 都呼叫）。"""
         self._load_from_main()
 
+    def set_start_url(self, url: str) -> None:
+        """把（停止／暫停／中止時）最後一次未完成的網址回填到起始網址欄，方便直接接續。"""
+        if not url:
+            return
+        self.url_edit.setText(url)
+        # 起始網址變了 → 更新檔名預覽（只吃本地快取，不上網、不卡 UI）
+        self._refresh_actual_filename(allow_network=False)
+
     def _load_conn_from_main(self) -> None:
         """把主視窗的連線設定載入浮層欄位（翻譯方式在主頁，見 _load_from_main）。"""
         m = self._main

@@ -417,6 +417,8 @@ class EditWindow(QMainWindow):
                   activated=self._reverse_glossary_replace)
         QShortcut(QKeySequence("Alt+C"), self,
                   activated=self._extract_jp_from_selection)
+        QShortcut(QKeySequence("Alt+A"), self,
+                  activated=self._toggle_spaces)
         # Redo（Ctrl+Z 由 QTextEdit 原生處理，這裡補一個 Alt+Z 重做）
         QShortcut(QKeySequence("Alt+Z"), self, activated=self._redo)
 
@@ -1153,6 +1155,24 @@ class EditWindow(QMainWindow):
     # ════════════════════════════════════════════════════════════
     #  消空白 / 補空白
     # ════════════════════════════════════════════════════════════
+
+    def _toggle_spaces(self) -> None:
+        """Alt+A：選取範圍含空白 → 消空白；否則 → 補空白。
+
+        與工具列「消空白／補空白」按鈕一致，僅在純編輯模式（非比對／WYSIWYG）作用。
+        """
+        if self._compare_active or self._preview_active:
+            self._set_status("⚠️ 請先回到編輯模式（Alt+1）", "#ffc107")
+            return
+        cursor = self._active_edit_widget().textCursor()
+        if not cursor.hasSelection():
+            self._set_status("⚠️ 請先選取要補／消空白的文字", "#ffc107")
+            return
+        selected = cursor.selectedText()
+        if ' ' in selected or '　' in selected:
+            self._strip_spaces()
+        else:
+            self._pad_spaces()
 
     def _strip_spaces(self) -> None:
         target = self._active_edit_widget()

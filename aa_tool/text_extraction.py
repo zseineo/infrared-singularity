@@ -1546,8 +1546,9 @@ def get_chapter_display(text_first_lines: str) -> tuple[str, str] | None:
     return None
 
 
-# 已知站名 — 可出現在標題開頭（前綴）或末尾（後綴），兩者都會被去除。
-# 新增站名直接加入此列表即可。
+# 已知站名與標籤 — 新增直接加入此列表即可：
+#   - 一般站名：出現在標題開頭（前綴）或末尾（後綴）會被去除。
+#   - 【...】 形式的標籤（如【安価】【R-18】）：出現在標題任何位置都會被去除。
 _SITE_NAMES = [
     '安価でやるお！',
     'やる夫達のいる日常',
@@ -1561,25 +1562,34 @@ _SITE_NAMES = [
     'やる夫短編集モララーのビデオ棚　(,,`д`)＜とっても！地獄編 ',
     'やる夫スレ本棚別館 | ',
     '俺得やる夫やらまとめ',
-    ' | やる夫広場',
+    '| やる夫広場',
     '【あんこ】',
-    '【R-18】'
-
+    '【R-18】',
+    '【安価】',
 ]
 
+# 【...】 形式的標籤在標題任何位置都會被去除；其餘為站名，僅去前綴／後綴。
+_TITLE_TAGS = [s for s in _SITE_NAMES if s.startswith('【') and s.endswith('】')]
+_SITE_ONLY = [s for s in _SITE_NAMES if s not in _TITLE_TAGS]
+
 _SITE_PREFIX_RE = re.compile(
-    r'^(?:' + '|'.join(re.escape(s) for s in _SITE_NAMES) + r')[\s　]*'
+    r'^(?:' + '|'.join(re.escape(s) for s in _SITE_ONLY) + r')[\s　]*'
 )
 _SITE_SUFFIX_RE = re.compile(
-    r'[\s　]+(?:' + '|'.join(re.escape(s) for s in _SITE_NAMES) + r')$'
+    r'[\s　]+(?:' + '|'.join(re.escape(s) for s in _SITE_ONLY) + r')$'
 )
 # dash 系尾綴：「 - 站名」「 — 站名」等形式
 _SITE_DASH_SUFFIX_RE = re.compile(r'[\s　]+[-—–][\s　]+.+$')
+# 標籤：標題任何位置出現都去除
+_TITLE_TAG_RE = re.compile(
+    '(?:' + '|'.join(re.escape(s) for s in _TITLE_TAGS) + ')'
+)
 
 
 def extract_work_title(title: str) -> str:
-    """從頁面標題中去除已知站名（前綴／後綴）與 dash 尾綴，回傳作品名稱部分。"""
+    """從頁面標題中去除已知站名（前綴／後綴）、dash 尾綴與已知【...】標籤（任何位置），回傳作品名稱部分。"""
     t = _SITE_DASH_SUFFIX_RE.sub('', title)
     t = _SITE_PREFIX_RE.sub('', t)
     t = _SITE_SUFFIX_RE.sub('', t)
+    t = _TITLE_TAG_RE.sub('', t)
     return t.strip(' 　\t')

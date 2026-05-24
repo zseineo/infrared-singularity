@@ -13,8 +13,9 @@ def merge_glossary_diff(existing: str, current: str) -> str:
     """以等號左側為 key 合併兩段術語表文字。
 
     - 檔案中已有的 key：若 current 也有 → 用 current 的整行覆蓋；否則保留檔上行。
-    - current 中的新 key（不在 existing 內）：依出現順序 append 到末端。
-    - 空行 / 不含等號的行：原樣保留（依「先 existing 後 current 新增」順序）。
+    - current 中的新 key（不在 existing 內）：依出現順序 prepend 到**最上面**
+      （新加入的用語顯示在頂端，配合 `_save_glossary_entry` 的置頂行為）。
+    - 空行 / 不含等號的行：原樣保留（existing 在前，current 新增的接在末端）。
 
     Key 比對與 `parse_glossary()` / `_check_glossary_duplicates()` 一致：
     走 `decode_glossary_term`（無引號 → strip；`"..."` → 保留外圍空白）。
@@ -43,29 +44,27 @@ def merge_glossary_diff(existing: str, current: str) -> str:
         else:
             cur_extra_lines.append(line)
 
-    out_lines: list[str] = []
-    used_keys: set[str] = set()
+    existing_keys: set[str] = set()
+    existing_out: list[str] = []
     seen_extra: set[str] = set()
     for key, line, has_eq in parse_lines(existing):
         if has_eq:
-            if key in cur_map:
-                out_lines.append(cur_map[key])
-                used_keys.add(key)
-            else:
-                out_lines.append(line)
+            existing_keys.add(key)
+            existing_out.append(cur_map[key] if key in cur_map else line)
         else:
-            out_lines.append(line)
+            existing_out.append(line)
             seen_extra.add(line)
 
-    for key in cur_keys_order:
-        if key not in used_keys:
-            out_lines.append(cur_map[key])
+    # current 中的新 key 置頂；existing 既有行維持原順序接在後面
+    new_keys_out = [cur_map[key] for key in cur_keys_order
+                    if key not in existing_keys]
+    extra_out: list[str] = []
     for line in cur_extra_lines:
         if line not in seen_extra:
-            out_lines.append(line)
+            extra_out.append(line)
             seen_extra.add(line)
 
-    return "\n".join(out_lines)
+    return "\n".join(new_keys_out + existing_out + extra_out)
 
 
 def merge_filter_diff(existing: str, current: str) -> str:

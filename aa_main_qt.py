@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.58"
+APP_VERSION = "1.59"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -1116,10 +1116,10 @@ class MainWindow(QMainWindow):
         """
         if not original or not translation:
             return
-        g_text = self._translate_panel.get_glossary_text().rstrip('\n')
-        if g_text:
-            g_text += '\n'
-        g_text += f"{encode_glossary_term(original)}={encode_glossary_term(translation)}"
+        existing = self._translate_panel.get_glossary_text().strip('\n')
+        entry = f"{encode_glossary_term(original)}={encode_glossary_term(translation)}"
+        # 新條目放到最上面（最下面為較舊條目）
+        g_text = f"{entry}\n{existing}" if existing else entry
         self._translate_panel.glossary_text.setPlainText(g_text)
         self.schedule_save()
         suffix = ""

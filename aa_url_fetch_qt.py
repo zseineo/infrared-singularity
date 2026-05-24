@@ -14,7 +14,7 @@
     main._handle_url_fetch_request(url, author_only, skip_cache)
     main.url_history / main.settings_mgr.clear_url_history()
     main._author_name / main._author_only / main.schedule_save()
-    main.show_translate_panel()   # 關閉面板（返回首頁）
+    main.return_from_url_fetch()  # 關閉面板（依進入來源返回首頁／自動翻譯）
 """
 from __future__ import annotations
 
@@ -168,7 +168,8 @@ class UrlFetchWindow(QWidget):
 
         esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        esc.activated.connect(self._main.show_translate_panel)
+        # 依進入來源返回（首頁／自動翻譯），與導覽列返回鈕一致
+        esc.activated.connect(self._main.return_from_url_fetch)
 
     # ──────────────────────────── 狀態同步（由主程式呼叫） ────────────────────────────
 
@@ -212,7 +213,8 @@ class UrlFetchWindow(QWidget):
             self._refresh_nav()
             self._refresh_history()
             if auto_close:
-                QTimer.singleShot(400, self._main.show_translate_panel)
+                # 依進入來源返回（首頁／自動翻譯），與導覽列返回鈕、ESC 一致
+                QTimer.singleShot(400, self._main.return_from_url_fetch)
 
     def on_history_cleared(self, url_history: list) -> None:
         self._url_history = url_history

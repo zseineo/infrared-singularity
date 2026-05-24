@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.63"
+APP_VERSION = "1.64"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -882,15 +882,28 @@ class MainWindow(QMainWindow):
         return w
 
     def _nav_back(self) -> None:
-        """導覽列「← 返回首頁」：從自動翻譯進入網址讀取時改返回自動翻譯，否則回首頁。"""
-        if (self.stack.currentIndex() == 3
-                and getattr(self, "_url_fetch_from_auto", False)):
+        """導覽列「← 返回首頁」：在網址讀取面板時依進入來源返回，否則回首頁。"""
+        if self.stack.currentIndex() == 3:
+            self.return_from_url_fetch()
+            return
+        self.show_translate_panel()
+
+    def return_from_url_fetch(self) -> None:
+        """離開網址讀取面板的統一出口：依進入來源回到自動翻譯或首頁。
+
+        導覽列返回鈕、ESC、抓取後自動關閉等所有返回路徑都走這裡，確保一致。
+        `_url_fetch_from_auto` 由 `_open_url_fetch_from_auto`（自動翻譯入口）設為 True、
+        `open_url_fetch_qt`（首頁入口）設為 False。
+        """
+        if self.stack.currentIndex() != 3:
+            return  # 已不在網址讀取面板（例如 auto_close 延遲觸發時已手動離開）→ 忽略
+        if getattr(self, "_url_fetch_from_auto", False):
             self._url_fetch_from_auto = False
             if self._url_fetch_win is not None:
                 self._url_fetch_win.sync_back_to_main()
             self.show_auto_translate_panel()  # refresh_from_main 會把 current_url 帶回起始網址
-            return
-        self.show_translate_panel()
+        else:
+            self.show_translate_panel()
 
     def _open_url_fetch_from_auto(self) -> None:
         """自動翻譯「網址記錄」鈕：進入網址讀取面板，並記住返回時要回自動翻譯。"""

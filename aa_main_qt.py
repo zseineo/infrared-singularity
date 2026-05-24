@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.60"
+APP_VERSION = "1.61"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -735,6 +735,7 @@ class MainWindow(QMainWindow):
         self._pad_space_count: int = 2
         self._save_timer: QTimer | None = None
         self._url_fetch_win = None  # UrlFetchWindow lazy-init（in-process）
+        self._url_fetch_from_auto = False  # 網址讀取是否由自動翻譯「網址記錄」鈕進入
         self._saved_glossary_lines = 0
         self._saved_glossary_temp_lines = 0
         self._saved_filter_lines = 0
@@ -848,8 +849,14 @@ class MainWindow(QMainWindow):
         btn_back = _make_btn("← 返回首頁", "#6c757d", "#5a6268",
                              font=_ui_font(12), width=110)
         btn_back.setFixedHeight(28)
-        btn_back.clicked.connect(self.show_translate_panel)
+        btn_back.clicked.connect(self._nav_back)
         hl.addWidget(btn_back)
+
+        # 標題（與「連線設定」鈕交換位置：標題在左、連線設定在右）
+        self._nav_label = QLabel("")
+        self._nav_label.setFont(_ui_font(12))
+        self._nav_label.setStyleSheet("color:white;")
+        hl.addWidget(self._nav_label)
 
         # 連線設定鈕：僅自動翻譯面板顯示，開合該面板的連線設定浮層。
         self._nav_conn_btn = _make_btn("⚙ 連線設定", "#6f42c1", "#5a32a3",
@@ -860,13 +867,35 @@ class MainWindow(QMainWindow):
         self._nav_conn_btn.hide()
         hl.addWidget(self._nav_conn_btn)
 
-        self._nav_label = QLabel("")
-        self._nav_label.setFont(_ui_font(12))
-        self._nav_label.setStyleSheet("color:white;")
-        hl.addWidget(self._nav_label)
+        # 網址記錄鈕：僅自動翻譯面板顯示，切到網址讀取面板挑/換網址，返回回到自動翻譯。
+        self._nav_history_btn = _make_btn("🌐 網址記錄", "#0d6efd", "#0b5ed7",
+                                          font=_ui_font(11), width=100)
+        self._nav_history_btn.setFixedHeight(28)
+        self._nav_history_btn.setToolTip(
+            "切到網址讀取面板挑選／切換網址；按返回會回到自動翻譯，"
+            "並把選定的網址帶回「起始網址」")
+        self._nav_history_btn.clicked.connect(self._open_url_fetch_from_auto)
+        self._nav_history_btn.hide()
+        hl.addWidget(self._nav_history_btn)
 
         hl.addStretch()
         return w
+
+    def _nav_back(self) -> None:
+        """導覽列「← 返回首頁」：從自動翻譯進入網址讀取時改返回自動翻譯，否則回首頁。"""
+        if (self.stack.currentIndex() == 3
+                and getattr(self, "_url_fetch_from_auto", False)):
+            self._url_fetch_from_auto = False
+            if self._url_fetch_win is not None:
+                self._url_fetch_win.sync_back_to_main()
+            self.show_auto_translate_panel()  # refresh_from_main 會把 current_url 帶回起始網址
+            return
+        self.show_translate_panel()
+
+    def _open_url_fetch_from_auto(self) -> None:
+        """自動翻譯「網址記錄」鈕：進入網址讀取面板，並記住返回時要回自動翻譯。"""
+        self.open_url_fetch_qt()
+        self._url_fetch_from_auto = True
 
     def _build_action_bar(self) -> QWidget:
         w = QWidget()
@@ -1081,6 +1110,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(2)
         self._nav_bar.show()
         self._nav_conn_btn.hide()
+        self._nav_history_btn.hide()
         self._action_bar.hide()
 
     def _on_batch_open_file(self, file_path: str, line: int, folder: str) -> None:
@@ -1582,6 +1612,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(4)
         self._nav_bar.show()
         self._nav_conn_btn.show()
+        self._nav_history_btn.show()
         self._action_bar.hide()
 
     def _toggle_auto_conn_panel(self) -> None:
@@ -1796,6 +1827,7 @@ class MainWindow(QMainWindow):
 
     def open_url_fetch_qt(self) -> None:
         from aa_url_fetch_qt import UrlFetchWindow
+        self._url_fetch_from_auto = False  # 預設來自首頁；自動翻譯入口會於呼叫後改 True
         if self._url_fetch_win is None:
             self._url_fetch_win = UrlFetchWindow(self)
             self.stack.removeWidget(self._url_fetch_placeholder)
@@ -1813,6 +1845,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(3)
         self._nav_bar.show()
         self._nav_conn_btn.hide()
+        self._nav_history_btn.hide()
         self._action_bar.hide()
 
     def _url_fetch_win_visible(self) -> bool:

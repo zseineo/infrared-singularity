@@ -34,6 +34,17 @@ _BACKEND_OPTIONS: list[tuple[str, str]] = [
     ("API", "api"),
 ]
 
+# 翻譯方式切換鈕樣式：選中（藍底）／未選中（灰底）
+_BACKEND_BTN_SEL = (
+    "QPushButton { background:#0d6efd; color:white; padding:6px 16px;"
+    " border:none; border-radius:4px; }"
+    "QPushButton:disabled { background:#6c757d; color:#ced4da; }")
+_BACKEND_BTN_UNSEL = (
+    "QPushButton { background:#e9ecef; color:#495057; padding:6px 16px;"
+    " border:1px solid #ced4da; border-radius:4px; }"
+    "QPushButton:hover { background:#dee2e6; }"
+    "QPushButton:disabled { background:#f1f3f5; color:#adb5bd; }")
+
 
 # (顯示文字, 內部值)；內部值需與 aa_tool.gemini_web.model_matches 一致。
 _MODEL_OPTIONS: list[tuple[str, str]] = [
@@ -164,12 +175,23 @@ class AutoTranslatePanel(QWidget):
         out_hl.addWidget(btn_browse)
         form.addRow("輸出資料夾：", out_row)
 
-        # 翻譯方式（瀏覽器／API）——常用切換，放主頁；其餘連線細節在浮層
-        self.backend_combo = QComboBox()
+        # 翻譯方式（瀏覽器／API）——兩顆切換鈕，被選中的以顏色提示；常用切換放主頁
+        self._backend = "browser"
+        self._backend_btns: dict[str, QPushButton] = {}
+        bk_row = QWidget()
+        bk_hl = QHBoxLayout(bk_row)
+        bk_hl.setContentsMargins(0, 0, 0, 0)
+        bk_hl.setSpacing(6)
         for label, value in _BACKEND_OPTIONS:
-            self.backend_combo.addItem(label, value)
-        self.backend_combo.currentIndexChanged.connect(self._on_backend_changed)
-        form.addRow("翻譯方式：", self.backend_combo)
+            b = QPushButton(label)
+            b.setMinimumWidth(84)
+            b.setFont(_font(11, bold=True))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(lambda _=False, v=value: self._set_backend(v))
+            self._backend_btns[value] = b
+            bk_hl.addWidget(b)
+        bk_hl.addStretch()
+        form.addRow("翻譯方式：", bk_row)
 
         # 動作按鈕列
         btn_row = QWidget()
@@ -350,9 +372,17 @@ class AutoTranslatePanel(QWidget):
                 and self._conn_panel.isVisible()):
             self._position_conn_panel()
 
-    def _on_backend_changed(self, _idx: int = 0) -> None:
+    def _set_backend(self, value: str) -> None:
+        """切換翻譯方式並重繪兩顆鈕（選中上色）；連動 API 欄位啟用狀態。"""
+        self._backend = value if value in ("browser", "api") else "browser"
+        for v, b in self._backend_btns.items():
+            b.setStyleSheet(_BACKEND_BTN_SEL if v == self._backend
+                            else _BACKEND_BTN_UNSEL)
+        self._on_backend_changed()
+
+    def _on_backend_changed(self) -> None:
         """API 模型／金鑰只在 API 模式啟用；翻譯 Prompt 兩模式都可編輯。"""
-        is_api = self.backend_combo.currentData() == "api"
+        is_api = self._backend == "api"
         for w in (self.api_model_combo, self.api_keys_edit):
             w.setEnabled(is_api)
         self.api_prompt_edit.setEnabled(True)
@@ -375,9 +405,7 @@ class AutoTranslatePanel(QWidget):
             getattr(m, "_gemini_max_per_session", 3) or 3))
         # 翻譯方式現於主頁，須在開啟面板時就反映已存後端（不必先開連線設定）
         backend = (getattr(m, "_translate_backend", "browser") or "browser")
-        bidx = next((i for i, (_, v) in enumerate(_BACKEND_OPTIONS)
-                     if v == backend), 0)
-        self.backend_combo.setCurrentIndex(bidx)
+        self._set_backend(backend)
         self.out_edit.setText(getattr(m, "_auto_translate_out_dir", "")
                               or getattr(m, "_last_dir", "") or "")
         # 作品名稱：與首頁同步——優先用首頁 doc_title，沒有就空
@@ -452,7 +480,7 @@ class AutoTranslatePanel(QWidget):
         url = self.url_edit.text().strip()
         gem = self.gem_edit.text().strip()
         out_dir = self.out_edit.text().strip()
-        backend = self.backend_combo.currentData()
+        backend = self._backend
         if not url:
             self._main.show_status("⚠️ 請填入起始網址", "#f39c12")
             return None
@@ -563,7 +591,8 @@ class AutoTranslatePanel(QWidget):
         # 執行中鎖住設定欄位，避免使用者中途改值造成混亂
         for w in (self.url_edit, self.count_spin, self.until_last,
                   self.gem_edit, self.model_combo, self.max_session_spin,
-                  self.doc_title_edit, self.out_edit, self.backend_combo):
+                  self.doc_title_edit, self.out_edit,
+                  *self._backend_btns.values()):
             w.setEnabled(not running)
         # until_last 勾選時保持 count 灰
         if not running:

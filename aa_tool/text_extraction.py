@@ -112,6 +112,11 @@ _DICE_NOTATION_FW_RE = re.compile(r'(【\d+D\d+)：(\d+】)')
 # 避免「へーー三」這類「1 個真平假名 + 多個長音符號」被誤判為平假名 run。
 _HIRAGANA_RUN_RE = re.compile(
     r'[ぁ-゜ゟ][ぁ-゜ゟー～〜]*[ぁ-゜ゟ]')
+# ≥5 連續「真平假名」run — 強對話信號。AA 圖幾乎湊不出 5 個連續真平假名；
+# 用於 strong_jp，讓被 AA 裝飾夾住、局部密度高的對話（如「三　なるほどなー　三」
+# 密度 1.0）豁免密度懲罰。同字重複（如「あああああ」）雖也命中，但由
+# `_REPEAT_HIRA_RE` -3 另行擋下（該懲罰不受 strong_jp 豁免）。
+_LONG_HIRA_RUN_RE = re.compile(r'[ぁ-ゖ]{5,}')
 # 連續 ≥3 片假名 anchor（片假名常出現於 AA 圖作為視覺元素，2 char run 如
 # `トミ`、`ニヽ`、`トー` 在 AA 中假陽性多；真實日文片假名詞幾乎都 ≥3 char：
 # `コスト`、`ヒーロー`、`コンピューター`、`チョロ`、`カット`）。需要 2-char
@@ -149,6 +154,18 @@ _DIALOGUE_RIGHT_MARKERS = set('＞>│|｜┃')
 # 讓名牌後的對話不因破折號 `───` 被計入局部 AA 密度而誤殺。
 _NAME_TAG_PREFIX_RE = re.compile(
     r'【[^【】]{1,16}】[\s　─━―ー\-‐—–−〜~]*$')
+
+# 提取結果開頭的「【說話者】」名牌前綴：名牌為不含句末標點／冒號的短字串
+# （≤8 char），且 】 後仍有對話內容。用於從提取結果剝除說話者名牌
+# （「【カズマ】おのれ…」→「おのれ…」）。排除內容型【…】 —— 含 ！？。：…、 者
+# （如「【流石に酷過ぎない？】：…」）不算名牌、不剝除。
+_SPEAKER_TAG_PREFIX_RE = re.compile(r'^【[^【】！？。：…、，]{1,8}】(?=.)')
+
+
+def _strip_speaker_tag(text: str) -> str:
+    """剝除開頭的「【說話者】」名牌前綴（後仍有內容時）。見 `_SPEAKER_TAG_PREFIX_RE`。"""
+    m = _SPEAKER_TAG_PREFIX_RE.match(text)
+    return text[m.end():] if m else text
 
 # 半形片假名 — AA 圖最大宗的噪聲來源
 _HALFWIDTH_KANA_CHARS = set(chr(c) for c in range(0xFF66, 0xFFA0))
@@ -540,7 +557,8 @@ def _score_candidate(text: str, line: str, start: int, end: int,
                  or has_num_option
                  or is_right_edge
                  or is_box_bounded
-                 or has_name_tag)
+                 or has_name_tag
+                 or bool(_LONG_HIRA_RUN_RE.search(text)))
     # 注意：分母改為「非空白字元數」後（見 `_local_aa_density`），閾值
     # 從原本 0.6 降到 0.4，否則 AA padding 大量空白會把比例壓低逃避懲罰。
     density = _local_aa_density(line, start, end, symbol_regex, 8)
@@ -1019,6 +1037,7 @@ def extract_text(
                             and stripped == author_tripcode):
                         continue
                 text = _complete_brackets(text, line, hint_pos=cand_s)
+                text = _strip_speaker_tag(text)
                 if any(reg.search(text) for reg in custom_regexes):
                     continue
                 if text:
@@ -1255,6 +1274,10 @@ def analyze_extraction(
                         f"（allow_short={bool(allow_short)}）。")
                     continue
                 text = _complete_brackets(text, line, hint_pos=cand_s)
+                pre_strip = text
+                text = _strip_speaker_tag(text)
+                if text != pre_strip:
+                    report.append(f"    [剝除說話者名牌] '{pre_strip}' => '{text}'")
                 hit = next(
                     (reg.pattern for reg in custom_regexes if reg.search(text)),
                     None)

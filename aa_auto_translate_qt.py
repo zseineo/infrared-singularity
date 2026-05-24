@@ -20,8 +20,8 @@ import threading
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
+    QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
+    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
     QSplitter, QVBoxLayout, QWidget,
 )
 
@@ -277,6 +277,13 @@ class AutoTranslatePanel(QWidget):
             "目的：避免單一對話累積太多上下文使翻譯品質下降。")
         form.addRow("每 N 次送出後換新對話：", self.max_session_spin)
 
+        # 分隔線：上方為通用／瀏覽器設定，下方為 API 專屬設定
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        sep.setStyleSheet("color:#adb5bd;")
+        form.addRow(sep)
+
         self.api_model_combo = QComboBox()
         self.api_model_combo.addItems(API_MODELS)
         form.addRow("API 模型：", self.api_model_combo)
@@ -285,14 +292,12 @@ class AutoTranslatePanel(QWidget):
         self.api_keys_edit.setPlaceholderText(
             "每行一把 Google API 金鑰；多把會輪流送出請求")
         self.api_keys_edit.setFixedHeight(90)
-        form.addRow("API 金鑰：", self.api_keys_edit)
-
-        enc_note = QLabel(
-            "🔒 金鑰以 Windows DPAPI 加密存於 aa_api_keys.dat" if secure_store.is_real_encryption()
+        # 金鑰加密與儲存說明改放此欄位的浮動提示（滑過顯示）
+        self.api_keys_edit.setToolTip(
+            "🔒 金鑰以 Windows DPAPI 加密存於 aa_api_keys.dat（綁定本機帳號、"
+            "已列入 .gitignore，不會上傳）" if secure_store.is_real_encryption()
             else "⚠️ 非 Windows：金鑰僅 base64 混淆儲存，安全性較低")
-        enc_note.setWordWrap(True)
-        enc_note.setStyleSheet("color:#6c757d; font-size:11px;")
-        form.addRow("", enc_note)
+        form.addRow("API 金鑰：", self.api_keys_edit)
 
         self.api_prompt_edit = QPlainTextEdit()
         self.api_prompt_edit.setPlaceholderText(

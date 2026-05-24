@@ -175,7 +175,7 @@
     *   **富文本上色 (`apply_color()`)**: 以 `<span style="color:...">` 包覆選取文字。若選取範圍已含上色標籤，則進入「去色模式」移除所有 span。支援點擊色塊切換顏色 (`choose_color()`)。
     *   **消空白 (`strip_spaces()`)**: 刪除選取文字內所有半形/全形空白。
     *   **補空白 (`_pad_spaces()`)**: 在選取文字的每個字元之間插入 N 個全形空白；N 由按鈕右側的 `QComboBox`（選項 1/2/3，預設 2）決定。設定值持久化到 `aa_settings_cache.json` 的 `pad_space_count` 欄位，透過 `MainWindow._pad_space_count` 與 `EditWindow.init_pad_count` / `on_pad_count_change` callback 串接。
-    *   **補／消空白切換 (`Alt+A`, `_toggle_spaces()`)**: 單一快捷鍵自動判斷方向 —— 選取範圍含半形 ` ` 或全形 `　` 空白 → 呼叫 `_strip_spaces()`（消空白）；否則 → `_pad_spaces()`（補空白）。與工具列「消空白／補空白」按鈕同屬 `_edit_buttons`，僅在純編輯模式作用；比對（Alt+2）／WYSIWYG（Alt+3）模式下會提示「請先回到編輯模式（Alt+1）」。
+    *   **補／消空白切換 (`Alt+A`, `_toggle_spaces()`)**: 單一快捷鍵自動判斷方向 —— 選取範圍含半形 ` ` 或全形 `　` 空白 → 呼叫 `_strip_spaces()`（消空白）；否則 → `_pad_spaces()`（補空白）。**編輯模式（Alt+1）與 WYSIWYG（Alt+3）皆可用**，比對模式（Alt+2）會提示先離開。WYSIWYG 下因 `_strip_spaces`／`_pad_spaces` 以 plain text `insertText` 取代選區會洗掉上色，故先以 `_selection_has_color(cursor)`（沿用 `_apply_color_wysiwyg` 的 fragment 走訪，非黑 `#000000` 前景色 fragment 即視為上色標籤）判定，含上色標籤即拒絕並提示「請避開上色文字」；通過後執行，並補呼叫 `_apply_line_height()` 維持固定行高（比照其他 WYSIWYG 編輯路徑）。工具列「消空白／補空白」按鈕本身仍屬 `_edit_buttons`，在比對／WYSIWYG 模式 disabled，Alt+A 是 WYSIWYG 下使用此功能的唯一入口。
     *   **自動對話框 (`adjust_bubble()`)**: 選取行後進行智慧邊框對齊，支援四種對話框格式：
         1. **普通對話框** (`´￣￣￣｀ヽ` / `乂＿＿＿ノ`)：動態計算上下框長度，對齊右側角落符號。
         2. **吶喊框** (`､__人_人_...` / `⌒Y⌒Y...⌒Ｙ`)：識別 `）...（` 等內容分隔符，重建上下框與內容至統一目標寬度。

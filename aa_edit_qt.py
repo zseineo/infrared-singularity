@@ -1159,20 +1159,54 @@ class EditWindow(QMainWindow):
     def _toggle_spaces(self) -> None:
         """Alt+A：選取範圍含空白 → 消空白；否則 → 補空白。
 
-        與工具列「消空白／補空白」按鈕一致，僅在純編輯模式（非比對／WYSIWYG）作用。
+        編輯模式（Alt+1）與 WYSIWYG（Alt+3）皆可用；比對模式（Alt+2）不可用。
+        WYSIWYG 下以 plain text 取代會洗掉上色，故選取範圍若含上色標籤即拒絕執行。
         """
-        if self._compare_active or self._preview_active:
-            self._set_status("⚠️ 請先回到編輯模式（Alt+1）", "#ffc107")
+        if self._compare_active:
+            self._set_status("⚠️ 請先離開比對模式（Alt+1／Alt+3）", "#ffc107")
             return
         cursor = self._active_edit_widget().textCursor()
         if not cursor.hasSelection():
             self._set_status("⚠️ 請先選取要補／消空白的文字", "#ffc107")
+            return
+        if self._preview_active and self._selection_has_color(cursor):
+            self._set_status(
+                "⚠️ 選取範圍含上色標籤，無法補／消空白（請避開上色文字）", "#ffc107")
             return
         selected = cursor.selectedText()
         if ' ' in selected or '　' in selected:
             self._strip_spaces()
         else:
             self._pad_spaces()
+        if self._preview_active:
+            self._apply_line_height()  # WYSIWYG 下 insertText 後補回固定行高
+
+    def _selection_has_color(self, cursor: QTextCursor) -> bool:
+        """WYSIWYG：選取範圍是否含「上色標籤」（非黑 `#000000` 前景色的 fragment）。
+
+        判定法與 `_apply_color_wysiwyg` 一致（黑色視為未上色）。
+        """
+        doc = self.preview_view.document()
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        block = doc.findBlock(start)
+        while block.isValid() and block.position() < end:
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid():
+                    f_start = frag.position()
+                    f_end = f_start + frag.length()
+                    if f_end > start and f_start < end:
+                        fmt = frag.charFormat()
+                        if fmt.hasProperty(
+                                QTextFormat.Property.ForegroundBrush):
+                            if fmt.foreground().color().name().lower() \
+                                    != '#000000':
+                                return True
+                it += 1
+            block = block.next()
+        return False
 
     def _strip_spaces(self) -> None:
         target = self._active_edit_widget()

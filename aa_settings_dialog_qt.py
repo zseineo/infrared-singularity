@@ -343,17 +343,17 @@ class SettingsDialog(QWidget):
 
         root.addStretch()
 
-        # ── 底部按鈕 ──
+        # ── 底部按鈕（確定在左、取消在右）──
         btm = QHBoxLayout()
         btm.addStretch()
-        btn_cancel = _make_btn("取消", "#6c757d", "#5a6268",
-                               font=_ui_font(11), width=80)
-        btn_cancel.clicked.connect(self._handle_close)
-        btm.addWidget(btn_cancel)
         btn_ok = _make_btn("確定", "#28a745", "#218838",
                            font=_ui_font(11, bold=True), width=80)
         btn_ok.clicked.connect(self._on_ok)
         btm.addWidget(btn_ok)
+        btn_cancel = _make_btn("取消", "#6c757d", "#5a6268",
+                               font=_ui_font(11), width=80)
+        btn_cancel.clicked.connect(self._handle_close)
+        btm.addWidget(btn_cancel)
         root.addLayout(btm)
 
     def _refresh_cache_size(self) -> None:

@@ -278,8 +278,8 @@ class AutoTranslatePanel(QWidget):
 
         self.use_gem_cb = QCheckBox("瀏覽器模式使用不發送 Prompt (使用Gem)")
         self.use_gem_cb.setToolTip(
-            "勾選：瀏覽器模式靠 Gem 內建人設翻譯，不送出下方 Prompt。\n"
-            "取消勾選：瀏覽器模式也會送 Prompt（適合不用 Gem 的使用者）。\n"
+            "勾選：瀏覽器模式靠 Gem 內建 Prompt ，不送出下方 Prompt。\n"
+            "取消勾選：瀏覽器模式也會送 Prompt。\n"
             "API 模式一律會送 Prompt，不受此選項影響。")
         form.addRow("", self.use_gem_cb)
 
@@ -351,6 +351,9 @@ class AutoTranslatePanel(QWidget):
         self._position_conn_panel()
         self._conn_panel.show()
         self._conn_panel.raise_()
+        # 把焦點移進浮層，讓 ESC（WidgetWithChildren context）一打開就能關閉
+        # （「⚙ 連線設定」鈕位於主視窗導覽列、在本面板子樹之外）。
+        self.gem_edit.setFocus()
 
     def _position_conn_panel(self) -> None:
         """把浮層放在面板左上角；寬度固定上限、高度依內容收緊（不留底部空白）。"""
@@ -455,7 +458,7 @@ class AutoTranslatePanel(QWidget):
         keys = [l.strip() for l in
                 self.api_keys_edit.toPlainText().splitlines() if l.strip()]
         params = {
-            "backend": self.backend_combo.currentData(),
+            "backend": self._backend,
             "browser_use_gem": self.use_gem_cb.isChecked(),
             "api_model": self.api_model_combo.currentText(),
             "api_system_prompt": self.api_prompt_edit.toPlainText(),

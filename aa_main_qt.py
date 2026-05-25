@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.71"
+APP_VERSION = "1.72"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -2326,6 +2326,8 @@ class MainWindow(QMainWindow):
         self._position_settings_panel()
         self._settings_panel.show()
         self._settings_panel.raise_()
+        # 把焦點移進浮層，讓 ESC 一打開就能關閉（⚙ 鈕在浮層子樹之外）
+        self._settings_panel.setFocus()
 
     def _build_settings_content(self) -> None:
         """（重）建設定浮層內容；以目前狀態填入各欄位。"""
@@ -2338,6 +2340,8 @@ class MainWindow(QMainWindow):
                 "#settingsPanel { background:#f1f3f5; border:1px solid #adb5bd;"
                 " border-radius:6px; }")
             panel.hide()
+            # 可接收焦點，配合下方 ESC 快捷鍵：開啟時 setFocus 進浮層即可按 ESC 關閉
+            panel.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             outer = QVBoxLayout(panel)
             outer.setContentsMargins(0, 0, 0, 0)
             outer.setSpacing(0)
@@ -2346,6 +2350,10 @@ class MainWindow(QMainWindow):
             scroll.setStyleSheet(
                 "QScrollArea { border:none; background:transparent; }")
             outer.addWidget(scroll, 1)
+            # ESC 關閉浮層（WidgetWithChildren：浮層或其子欄位有焦點時皆可觸發）
+            esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), panel)
+            esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            esc.activated.connect(panel.hide)
             self._settings_panel = panel
             self._settings_scroll = scroll
         content = SettingsDialog(

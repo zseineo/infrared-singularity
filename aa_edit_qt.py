@@ -180,6 +180,14 @@ class CustomTextEdit(QTextEdit):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._script_sel_range: tuple[int, int] | None = None  # (start, end_exclusive)
+        # 「複製即填入全文替換原文」用：複製動作（Ctrl+C／右鍵選單）完成後呼叫；
+        # 由 owner 設定，None＝停用（如唯讀的原文比對檢視 orig_view 不設）。
+        self.copied_callback = None
+
+    def _fire_copied_callback(self) -> None:
+        """複製動作（Ctrl+C 或右鍵選單「複製」）完成後呼叫，交由 owner 處理。"""
+        if self.copied_callback is not None:
+            self.copied_callback()
 
     def mouseDoubleClickEvent(self, ev) -> None:
         click_pos = self.cursorForPosition(ev.pos()).position()
@@ -215,6 +223,16 @@ class CustomTextEdit(QTextEdit):
         self._script_sel_range = (start, end)
 
     def keyPressEvent(self, ev) -> None:
+        # Ctrl+C → 先讓 Qt 完成實際複製，再觸發 copied_callback。
+        # （QTextEdit.copy() 非虛擬，C++ 內部複製不會呼叫 Python override，
+        #  故改在 keyPressEvent 攔截以涵蓋鍵盤複製路徑。）
+        if (ev.key() == Qt.Key.Key_C
+                and ev.modifiers() == Qt.KeyboardModifier.ControlModifier):
+            had_sel = self.textCursor().hasSelection()
+            super().keyPressEvent(ev)
+            if had_sel:
+                self._fire_copied_callback()
+            return
         # Tab → 4 個半形空白（取代預設插入 tab 字元的行為）
         if (ev.key() == Qt.Key.Key_Tab
                 and ev.modifiers() == Qt.KeyboardModifier.NoModifier
@@ -222,6 +240,19 @@ class CustomTextEdit(QTextEdit):
             self.insertPlainText('    ')
             return
         super().keyPressEvent(ev)
+
+    def contextMenuEvent(self, ev) -> None:
+        # 右鍵選單「複製」也是觸發路徑：在標準選單的複製 action 上掛接
+        # copied_callback（以 StandardKey.Copy 快捷鍵比對，與語系無關）。
+        menu = self.createStandardContextMenu()
+        if self.copied_callback is not None:
+            copy_seq = QKeySequence(QKeySequence.StandardKey.Copy)
+            for act in menu.actions():
+                if act.shortcut() == copy_seq:
+                    act.triggered.connect(
+                        lambda checked=False: self._fire_copied_callback())
+        menu.exec(ev.globalPos())
+        menu.deleteLater()
 
 
 class EditWindow(QMainWindow):
@@ -274,6 +305,7 @@ class EditWindow(QMainWindow):
         glossary_kana_fold_provider=None,  # () -> bool；對應主程式「套用術語表時平假名／片假名互通」設定
         url_for_text_provider=None,  # (text: str) -> str | None；以指紋查 url_history 取得對應網址
         reload_original_for_file=None,  # (file_path: str) -> str | None；依指紋查原文暫存
+        copy_to_replace_provider=None,  # () -> bool；對應主程式「編輯器複製即填入全文替換原文」設定
     ) -> None:
         super().__init__()
         self._html_file = html_file
@@ -327,6 +359,7 @@ class EditWindow(QMainWindow):
         self._glossary_kana_fold_provider = glossary_kana_fold_provider
         self._url_for_text_provider = url_for_text_provider
         self._reload_original_for_file = reload_original_for_file
+        self._copy_to_replace_provider = copy_to_replace_provider
 
         # Alt+4 局部重套用：保留 provider 取得的「完整」提取結果與翻譯文字，
         # 而 side_extracted / side_ai 只顯示當前編輯器可視範圍對應的行。
@@ -435,6 +468,11 @@ class EditWindow(QMainWindow):
         self.preview_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.preview_view.setFont(aa_font)
         self.preview_view.textChanged.connect(self._on_preview_changed)
+
+        # 「編輯器複製即填入全文替換原文」：編輯模式（editor）與 WYSIWYG 模式
+        # （preview_view）兩條複製路徑都掛接；原文比對檢視 orig_view 不掛。
+        self.editor.copied_callback = self._on_editor_copy
+        self.preview_view.copied_callback = self._on_editor_copy
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self.editor)        # index 0
@@ -1008,6 +1046,23 @@ class EditWindow(QMainWindow):
     # ════════════════════════════════════════════════════════════
     #  全文替換
     # ════════════════════════════════════════════════════════════
+
+    def _on_editor_copy(self) -> None:
+        """編輯器（編輯模式或 WYSIWYG）複製後的處理：若啟用「複製即填入全文替換
+        原文」，把剛複製到剪貼簿的內容填入全文替換的原文框（覆蓋既有內容）。"""
+        if self._copy_to_replace_provider is None:
+            return
+        try:
+            enabled = bool(self._copy_to_replace_provider())
+        except Exception:
+            enabled = False
+        if not enabled:
+            return
+        text = QApplication.clipboard().text()
+        if not text:
+            return
+        # QLineEdit.setText 會清空既有內容再填入，符合「框內已有內容則清空覆蓋」。
+        self.quick_orig.setText(text)
 
     def _replace_all(self) -> None:
         # 與術語表同樣支援 backtick 包覆來保留外圍空白：

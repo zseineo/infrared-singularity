@@ -316,17 +316,16 @@ class AutoTranslatePanel(QWidget):
         self.api_keys_edit.setFixedHeight(90)
         # 金鑰加密與儲存說明改放此欄位的浮動提示（滑過顯示）
         self.api_keys_edit.setToolTip(
-            "🔒 金鑰以 Windows DPAPI 加密存於 aa_api_keys.dat（綁定本機帳號、"
-            "已列入 .gitignore，不會上傳）" if secure_store.is_real_encryption()
+            "🔒 金鑰以 Windows DPAPI 加密存於 aa_api_keys.dat" if secure_store.is_real_encryption()
             else "⚠️ 非 Windows：金鑰僅 base64 混淆儲存，安全性較低")
         form.addRow("API 金鑰：", self.api_keys_edit)
 
         self.api_prompt_edit = QPlainTextEdit()
         self.api_prompt_edit.setPlaceholderText(
-            "翻譯 prompt／人設（兩種模式都會用到）：\n"
+            "翻譯 prompt（兩種模式都會用到）：\n"
             "・API 模式 → 當作系統指令送出\n"
             "・瀏覽器模式 → 附加在每個新對話的第一則訊息開頭\n"
-            "若瀏覽器模式已用內建人設的 Gem，可留空。")
+            "若瀏覽器模式已用內建prompt的 Gem，可留空。")
         self.api_prompt_edit.setFixedHeight(140)
         form.addRow("翻譯 Prompt：", self.api_prompt_edit)
 

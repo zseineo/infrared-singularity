@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.69"
+APP_VERSION = "1.70"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -727,6 +727,7 @@ class MainWindow(QMainWindow):
         self._embed_font_in_html: bool = False
         self._embed_font_name: str = "monapo"
         self._editor_default_wysiwyg: bool = False
+        self._editor_copy_to_replace: bool = False
         # 編輯器右側「局部重套用」面板（Alt+4）的持久化狀態
         self._side_panel_width: int = 0
         self._glossary_panel_width: int = 0
@@ -1030,6 +1031,7 @@ class MainWindow(QMainWindow):
                 glossary_kana_fold_provider=lambda: self._glossary_kana_fold,
                 url_for_text_provider=self._find_url_for_text,
                 reload_original_for_file=self.load_original_with_url_fallback,
+                copy_to_replace_provider=lambda: self._editor_copy_to_replace,
             )
             # 替換 placeholder
             self.stack.removeWidget(self._edit_placeholder)
@@ -2166,6 +2168,7 @@ class MainWindow(QMainWindow):
             embed_font_in_html=self._embed_font_in_html,
             embed_font_name=self._embed_font_name,
             editor_default_wysiwyg=self._editor_default_wysiwyg,
+            editor_copy_to_replace=self._editor_copy_to_replace,
             side_panel_width=self._side_panel_width,
             side_auto_scroll=self._side_auto_scroll,
             glossary_panel_width=self._glossary_panel_width,
@@ -2239,6 +2242,7 @@ class MainWindow(QMainWindow):
         self._embed_font_in_html = bool(cache.embed_font_in_html)
         self._embed_font_name = str(cache.embed_font_name or "monapo")
         self._editor_default_wysiwyg = bool(cache.editor_default_wysiwyg)
+        self._editor_copy_to_replace = bool(cache.editor_copy_to_replace)
         try:
             self._side_panel_width = int(cache.side_panel_width or 0)
         except (TypeError, ValueError):
@@ -2304,6 +2308,7 @@ class MainWindow(QMainWindow):
             embed_font_in_html=self._embed_font_in_html,
             embed_font_name=self._embed_font_name,
             editor_default_wysiwyg=self._editor_default_wysiwyg,
+            editor_copy_to_replace=self._editor_copy_to_replace,
             korean_mode=self._korean_mode,
             experimental_extraction=self._experimental_extraction,
             pad_right_aa=self._pad_right_aa,
@@ -2337,6 +2342,8 @@ class MainWindow(QMainWindow):
             'embed_font_name', self._embed_font_name) or "monapo")
         self._editor_default_wysiwyg = bool(values.get(
             'editor_default_wysiwyg', self._editor_default_wysiwyg))
+        self._editor_copy_to_replace = bool(values.get(
+            'editor_copy_to_replace', self._editor_copy_to_replace))
         self._korean_mode = bool(values.get(
             'korean_mode', self._korean_mode))
         self._experimental_extraction = bool(values.get(

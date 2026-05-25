@@ -59,6 +59,7 @@ class SettingsDialog(QDialog):
         embed_font_in_html: bool,
         embed_font_name: str,
         editor_default_wysiwyg: bool,
+        editor_copy_to_replace: bool,
         korean_mode: bool,
         experimental_extraction: bool,
         pad_right_aa: bool,
@@ -81,7 +82,8 @@ class SettingsDialog(QDialog):
         self._build_ui(auto_copy, work_history_limit, fetch_history_limit,
                        fetch_history_count, original_cache_limit,
                        glossary_auto_search, diff_save_mode, embed_font_in_html,
-                       embed_font_name, editor_default_wysiwyg, korean_mode,
+                       embed_font_name, editor_default_wysiwyg,
+                       editor_copy_to_replace, korean_mode,
                        experimental_extraction, pad_right_aa,
                        glossary_avoid_aa, glossary_kana_fold,
                        glossary_auto_persist,
@@ -92,6 +94,7 @@ class SettingsDialog(QDialog):
                   fh_count: int, oc_limit: int, glossary_auto_search: bool,
                   diff_save_mode: bool, embed_font_in_html: bool,
                   embed_font_name: str, editor_default_wysiwyg: bool,
+                  editor_copy_to_replace: bool,
                   korean_mode: bool, experimental_extraction: bool,
                   pad_right_aa: bool, glossary_avoid_aa: bool,
                   glossary_kana_fold: bool,
@@ -221,6 +224,16 @@ class SettingsDialog(QDialog):
             "開啟後，每次切換到編輯面板（替換翻譯、開啟 HTML、批次開檔等）\n"
             "都會自動進入 Alt+3 所見即所得模式。")
         root.addWidget(self.editor_default_wysiwyg_cb)
+
+        self.editor_copy_to_replace_cb = QCheckBox(
+            "編輯器內複製時：自動填入「全文替換」原文框")
+        self.editor_copy_to_replace_cb.setFont(_ui_font(12))
+        self.editor_copy_to_replace_cb.setChecked(editor_copy_to_replace)
+        self.editor_copy_to_replace_cb.setToolTip(
+            "開啟後，在編輯器（編輯模式與「所見即所得」模式皆可）按複製（Ctrl+C\n"
+            "或右鍵選單「複製」）時，會把複製的內容自動填入工具列「全文替換」的\n"
+            "原文框；若原文框已有內容會先清空再填入。")
+        root.addWidget(self.editor_copy_to_replace_cb)
 
         font_row = QHBoxLayout()
         self.embed_font_in_html_cb = QCheckBox("另存新檔時內嵌字型：")
@@ -376,6 +389,8 @@ class SettingsDialog(QDialog):
             'embed_font_name': self.embed_font_combo.currentData() or "monapo",
             'editor_default_wysiwyg':
                 self.editor_default_wysiwyg_cb.isChecked(),
+            'editor_copy_to_replace':
+                self.editor_copy_to_replace_cb.isChecked(),
             'korean_mode': self.korean_mode_cb.isChecked(),
             'experimental_extraction':
                 self.experimental_extraction_cb.isChecked(),

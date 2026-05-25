@@ -7,7 +7,7 @@ from typing import Callable
 
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QHBoxLayout, QLabel, QMessageBox,
+    QCheckBox, QComboBox, QHBoxLayout, QLabel, QMessageBox,
     QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
@@ -42,8 +42,13 @@ def _format_size(n: int) -> str:
     return f"{n} B"
 
 
-class SettingsDialog(QDialog):
-    """全域設定視窗。點擊「確定」時呼叫 on_apply(values)。"""
+class SettingsDialog(QWidget):
+    """全域設定面板（嵌入式浮層）。
+
+    點擊「確定」時呼叫 on_apply(values) 後再呼叫 on_close()；「取消」只呼叫
+    on_close()。由主視窗以浮層方式 show/hide（見 MainWindow.toggle_settings_panel），
+    不再是獨立 modal 視窗。
+    """
 
     def __init__(
         self,
@@ -60,6 +65,7 @@ class SettingsDialog(QDialog):
         embed_font_name: str,
         editor_default_wysiwyg: bool,
         editor_copy_to_replace: bool,
+        glossary_sync_to_batch_quick: bool,
         korean_mode: bool,
         experimental_extraction: bool,
         pad_right_aa: bool,
@@ -71,19 +77,19 @@ class SettingsDialog(QDialog):
         orig_cache_path: str,
         on_apply: Callable[[dict], None],
         on_clear_url_history: Callable[[int], int],
+        on_close: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("設定")
-        self.setModal(True)
-        self.resize(460, 460)
         self._orig_cache_path = orig_cache_path
         self._on_apply = on_apply
         self._on_clear_url_history = on_clear_url_history
+        self._on_close = on_close
         self._build_ui(auto_copy, work_history_limit, fetch_history_limit,
                        fetch_history_count, original_cache_limit,
                        glossary_auto_search, diff_save_mode, embed_font_in_html,
                        embed_font_name, editor_default_wysiwyg,
-                       editor_copy_to_replace, korean_mode,
+                       editor_copy_to_replace,
+                       glossary_sync_to_batch_quick, korean_mode,
                        experimental_extraction, pad_right_aa,
                        glossary_avoid_aa, glossary_kana_fold,
                        glossary_auto_persist,
@@ -95,6 +101,7 @@ class SettingsDialog(QDialog):
                   diff_save_mode: bool, embed_font_in_html: bool,
                   embed_font_name: str, editor_default_wysiwyg: bool,
                   editor_copy_to_replace: bool,
+                  glossary_sync_to_batch_quick: bool,
                   korean_mode: bool, experimental_extraction: bool,
                   pad_right_aa: bool, glossary_avoid_aa: bool,
                   glossary_kana_fold: bool,
@@ -235,6 +242,17 @@ class SettingsDialog(QDialog):
             "原文框；若原文框已有內容會先清空再填入。")
         root.addWidget(self.editor_copy_to_replace_cb)
 
+        self.glossary_sync_to_batch_quick_cb = QCheckBox(
+            "編輯器全文替換存入術語時：同步加入批次搜尋「快速替換」")
+        self.glossary_sync_to_batch_quick_cb.setFont(_ui_font(12))
+        self.glossary_sync_to_batch_quick_cb.setChecked(
+            glossary_sync_to_batch_quick)
+        self.glossary_sync_to_batch_quick_cb.setToolTip(
+            "開啟後，在編輯器「全文替換」勾選「存入術語」執行替換時，該術語除了\n"
+            "存入主術語表，也會同步加入「批次搜尋」面板右上的「快速替換」清單最上面。\n"
+            "（批次搜尋面板尚未開啟時略過同步。）")
+        root.addWidget(self.glossary_sync_to_batch_quick_cb)
+
         font_row = QHBoxLayout()
         self.embed_font_in_html_cb = QCheckBox("另存新檔時內嵌字型：")
         self.embed_font_in_html_cb.setFont(_ui_font(12))
@@ -330,7 +348,7 @@ class SettingsDialog(QDialog):
         btm.addStretch()
         btn_cancel = _make_btn("取消", "#6c757d", "#5a6268",
                                font=_ui_font(11), width=80)
-        btn_cancel.clicked.connect(self.reject)
+        btn_cancel.clicked.connect(self._handle_close)
         btm.addWidget(btn_cancel)
         btn_ok = _make_btn("確定", "#28a745", "#218838",
                            font=_ui_font(11, bold=True), width=80)
@@ -391,6 +409,8 @@ class SettingsDialog(QDialog):
                 self.editor_default_wysiwyg_cb.isChecked(),
             'editor_copy_to_replace':
                 self.editor_copy_to_replace_cb.isChecked(),
+            'glossary_sync_to_batch_quick':
+                self.glossary_sync_to_batch_quick_cb.isChecked(),
             'korean_mode': self.korean_mode_cb.isChecked(),
             'experimental_extraction':
                 self.experimental_extraction_cb.isChecked(),
@@ -408,4 +428,9 @@ class SettingsDialog(QDialog):
         except Exception as e:
             QMessageBox.warning(self, "套用失敗", str(e))
             return
-        self.accept()
+        self._handle_close()
+
+    def _handle_close(self) -> None:
+        """收起設定浮層（「取消」與「確定」套用後都呼叫）。"""
+        if self._on_close is not None:
+            self._on_close()

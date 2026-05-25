@@ -128,6 +128,8 @@ class AppCache:
     editor_default_wysiwyg: bool = False
     # 編輯器內按複製（Ctrl+C／右鍵）時，是否自動把複製內容填入全文替換的原文框
     editor_copy_to_replace: bool = False
+    # 編輯器全文替換勾選「存入術語」時，是否同步加入批次搜尋的「快速替換」面板
+    glossary_sync_to_batch_quick: bool = False
     # 另存新檔時是否把字型 Base64 內嵌到 <head>（離線手機可正確顯示，
     # 代價是檔案會增大約 1MB+）；覆蓋舊檔（Ctrl+S、批次搜尋）時不寫入。
     embed_font_in_html: bool = False
@@ -348,6 +350,9 @@ class SettingsManager:
                 'editor_default_wysiwyg', cache.editor_default_wysiwyg))
             cache.editor_copy_to_replace = bool(data.get(
                 'editor_copy_to_replace', cache.editor_copy_to_replace))
+            cache.glossary_sync_to_batch_quick = bool(data.get(
+                'glossary_sync_to_batch_quick',
+                cache.glossary_sync_to_batch_quick))
             cache.embed_font_name = str(data.get(
                 'embed_font_name', cache.embed_font_name))
             try:
@@ -478,6 +483,8 @@ class SettingsManager:
                 'embed_font_in_html': cache.embed_font_in_html,
                 'editor_default_wysiwyg': cache.editor_default_wysiwyg,
                 'editor_copy_to_replace': cache.editor_copy_to_replace,
+                'glossary_sync_to_batch_quick':
+                    cache.glossary_sync_to_batch_quick,
                 'embed_font_name': cache.embed_font_name,
                 'side_panel_width': cache.side_panel_width,
                 'side_auto_scroll': cache.side_auto_scroll,

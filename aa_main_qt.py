@@ -29,7 +29,7 @@ from PyQt6.QtGui import QColor, QFont, QKeySequence, QPalette, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-    QSplitter, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
+    QScrollArea, QSplitter, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from aa_tool.constants import (
@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.70"
+APP_VERSION = "1.71"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -240,7 +240,7 @@ class TranslatePanel(QWidget):
         btn_settings = _make_btn("⚙", "#6c757d", "#5a6268",
                                  font=_ui_font(14), width=34)
         btn_settings.setToolTip("設定")
-        btn_settings.clicked.connect(self._main.open_settings_dialog)
+        btn_settings.clicked.connect(self._main.toggle_settings_panel)
         row.addWidget(btn_settings)
 
         row.addSpacing(12)
@@ -728,6 +728,7 @@ class MainWindow(QMainWindow):
         self._embed_font_name: str = "monapo"
         self._editor_default_wysiwyg: bool = False
         self._editor_copy_to_replace: bool = False
+        self._glossary_sync_to_batch_quick: bool = False
         # 編輯器右側「局部重套用」面板（Alt+4）的持久化狀態
         self._side_panel_width: int = 0
         self._glossary_panel_width: int = 0
@@ -786,6 +787,12 @@ class MainWindow(QMainWindow):
         self._auto_window: AutoTranslatePanel | None = None
         self._auto_placeholder = QWidget()
         self.stack.addWidget(self._auto_placeholder)  # index 4
+
+        # 設定浮層（lazy init；以子 widget 浮層方式疊在內容上，比照自動翻譯
+        # 的連線設定浮層，不再開獨立 modal 視窗）
+        self._settings_panel: QWidget | None = None
+        self._settings_scroll: QScrollArea | None = None
+        self._settings_content: 'SettingsDialog | None' = None
 
         # ── 底部動作列 ──
         self._action_bar = self._build_action_bar()
@@ -983,7 +990,8 @@ class MainWindow(QMainWindow):
                 display_title=display_title,
                 is_temp_file=is_temp_file,
                 glossary_provider=self._translate_panel.get_combined_glossary,
-                glossary_saver=self._save_glossary_entry,
+                glossary_saver=lambda o, t: self._save_glossary_entry(
+                    o, t, also_batch_quick=self._glossary_sync_to_batch_quick),
                 extract_regex_provider=lambda: (
                     self._active_base_regex(),
                     self.current_invalid_regex,
@@ -1153,11 +1161,16 @@ class MainWindow(QMainWindow):
     #  術語存入
     # ════════════════════════════════════════════════════════════
 
-    def _save_glossary_entry(self, original: str, translation: str) -> None:
+    def _save_glossary_entry(self, original: str, translation: str,
+                             *, also_batch_quick: bool = False) -> None:
         """由 EditWindow callback 呼叫，將術語存入一般術語表。
 
         若 original/translation 含外圍空白（例如 ` Trooper ` → `Trooper`），
         以 backtick 編碼寫入，下次解析時可被 `decode_glossary_term` 正確還原。
+
+        `also_batch_quick=True`（編輯器全文替換存入術語、且開啟對應設定時傳入）：
+        同步把該術語加入批次搜尋「快速替換」面板（批次面板未開啟則略過）。
+        批次搜尋雙擊「加入術語」走的是預設 False，不會反向同步回自己。
         """
         if not original or not translation:
             return
@@ -1174,6 +1187,9 @@ class MainWindow(QMainWindow):
                 suffix = "（已寫入設定檔）"
             except Exception as e:
                 suffix = f"（⚠️ 設定檔寫入失敗：{e}）"
+        if also_batch_quick and self._batch_window is not None:
+            self._batch_window.add_glossary_quick_entry(original, translation)
+            suffix += "（並加入批次快速替換）"
         self.show_status(
             f"📖 已存入術語：{original} → {translation}{suffix}", "#17a2b8")
 
@@ -2169,6 +2185,7 @@ class MainWindow(QMainWindow):
             embed_font_name=self._embed_font_name,
             editor_default_wysiwyg=self._editor_default_wysiwyg,
             editor_copy_to_replace=self._editor_copy_to_replace,
+            glossary_sync_to_batch_quick=self._glossary_sync_to_batch_quick,
             side_panel_width=self._side_panel_width,
             side_auto_scroll=self._side_auto_scroll,
             glossary_panel_width=self._glossary_panel_width,
@@ -2243,6 +2260,8 @@ class MainWindow(QMainWindow):
         self._embed_font_name = str(cache.embed_font_name or "monapo")
         self._editor_default_wysiwyg = bool(cache.editor_default_wysiwyg)
         self._editor_copy_to_replace = bool(cache.editor_copy_to_replace)
+        self._glossary_sync_to_batch_quick = bool(
+            cache.glossary_sync_to_batch_quick)
         try:
             self._side_panel_width = int(cache.side_panel_width or 0)
         except (TypeError, ValueError):
@@ -2294,9 +2313,42 @@ class MainWindow(QMainWindow):
         self._apply_cache(cache)
         self._apply_doc_num_state()
 
-    def open_settings_dialog(self) -> None:
+    def toggle_settings_panel(self) -> None:
+        """⚙ 設定鈕：開合設定浮層（比照自動翻譯的連線設定浮層）。
+
+        每次開啟都以目前狀態重建內容，避免顯示過時數值；關閉只是 hide。
+        """
+        if (self._settings_panel is not None
+                and self._settings_panel.isVisible()):
+            self._settings_panel.hide()
+            return
+        self._build_settings_content()
+        self._position_settings_panel()
+        self._settings_panel.show()
+        self._settings_panel.raise_()
+
+    def _build_settings_content(self) -> None:
+        """（重）建設定浮層內容；以目前狀態填入各欄位。"""
         from aa_settings_dialog_qt import SettingsDialog
-        dlg = SettingsDialog(
+        central = self.centralWidget()
+        if self._settings_panel is None:
+            panel = QWidget(central)
+            panel.setObjectName("settingsPanel")
+            panel.setStyleSheet(
+                "#settingsPanel { background:#f1f3f5; border:1px solid #adb5bd;"
+                " border-radius:6px; }")
+            panel.hide()
+            outer = QVBoxLayout(panel)
+            outer.setContentsMargins(0, 0, 0, 0)
+            outer.setSpacing(0)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setStyleSheet(
+                "QScrollArea { border:none; background:transparent; }")
+            outer.addWidget(scroll, 1)
+            self._settings_panel = panel
+            self._settings_scroll = scroll
+        content = SettingsDialog(
             self,
             auto_copy=self._auto_copy,
             work_history_limit=self._work_history_limit,
@@ -2309,6 +2361,7 @@ class MainWindow(QMainWindow):
             embed_font_name=self._embed_font_name,
             editor_default_wysiwyg=self._editor_default_wysiwyg,
             editor_copy_to_replace=self._editor_copy_to_replace,
+            glossary_sync_to_batch_quick=self._glossary_sync_to_batch_quick,
             korean_mode=self._korean_mode,
             experimental_extraction=self._experimental_extraction,
             pad_right_aa=self._pad_right_aa,
@@ -2321,8 +2374,28 @@ class MainWindow(QMainWindow):
                 self._base_dir(), original_cache.CACHE_FILENAME),
             on_apply=self._on_settings_applied,
             on_clear_url_history=self._on_clear_url_history_from_settings,
+            on_close=self._settings_panel.hide,
         )
-        dlg.exec()
+        # setWidget 會接管所有權並刪除舊內容 widget
+        self._settings_scroll.setWidget(content)
+        self._settings_content = content
+
+    def _position_settings_panel(self) -> None:
+        """把設定浮層放在內容區左上角；寬度上限、高度依內容收緊。"""
+        central = self.centralWidget()
+        w, h = central.width(), central.height()
+        if w <= 0 or h <= 0:
+            return
+        pw = min(560, max(360, w - 16))
+        content_h = self._settings_content.sizeHint().height() + 16
+        ph = min(max(300, content_h), h - 16)
+        self._settings_panel.setGeometry(8, 8, pw, ph)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        if (self._settings_panel is not None
+                and self._settings_panel.isVisible()):
+            self._position_settings_panel()
 
     def _on_settings_applied(self, values: dict) -> None:
         self._auto_copy = bool(values.get('auto_copy', self._auto_copy))
@@ -2344,6 +2417,9 @@ class MainWindow(QMainWindow):
             'editor_default_wysiwyg', self._editor_default_wysiwyg))
         self._editor_copy_to_replace = bool(values.get(
             'editor_copy_to_replace', self._editor_copy_to_replace))
+        self._glossary_sync_to_batch_quick = bool(values.get(
+            'glossary_sync_to_batch_quick',
+            self._glossary_sync_to_batch_quick))
         self._korean_mode = bool(values.get(
             'korean_mode', self._korean_mode))
         self._experimental_extraction = bool(values.get(

@@ -320,6 +320,24 @@ class BatchSearchWindow(QMainWindow):
             }}
         """)
 
+    def add_glossary_quick_entry(self, a: str, b: str) -> None:
+        """由主程式呼叫，把一條術語（A=B）加到「快速替換」面板最上面。
+
+        供「編輯器存入術語時同步加入批次快速替換」設定使用。若該行已存在
+        （忽略前後空白）則不重複加入；新條目置頂，與主術語表的置頂行為一致。
+        """
+        a = (a or "").strip()
+        b = (b or "").strip()
+        if not a or not b:
+            return
+        entry = f"{a}={b}"
+        existing = self._glossary_edit.toPlainText()
+        lines = [ln.strip() for ln in existing.split('\n') if ln.strip()]
+        if entry in lines:
+            return
+        new_text = f"{entry}\n{existing}" if existing.strip() else entry
+        self._glossary_edit.setPlainText(new_text)
+
     def _add_entry_to_main_glossary(self, a: str, b: str) -> None:
         """將快速替換的一列加入主術語表（一般）。透過 callback 由主程式處理。"""
         if self._on_add_to_glossary is None:

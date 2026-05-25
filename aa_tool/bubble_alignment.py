@@ -404,8 +404,11 @@ def process_normal(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
 
 
 # 細線 ┌─┐│└┘ 與粗線 ┏━┓┃┗┛ 兩套方框字元皆支援。
-_BOX_TOP_RE = re.compile(r'^(.*?)([┌┏])([─━]+)([┐┓])\s*$')
-_BOX_BOT_RE = re.compile(r'^(.*?)([└┗])([─━]+)([┘┛])\s*$')
+# 橫線與右角落之間允許夾雜空白（含 hair space U+200A、全形空白等，`\s` 涵蓋）—
+# 有些對話框右側轉角前會留空格（如「┌──　┐」）；重建時橫線會重算至內容寬度，
+# 故原本的空格不需保留，僅需讓偵測能容忍它（否則會 fallback 成普通框只對齊內容列）。
+_BOX_TOP_RE = re.compile(r'^(.*?)([┌┏])([─━]+)\s*([┐┓])\s*$')
+_BOX_BOT_RE = re.compile(r'^(.*?)([└┗])([─━]+)\s*([┘┛])\s*$')
 _BOX_CONTENT_RE = re.compile(r'^(.*?)([│┃])(.*)([│┃])\s*$')
 
 

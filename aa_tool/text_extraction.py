@@ -148,6 +148,9 @@ _KANJI_RE = re.compile(r'[一-鿿々]')
 # 並 +2 分，讓對話框內的合法日文不會因為鄰近邊框導致密度過高被誤殺。
 _DIALOGUE_LEFT_MARKERS = set('＜<│|｜┃')
 _DIALOGUE_RIGHT_MARKERS = set('＞>│|｜┃')
+# 豎線類邊框字元。連續兩個（`||`／`｜｜`）通常是 AA 裝飾而非乾淨的對話框單豎線
+# 邊框，不應觸發 `_is_dialogue_box_bounded`（見該函式）。
+_PIPE_MARKERS = set('│|｜┃')
 
 # 名牌（speaker tag）前綴：候選前方為「【說話者】」名牌（後可接破折號連接號），
 # 是強烈的對話信號（如「【響】───だってさ」）。命中時 +2 並列入 strong_jp，
@@ -637,8 +640,11 @@ def _find_spaced_out(line: str) -> list[tuple[str, int, int]]:
     out: list[tuple[str, int, int]] = []
     for m in _SPACED_OUT_RE.finditer(line):
         raw = m.group(0)
-        merged_len = len(raw.replace('　', '').replace(' ', ''))
-        if merged_len >= 3:
+        merged = raw.replace('　', '').replace(' ', '')
+        # 排除「同一字重複」的拉長型（如「ソ　ソ　ソ　ソ」）— 屬 AA 裝飾，非真實
+        # 拉長念法（「シ　ロ　ウ　殿」字元有變化）。以非標點字元的相異度判定。
+        letters = [c for c in merged if c not in '！？。!?']
+        if len(merged) >= 3 and len(set(letters)) >= 2:
             out.append((raw, m.start(), m.end()))
     return out
 
@@ -707,13 +713,21 @@ def _is_dialogue_box_bounded(line: str, start: int, end: int) -> bool:
     i = start - 1
     while i >= 0 and line[i] in (' ', '　'):
         i -= 1
-    left_ok = i >= 0 and line[i] in _DIALOGUE_LEFT_MARKERS
-    if not left_ok:
+    if not (i >= 0 and line[i] in _DIALOGUE_LEFT_MARKERS):
+        return False
+    # 同字雙豎線 `||`／`｜｜`（AA 裝飾）不算乾淨的對話框邊框：邊框外側若是「相同」
+    # 豎線字則排除（例「||しし||」的 `||`）。但「不同豎線字相鄰」（如 AA 牆 `|` 緊鄰
+    # box 邊框 `┃`，即「|┃その時┃」）仍算合法邊框，不排除。
+    if line[i] in _PIPE_MARKERS and i - 1 >= 0 and line[i - 1] == line[i]:
         return False
     j = end
     while j < len(line) and line[j] in (' ', '　'):
         j += 1
-    return j < len(line) and line[j] in _DIALOGUE_RIGHT_MARKERS
+    if not (j < len(line) and line[j] in _DIALOGUE_RIGHT_MARKERS):
+        return False
+    if line[j] in _PIPE_MARKERS and j + 1 < len(line) and line[j + 1] == line[j]:
+        return False
+    return True
 
 
 def _is_right_edge_dialogue(line: str, start: int, end: int) -> bool:
@@ -1600,6 +1614,7 @@ _SITE_NAMES = [
     '【あんこ】',
     '【R-18】',
     '【安価】',
+    'やるやらちゃんねる',
 ]
 
 # 【...】 形式的標籤在標題任何位置都會被去除；其餘為站名，僅去前綴／後綴。

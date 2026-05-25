@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 )
 
 from aa_tool.qt_helpers import make_button
+from aa_tool.text_extraction import extract_work_title
 
 
 class FlowLayout(QLayout):
@@ -121,6 +122,8 @@ def _normalize_title_for_filter(raw_title: str) -> str:
     """把網址記錄的標題正規化成「作品名稱」主體，去掉網站名稱與話數資訊。
 
     處理順序：
+      0. 去掉 `_SITE_NAMES` 維護清單裡的已知站名／標籤（前綴、後綴、dash 尾綴、
+         任意位置的【...】標籤）—— 讓按鈕不顯示被該清單過濾的站名
       1. 去掉 " - 網站名稱" 尾綴（半形/長破折號）
       2. 去掉開頭的 【...】 / [...] tag 群
       3. 在第一個「話數模式」處截斷（第N話／そのN／番外編N／後日談N／N話）
@@ -129,7 +132,10 @@ def _normalize_title_for_filter(raw_title: str) -> str:
     """
     if not raw_title:
         return ""
-    t = _TITLE_SITE_SUFFIX_RE.sub("", raw_title)
+    # 先套用與「自動填入作品名稱」相同的站名過濾（共用 _SITE_NAMES 清單），
+    # 使標題按鈕不顯示已知站名（如「安価でやるお！」「| やる夫広場」等）。
+    t = extract_work_title(raw_title)
+    t = _TITLE_SITE_SUFFIX_RE.sub("", t)
     t = _TITLE_LEADING_TAGS_RE.sub("", t)
     earliest = len(t)
     for pat in _TITLE_CHAPTER_RES:

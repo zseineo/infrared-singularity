@@ -411,6 +411,13 @@ _BOX_TOP_RE = re.compile(r'^(.*?)([┌┏])([─━]+)\s*([┐┓])\s*$')
 _BOX_BOT_RE = re.compile(r'^(.*?)([└┗])([─━]+)\s*([┘┛])\s*$')
 _BOX_CONTENT_RE = re.compile(r'^(.*?)([│┃])(.*)([│┃])\s*$')
 
+# 漢字裝飾框 (`kanji_box`)：以漢字字元當邊框 — 上框 `ミ川+彡`、下框 `彡川+ミ`
+# （上下角落 ミ／彡 互換）、內容列 `三…三`。常見於 AA 中表達「煙霧／流動」感的對話。
+# 容忍橫線與右角落間空白（同 _BOX_*_RE 的設計）。
+_KANJI_BOX_TOP_RE = re.compile(r'^(.*?)(ミ)(川+)\s*(彡)\s*$')
+_KANJI_BOX_BOT_RE = re.compile(r'^(.*?)(彡)(川+)\s*(ミ)\s*$')
+_KANJI_BOX_CONTENT_RE = re.compile(r'^(.*?)(三)(.*)(三)\s*$')
+
 
 def _parse_box_lines(box_lines: list[str]) -> list[dict]:
     """將方框框的各行解析為結構化字典。"""
@@ -508,6 +515,91 @@ def process_box(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
     return result
 
 
+def _parse_kanji_box_lines(box_lines: list[str]) -> list[dict]:
+    """解析漢字框（`ミ川+彡` / `三…三` / `彡川+ミ`）的各行。"""
+    parsed: list[dict] = []
+    for sl in box_lines:
+        sl_n = sl.rstrip('\r\n')
+        mt = _KANJI_BOX_TOP_RE.match(sl_n)
+        mb = _KANJI_BOX_BOT_RE.match(sl_n)
+        mc = _KANJI_BOX_CONTENT_RE.match(sl_n)
+        if mt:
+            parsed.append({
+                'type': 'top', 'prefix': mt.group(1),
+                'lcorner': mt.group(2), 'dashes': mt.group(3),
+                'rcorner': mt.group(4), 'orig': sl_n,
+            })
+        elif mb:
+            parsed.append({
+                'type': 'bot', 'prefix': mb.group(1),
+                'lcorner': mb.group(2), 'dashes': mb.group(3),
+                'rcorner': mb.group(4), 'orig': sl_n,
+            })
+        elif mc:
+            inner = re.sub(r',+$', '', mc.group(3))
+            parsed.append({
+                'type': 'content', 'prefix': mc.group(1),
+                'lside': mc.group(2), 'rside': mc.group(4),
+                'inner': inner, 'orig': sl_n,
+            })
+        else:
+            parsed.append({'type': 'other', 'orig': sl_n})
+    return parsed
+
+
+def process_kanji_box(box_lines: list[str], m: FontMeasurer) -> list[str] | None:
+    """處理漢字框（ミ/彡/川/三），回傳對齊後的各行。失敗回傳 None。
+
+    與 `process_box` 邏輯一致：以內容列的最大寬度為目標、重算上下橫線數量
+    （此處橫線字元為 `川`）。上下角落 ミ／彡 互換（top=ミ…彡、bot=彡…ミ）
+    由各行 parsed 自帶角落字元保留，重建時沿用該行原字元。
+    """
+    parsed = _parse_kanji_box_lines(box_lines)
+
+    obw = 0
+    for ps in parsed:
+        if ps['type'] == 'top':
+            obw = m.measure(ps['lcorner'] + ps['dashes'] + ps['rcorner'])
+            break
+    if obw == 0:
+        return None
+
+    mcw = 0
+    for ps in parsed:
+        if ps['type'] == 'content':
+            needed = m.measure(
+                ps['lside'] + ps['inner'].rstrip(_PAD_CHARS) + '　' + ps['rside']
+            )
+            if needed > mcw:
+                mcw = needed
+    tw = (mcw + m.measure('　')) if mcw > 0 else obw
+
+    result: list[str] = []
+    for ps in parsed:
+        if ps['type'] in ('top', 'bot'):
+            dash_char = ps['dashes'][0] if ps['dashes'] else '川'
+            dash_w = m.measure(dash_char)
+            lr_w = m.measure(ps['lcorner']) + m.measure(ps['rcorner'])
+            inner_target = max(tw - lr_w, dash_w)
+            dashes = ''
+            while m.measure(dashes + dash_char) <= inner_target:
+                dashes += dash_char
+            d1 = inner_target - m.measure(dashes)
+            d2 = m.measure(dashes + dash_char) - inner_target
+            if d2 < d1:
+                dashes += dash_char
+            result.append(ps['prefix'] + ps['lcorner'] + dashes + ps['rcorner'])
+        elif ps['type'] == 'content':
+            inner = ps['inner'].rstrip(_PAD_CHARS)
+            side_w = m.measure(ps['lside']) + m.measure(ps['rside'])
+            tiw = max(tw - side_w, 0.0)
+            padded = _pad_to_width(inner, tiw, m)
+            result.append(ps['prefix'] + ps['lside'] + padded + ps['rside'])
+        else:
+            result.append(ps['orig'])
+    return result
+
+
 # ════════════════════════════════════════════════════════════════
 #  高階 API：單選對話框修正
 # ════════════════════════════════════════════════════════════════
@@ -547,6 +639,15 @@ def adjust_bubble(selected_text: str, m: FontMeasurer) -> str | None:
         result = process_box(lines, m)
         if result is None:
             return '⚠️ 無法計算方框寬度！'
+        return '\n'.join(result)
+
+    # ── 漢字框（ミ川+彡 / 三…三 / 彡川+ミ） ──
+    has_kbox_top = any(_KANJI_BOX_TOP_RE.match(ln.rstrip('\r\n')) for ln in lines)
+    has_kbox_bot = any(_KANJI_BOX_BOT_RE.match(ln.rstrip('\r\n')) for ln in lines)
+    if has_kbox_top and has_kbox_bot:
+        result = process_kanji_box(lines, m)
+        if result is None:
+            return '⚠️ 無法計算漢字框寬度！'
         return '\n'.join(result)
 
     # ── 普通對話框 ──
@@ -667,6 +768,21 @@ def detect_all_boxes(all_lines: list[str]) -> list[tuple[int, int, str]]:
                     used_lines.add(k)
                 break
 
+    # ── 偵測 C2: 漢字框（ミ川+彡 / 彡川+ミ） ──
+    for i, ln in enumerate(all_lines):
+        if i in used_lines:
+            continue
+        if not _KANJI_BOX_TOP_RE.match(ln.rstrip('\r\n')):
+            continue
+        for j in range(i + 1, min(i + 31, len(all_lines))):
+            if j in used_lines:
+                continue
+            if _KANJI_BOX_BOT_RE.match(all_lines[j].rstrip('\r\n')):
+                all_boxes.append((i, j, 'kanji_box'))
+                for k in range(i, j + 1):
+                    used_lines.add(k)
+                break
+
     # ── 偵測 D: 普通對話框 ──
     n_borders: list[dict] = []
     for i, line in enumerate(all_lines):
@@ -734,6 +850,8 @@ def adjust_all_bubbles(text: str, m: FontMeasurer) -> tuple[str, int]:
             result = process_slash(box_lines, m)
         elif box_type == 'box':
             result = process_box(box_lines, m)
+        elif box_type == 'kanji_box':
+            result = process_kanji_box(box_lines, m)
         else:
             result = process_normal(box_lines, m)
         if result is not None:

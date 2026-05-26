@@ -496,6 +496,7 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     if has_run:
         s += 3
     particle_count = sum(1 for ch in text if ch in _PARTICLES)
+    distinct_particles = len({ch for ch in text if ch in _PARTICLES})
     all_particles = _is_all_particles(text)
     if particle_count >= 1:
         s += 2
@@ -555,7 +556,11 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     # 條件涵蓋，故移除此弱豁免（base 無任何條目單靠它成立）。
     # strong_jp 的句末標點只認**全形** `！？。` — 半形 `!?` 信號不足以豁免
     # 局部 AA 密度懲罰（避免「ンへ!」這類含半形 `!` 的 AA 碎片被放行）。
-    strong_jp = ((particle_count >= 2 and not all_particles)
+    # strong_jp（密度豁免）用「相異」助詞數，不用 count —— 同一助詞重複（如 rへへハ
+    # 的 へへ）不算多種對話信號，count=2 但 distinct=1 不豁免；distinct≥2 才豁免。
+    # 但 `+2 多重助詞 bonus` 仍用 count（保留對「まだだ」這類 count=2/distinct=1
+    # 的合法日文的支援，靠 bonus 加分跨過 score≥2 門檻而不靠密度豁免）。
+    strong_jp = ((distinct_particles >= 2 and not all_particles)
                  or any(ch in text for ch in '！？。')
                  or has_num_option
                  or is_right_edge
@@ -596,9 +601,13 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     # 連續相同平假名懲罰：「んんんんん」這類 AA 裝飾；行尾豁免（涵蓋「ふふふ」笑聲）
     if _REPEAT_HIRA_RE.search(text) and not is_right_edge:
         s -= 3
-    # AA latin 前綴懲罰：「jニ二スミー」「j爻そ」「jI斗ぅ示」這類片段
+    # AA latin 前綴懲罰：「jニ二スミー」「j爻そ」「jI斗ぅ示」這類片段。真實日文
+    # 不會以單個 latin 字母開始 CJK 詞，是強 AA 信號；給 -6 以壓過「has_run +3」「
+    # 多重助詞 +2」等加成（如「rへへハ」count=2 へへ 取得 +2 bonus，但同助詞重複
+    # 非真實對話信號）。base 中唯一命中此規則的「Anリュウシ ニヨッテ…」走
+    # `_find_kata_sentence` 旁路、不經評分，故不受影響。
     if _AA_LATIN_PREFIX_RE.match(text):
-        s -= 3
+        s -= 6
     # AA latin 尾綴懲罰：「行灯な心マi」這類片段
     if _AA_LATIN_SUFFIX_RE.search(text):
         s -= 3

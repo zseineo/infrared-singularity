@@ -3,6 +3,10 @@
 以版號為單位彙整每次更新的摘要。最新版本置於最上方。
 逐筆技術細節請見 git commit 歷史；本檔僅記人類可讀的更新重點。
 
+## v1.75
+
+- 修正：`extract_work_title` 對「`｜` 全形管線開頭、與前文黏在一起」的站名後綴比對不到的問題（例：`…２｜やる夫ＡＧＥ`）。原因是 `_SITE_SUFFIX_RE` 要求至少一個前置空白。獨立出一條 `_SITE_PIPE_SUFFIX_RE`（管線本身即分隔符，前置空白可有可無），對 `|`／`｜` 開頭的站名適用；一般站名仍走原本的「需前置空白」規則，避免誤吃像「日々」結尾的合法標題。`｜やる夫ＡＧＥ` 等管線站名現在不論黏字或有空白都會被去除。
+
 ## v1.74
 
 - 修正：自動翻譯結束時面板 Log **重複出現兩份總結**（一份「──────── 自動翻譯總結 ────────」+ 一份「──────── 總結 ────────」）。原因是 coordinator 的 `_print_summary` 透過 `progress` callback 寫進面板 Log，之後 GUI 的 `_auto_translate_done` 又印一份更完整的總結。`run_auto_translate` 新增 `print_summary` 參數（CLI 預設 True 不變），GUI 端傳 False 抑制 coordinator 那份，面板 Log 只留 GUI 版（內含 next_url／模型不符等較完整資訊）。

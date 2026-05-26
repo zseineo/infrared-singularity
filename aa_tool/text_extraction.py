@@ -1615,17 +1615,27 @@ _SITE_NAMES = [
     '【R-18】',
     '【安価】',
     'やるやらちゃんねる',
+    '｜やる夫ＡＧＥ',
 ]
 
 # 【...】 形式的標籤在標題任何位置都會被去除；其餘為站名，僅去前綴／後綴。
 _TITLE_TAGS = [s for s in _SITE_NAMES if s.startswith('【') and s.endswith('】')]
 _SITE_ONLY = [s for s in _SITE_NAMES if s not in _TITLE_TAGS]
+# 以管線（半形 `|` 或全形 `｜`）開頭的站名：管線本身已是分隔符，標題尾端常與
+# 前文黏在一起（如「…２｜やる夫ＡＧＥ」），故獨立一條不強制前置空白的後綴正則。
+_SITE_PIPE_SUFFIX = [s for s in _SITE_ONLY if s.startswith(('|', '｜'))]
+_SITE_NON_PIPE = [s for s in _SITE_ONLY if s not in _SITE_PIPE_SUFFIX]
 
 _SITE_PREFIX_RE = re.compile(
     r'^(?:' + '|'.join(re.escape(s) for s in _SITE_ONLY) + r')[\s　]*'
 )
+# 一般站名後綴：要求至少一個前置空白（避免誤吃像「日々」結尾的合法標題）。
 _SITE_SUFFIX_RE = re.compile(
-    r'[\s　]+(?:' + '|'.join(re.escape(s) for s in _SITE_ONLY) + r')$'
+    r'[\s　]+(?:' + '|'.join(re.escape(s) for s in _SITE_NON_PIPE) + r')$'
+)
+# 管線分隔站名後綴：前置空白可有可無（管線即分隔符）。
+_SITE_PIPE_SUFFIX_RE = re.compile(
+    r'[\s　]*(?:' + '|'.join(re.escape(s) for s in _SITE_PIPE_SUFFIX) + r')$'
 )
 # dash 系尾綴：「 - 站名」「 — 站名」等形式
 _SITE_DASH_SUFFIX_RE = re.compile(r'[\s　]+[-—–][\s　]+.+$')
@@ -1636,9 +1646,10 @@ _TITLE_TAG_RE = re.compile(
 
 
 def extract_work_title(title: str) -> str:
-    """從頁面標題中去除已知站名（前綴／後綴）、dash 尾綴與已知【...】標籤（任何位置），回傳作品名稱部分。"""
+    """從頁面標題中去除已知站名（前綴／後綴／管線分隔）、dash 尾綴與已知【...】標籤（任何位置），回傳作品名稱部分。"""
     t = _SITE_DASH_SUFFIX_RE.sub('', title)
     t = _SITE_PREFIX_RE.sub('', t)
     t = _SITE_SUFFIX_RE.sub('', t)
+    t = _SITE_PIPE_SUFFIX_RE.sub('', t)
     t = _TITLE_TAG_RE.sub('', t)
     return t.strip(' 　\t')

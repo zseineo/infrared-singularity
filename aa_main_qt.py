@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.73"
+APP_VERSION = "1.74"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -1760,7 +1760,8 @@ class MainWindow(QMainWindow):
                     fetch_auto_fill_title=self._fetch_auto_fill_title,
                     until_last=until_last,
                     stop_event=stop_event,
-                    progress=_progress)
+                    progress=_progress,
+                    print_summary=False)  # GUI 端自己印更完整的總結
             except Exception as e:  # noqa: BLE001 — 背景執行緒須吞例外回報 UI
                 self._invoke_on_main.emit(
                     lambda err=e: self._auto_translate_done(None, str(err)))

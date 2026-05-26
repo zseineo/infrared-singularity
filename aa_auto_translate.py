@@ -432,6 +432,7 @@ def run_auto_translate(
     until_last: bool = False,
     stop_event=None,
     progress: Callable[[str], None] | None = None,
+    print_summary: bool = True,
 ) -> AutoResult:
     """從 ``start_url`` 起連續自動翻譯。
 
@@ -440,6 +441,8 @@ def run_auto_translate(
     until_last：為 True 時忽略 count，一路翻到沒有下一話為止。
     stop_event：threading.Event；設定後會在話與話之間（及分段之間）中止。
     progress：進度回呼（單一字串參數）；None 時印到 stdout。
+    print_summary：是否在結束時透過 `log` 印出 `_print_summary` 總結；
+        GUI 端會自行印更完整的版本，故傳 False 避免面板 log 出現兩份總結。
     """
     log = progress or (lambda m: print(m))
     base_dir = base_dir or os.path.dirname(os.path.abspath(__file__))
@@ -618,7 +621,8 @@ def run_auto_translate(
 
     processed = len(result.done) + len(result.failed)
     result.remaining = 0 if until_last else max(0, total - processed)
-    _print_summary(result, log)
+    if print_summary:
+        _print_summary(result, log)
     return result
 
 

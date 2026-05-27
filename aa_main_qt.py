@@ -24,7 +24,7 @@ import tempfile
 import threading
 import time
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QPoint, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPalette, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
@@ -65,7 +65,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.79"
+APP_VERSION = "1.80"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -2455,8 +2455,9 @@ class MainWindow(QMainWindow):
     def _build_file_list_panel(self) -> None:
         if self._file_list_panel is not None:
             return
-        central = self.centralWidget()
-        panel = QWidget(central)
+        # 用 Qt.Popup 旗標：點擊面板外任何位置時 Qt 會自動關掉浮層，且攔下該次
+        # 點擊事件（不會穿透到工具列「📂 檔案列表」按鈕又把面板重新打開）。
+        panel = QWidget(self, Qt.WindowType.Popup)
         panel.setObjectName("fileListPanel")
         panel.setStyleSheet(
             "#fileListPanel { background:#343a40; border:1px solid #495057;"
@@ -2599,15 +2600,17 @@ class MainWindow(QMainWindow):
         )
 
     def _position_file_list_panel(self) -> None:
-        """把檔案列表浮層放在內容區右上角。"""
+        """把檔案列表浮層放在內容區右上角（top-level Popup 用全域座標）。"""
         central = self.centralWidget()
         w, h = central.width(), central.height()
         if w <= 0 or h <= 0 or self._file_list_panel is None:
             return
         pw = min(380, max(260, w // 3))
         ph = min(max(360, h - 32), h - 16)
-        x = max(8, w - pw - 8)
-        self._file_list_panel.setGeometry(x, 8, pw, ph)
+        x_local = max(8, w - pw - 8)
+        top_left = central.mapToGlobal(QPoint(x_local, 8))
+        self._file_list_panel.setGeometry(
+            top_left.x(), top_left.y(), pw, ph)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         super().resizeEvent(event)

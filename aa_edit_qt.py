@@ -306,6 +306,7 @@ class EditWindow(QMainWindow):
         url_for_text_provider=None,  # (text: str) -> str | None；以指紋查 url_history 取得對應網址
         reload_original_for_file=None,  # (file_path: str) -> str | None；依指紋查原文暫存
         copy_to_replace_provider=None,  # () -> bool；對應主程式「編輯器複製即填入全文替換原文」設定
+        on_open_file_list=None,  # () -> None；開啟主畫面的「檔案列表」浮層
     ) -> None:
         super().__init__()
         self._html_file = html_file
@@ -360,6 +361,7 @@ class EditWindow(QMainWindow):
         self._url_for_text_provider = url_for_text_provider
         self._reload_original_for_file = reload_original_for_file
         self._copy_to_replace_provider = copy_to_replace_provider
+        self._on_open_file_list = on_open_file_list
 
         # Alt+4 局部重套用：保留 provider 取得的「完整」提取結果與翻譯文字，
         # 而 side_extracted / side_ai 只顯示當前編輯器可視範圍對應的行。
@@ -596,11 +598,6 @@ class EditWindow(QMainWindow):
         btn_reapply.clicked.connect(self._reapply_glossary)
         tb.addWidget(btn_reapply)
 
-        btn_glossary = _make_button("📕 用語集", "#6f42c1", "#5a32a3", width=85)
-        btn_glossary.setToolTip("開關「用語集」面板（Alt+5）：編輯一般術語表，與主畫面雙向同步")
-        btn_glossary.clicked.connect(self._toggle_glossary_side)
-        tb.addWidget(btn_glossary)
-
         # 分隔
         tb.addSpacing(10)
 
@@ -637,6 +634,13 @@ class EditWindow(QMainWindow):
         btn_bubble_all = _make_button("對話框(全)", "#20c997", "#17a085", width=85)
         btn_bubble_all.clicked.connect(self._adjust_all_bubbles)
         tb.addWidget(btn_bubble_all)
+
+        btn_file_list = _make_button(
+            "📂 檔案列表", "#0d6efd", "#0b5ed7", width=95)
+        btn_file_list.setToolTip(
+            "開啟主畫面的「檔案列表」浮層（同資料夾相鄰檔案）")
+        btn_file_list.clicked.connect(self._open_file_list)
+        tb.addWidget(btn_file_list)
 
         # 比對模式時需要 disable 的控制項
         self._edit_buttons.extend([
@@ -2129,6 +2133,13 @@ class EditWindow(QMainWindow):
             self._set_status(f"✅ 已儲存用語{tag}", "#0f0")
         except Exception as e:
             self._set_status(f"❌ 用語儲存失敗：{e}", "#dc3545")
+
+    def _open_file_list(self) -> None:
+        """工具列「📂 檔案列表」按鈕：開啟主畫面的檔案列表浮層。"""
+        if self._on_open_file_list is None:
+            self._set_status("⚠️ 此模式無法開啟檔案列表", "#ffc107")
+            return
+        self._on_open_file_list()
 
     def _toggle_glossary_side(self) -> None:
         """Alt+5：開關右側「用語集」面板。開啟時從主程式載入最新術語。"""

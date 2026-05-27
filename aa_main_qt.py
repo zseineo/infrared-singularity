@@ -65,7 +65,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.78"
+APP_VERSION = "1.79"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -268,7 +268,7 @@ class TranslatePanel(QWidget):
         btn_file_list = _make_btn(
             "📂 檔案列表", "#0d6efd", "#0b5ed7", font=_ui_font(12))
         btn_file_list.setToolTip(
-            "列出最後開啟檔案所在資料夾的相鄰檔案（前後各 10 個）")
+            "列出最後開啟檔案所在資料夾的所有 HTML 檔，目前檔案置中、可捲動")
         btn_file_list.clicked.connect(self._main.toggle_file_list_panel)
         row.addWidget(btn_file_list)
 
@@ -1061,6 +1061,7 @@ class MainWindow(QMainWindow):
                 url_for_text_provider=self._find_url_for_text,
                 reload_original_for_file=self.load_original_with_url_fallback,
                 copy_to_replace_provider=lambda: self._editor_copy_to_replace,
+                on_open_file_list=self.toggle_file_list_panel,
             )
             # 替換 placeholder
             self.stack.removeWidget(self._edit_placeholder)
@@ -2458,7 +2459,7 @@ class MainWindow(QMainWindow):
         panel = QWidget(central)
         panel.setObjectName("fileListPanel")
         panel.setStyleSheet(
-            "#fileListPanel { background:#f1f3f5; border:1px solid #adb5bd;"
+            "#fileListPanel { background:#343a40; border:1px solid #495057;"
             " border-radius:6px; }")
         panel.hide()
         panel.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -2469,12 +2470,23 @@ class MainWindow(QMainWindow):
         header = QHBoxLayout()
         title = QLabel("📂 檔案列表")
         title.setFont(_ui_font(12, bold=True))
+        title.setStyleSheet("color:white;")
         header.addWidget(title)
-        header.addStretch()
         status = QLabel("")
         status.setFont(_ui_font(10))
-        status.setStyleSheet("color:#6c757d;")
+        status.setStyleSheet("color:#adb5bd;")
         header.addWidget(status)
+        header.addStretch()
+        btn_close = QPushButton("✕")
+        btn_close.setFixedSize(24, 24)
+        btn_close.setToolTip("關閉檔案列表")
+        btn_close.setStyleSheet(
+            "QPushButton { background:transparent; color:#dee2e6;"
+            " border:none; font-size:14px; font-weight:bold; }"
+            "QPushButton:hover { background:#495057; color:white;"
+            " border-radius:3px; }")
+        btn_close.clicked.connect(panel.hide)
+        header.addWidget(btn_close)
         outer.addLayout(header)
 
         listw = QListWidget()
@@ -2484,8 +2496,8 @@ class MainWindow(QMainWindow):
         listw.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         listw.setStyleSheet(
-            "QListWidget { background:#ffffff; border:1px solid #ced4da;"
-            " border-radius:4px; }"
+            "QListWidget { background:#212529; color:#dee2e6;"
+            " border:1px solid #495057; border-radius:4px; }"
             "QListWidget::item { padding:4px 8px; }"
             "QListWidget::item:selected { background:#0d6efd; color:white; }")
         listw.itemActivated.connect(self._on_file_list_item_activated)
@@ -2522,26 +2534,15 @@ class MainWindow(QMainWindow):
         names.sort()
         current = os.path.basename(path)
         try:
-            idx = names.index(current)
+            current_pos = names.index(current)
         except ValueError:
-            # 目前檔案不在排序結果中（可能已被刪除/移動）；以 lower 再試一次
             lname = current.lower()
             try:
-                idx = [n.lower() for n in names].index(lname)
+                current_pos = [n.lower() for n in names].index(lname)
             except ValueError:
-                idx = -1
-        if idx < 0:
-            # 找不到當前檔，把整份列表都列出來、不特別標示
-            window = names
-            current_pos = -1
-        else:
-            lo = max(0, idx - 10)
-            hi = min(len(names), idx + 11)
-            window = names[lo:hi]
-            current_pos = idx - lo
-        status.setText(
-            f"共 {len(names)} 個檔案・顯示 {len(window)} 筆")
-        for i, name in enumerate(window):
+                current_pos = -1
+        status.setText(f"共 {len(names)} 個檔案")
+        for i, name in enumerate(names):
             item = QListWidgetItem(name)
             item.setTextAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)

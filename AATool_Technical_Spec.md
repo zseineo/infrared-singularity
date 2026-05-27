@@ -56,6 +56,8 @@
 
 主視窗標題「AA 創作翻譯輔助小工具」右側提供 **⚙ 設定按鈕**，對應 `MainWindow.toggle_settings_panel()`，以浮層面板開合呈現（詳見 §4.12）。
 
+主視窗右上工具列亦提供 **📂 檔案列表按鈕**（位於 Wiki 對照左側），對應 `MainWindow.toggle_file_list_panel()`：以子 widget 浮層方式疊在內容區右上角（`_position_file_list_panel`），列出 `_last_opened_file` 所在資料夾的相鄰 `.html` / `.htm` 檔（依檔名 `sorted()` 排序，當前檔置於視窗中段、上下各 10 個，視窗大小 21 筆內可用滾動列檢視）。`QListWidget` 設 `TextElideMode.ElideLeft` 與每項 `AlignRight` — 檔名過長時從左側裁切，話數與副檔名永遠可見。雙擊／Enter → `_on_file_list_item_activated` → `_open_html_path(file)`（與 `import_html` 共用：讀 `<pre>`、套用 `_load_cache_entry_for_file` 還原暫存原文／提取／翻譯，再呼叫 `show_edit_panel`）。記錄寫入發生在 `show_edit_panel` 入口：`is_temp_file=False` 時把 `file_path` 存入 `_last_opened_file`，並持久化於 `aa_settings_cache.json` 的 `last_opened_file`；開啟中的浮層會同步重新整理。
+
 ## 4. 核心模組與對應 Function 解析 (Core Functions)
 未來若要修改特定功能，請參考此清單尋找對應的 Python function。主程式類別為 `MainWindow(QMainWindow)`（`aa_main_qt.py`），翻譯面板為 `TranslatePanel(QWidget)`。
 

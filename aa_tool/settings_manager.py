@@ -118,6 +118,9 @@ class AppCache:
     editor_font_size: int = 12
     editor_line_height: int = 120
     last_open_dir: str = ""
+    # 最後在編輯器中開啟過的 HTML 檔案絕對路徑；首頁「📂 檔案列表」浮層
+    # 以此檔的所在資料夾列出相鄰檔案（依檔名排序、前後各 10 個）。
+    last_opened_file: str = ""
     editor_bg_color: str = "#ffffff"
     work_history_limit: int = 10
     fetch_history_limit: int = 50
@@ -324,6 +327,7 @@ class SettingsManager:
             except (TypeError, ValueError):
                 pass
             cache.last_open_dir = data.get('last_open_dir', '')
+            cache.last_opened_file = data.get('last_opened_file', '')
             cache.editor_bg_color = data.get(
                 'editor_bg_color', cache.editor_bg_color)
             try:
@@ -479,6 +483,7 @@ class SettingsManager:
                 'editor_font_size': cache.editor_font_size,
                 'editor_line_height': cache.editor_line_height,
                 'last_open_dir': cache.last_open_dir,
+                'last_opened_file': cache.last_opened_file,
                 'editor_bg_color': cache.editor_bg_color,
                 'work_history_limit': cache.work_history_limit,
                 'fetch_history_limit': cache.fetch_history_limit,

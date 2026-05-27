@@ -28,6 +28,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPalette, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QSplitter, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
 )
@@ -64,7 +65,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.77"
+APP_VERSION = "1.78"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -263,6 +264,13 @@ class TranslatePanel(QWidget):
         row.addWidget(btn_auto)
 
         row.addStretch()
+
+        btn_file_list = _make_btn(
+            "📂 檔案列表", "#0d6efd", "#0b5ed7", font=_ui_font(12))
+        btn_file_list.setToolTip(
+            "列出最後開啟檔案所在資料夾的相鄰檔案（前後各 10 個）")
+        btn_file_list.clicked.connect(self._main.toggle_file_list_panel)
+        row.addWidget(btn_file_list)
 
         btn_wiki = _make_btn("📖 Wiki 對照", "#6f42c1", "#5a32a3", font=_ui_font(12))
         btn_wiki.setToolTip("從 Wiki 角色列表頁抓取中日文對照")
@@ -718,6 +726,7 @@ class MainWindow(QMainWindow):
         self._editor_font_size: int = 12
         self._editor_line_height: int = 120
         self._last_dir: str = ""
+        self._last_opened_file: str = ""
         self._editor_bg_color: str = "#ffffff"
         self._auto_copy: bool = False
         self._work_history_limit: int = 10
@@ -794,6 +803,10 @@ class MainWindow(QMainWindow):
         self._settings_panel: QWidget | None = None
         self._settings_scroll: QScrollArea | None = None
         self._settings_content: 'SettingsDialog | None' = None
+        # 「📂 檔案列表」浮層（lazy init；列出最後開啟檔案所在資料夾的相鄰檔案）
+        self._file_list_panel: QWidget | None = None
+        self._file_list_widget: QListWidget | None = None
+        self._file_list_status: QLabel | None = None
 
         # ── 底部動作列 ──
         self._action_bar = self._build_action_bar()
@@ -982,6 +995,13 @@ class MainWindow(QMainWindow):
         從批次搜尋開啟時可傳入 `show_batch_panel` 以回到批次搜尋。
         """
         on_back = back_callback or self.show_translate_panel
+        # 記錄最後開啟過的檔案路徑（供「📂 檔案列表」浮層列出相鄰檔案）
+        if file_path and not is_temp_file:
+            self._last_opened_file = file_path
+            self.schedule_save()
+            if (self._file_list_panel is not None
+                    and self._file_list_panel.isVisible()):
+                self._refresh_file_list_panel()
         # 第一次建立 EditWindow
         if self._edit_window is None:
             self._edit_window = EditWindow(
@@ -2185,6 +2205,7 @@ class MainWindow(QMainWindow):
             editor_font_size=self._editor_font_size,
             editor_line_height=self._editor_line_height,
             last_open_dir=self._last_dir,
+            last_opened_file=self._last_opened_file,
             editor_bg_color=self._editor_bg_color,
             work_history_limit=self._work_history_limit,
             fetch_history_limit=self._fetch_history_limit,
@@ -2259,6 +2280,7 @@ class MainWindow(QMainWindow):
             self._editor_line_height = int(cache.editor_line_height)
         if cache.last_open_dir and os.path.isdir(cache.last_open_dir):
             self._last_dir = cache.last_open_dir
+        self._last_opened_file = str(cache.last_opened_file or "")
         if cache.editor_bg_color:
             self._editor_bg_color = cache.editor_bg_color
         self._work_history_limit = max(1, int(cache.work_history_limit or 10))
@@ -2412,11 +2434,188 @@ class MainWindow(QMainWindow):
         ph = min(max(300, content_h), h - 16)
         self._settings_panel.setGeometry(8, 8, pw, ph)
 
+    # ════════════════════════════════════════════════════════════
+    #  📂 檔案列表浮層
+    # ════════════════════════════════════════════════════════════
+
+    def toggle_file_list_panel(self) -> None:
+        """開合「📂 檔案列表」浮層。每次開啟時依目前 _last_opened_file 重建內容。"""
+        if (self._file_list_panel is not None
+                and self._file_list_panel.isVisible()):
+            self._file_list_panel.hide()
+            return
+        self._build_file_list_panel()
+        self._refresh_file_list_panel()
+        self._position_file_list_panel()
+        self._file_list_panel.show()
+        self._file_list_panel.raise_()
+        self._file_list_panel.setFocus()
+
+    def _build_file_list_panel(self) -> None:
+        if self._file_list_panel is not None:
+            return
+        central = self.centralWidget()
+        panel = QWidget(central)
+        panel.setObjectName("fileListPanel")
+        panel.setStyleSheet(
+            "#fileListPanel { background:#f1f3f5; border:1px solid #adb5bd;"
+            " border-radius:6px; }")
+        panel.hide()
+        panel.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(6)
+
+        header = QHBoxLayout()
+        title = QLabel("📂 檔案列表")
+        title.setFont(_ui_font(12, bold=True))
+        header.addWidget(title)
+        header.addStretch()
+        status = QLabel("")
+        status.setFont(_ui_font(10))
+        status.setStyleSheet("color:#6c757d;")
+        header.addWidget(status)
+        outer.addLayout(header)
+
+        listw = QListWidget()
+        listw.setFont(_ui_font(11))
+        # 檔名從右側開始顯示：左側裁切（保留話數與副檔名）。
+        listw.setTextElideMode(Qt.TextElideMode.ElideLeft)
+        listw.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        listw.setStyleSheet(
+            "QListWidget { background:#ffffff; border:1px solid #ced4da;"
+            " border-radius:4px; }"
+            "QListWidget::item { padding:4px 8px; }"
+            "QListWidget::item:selected { background:#0d6efd; color:white; }")
+        listw.itemActivated.connect(self._on_file_list_item_activated)
+        listw.itemDoubleClicked.connect(self._on_file_list_item_activated)
+        outer.addWidget(listw, 1)
+
+        esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), panel)
+        esc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        esc.activated.connect(panel.hide)
+
+        self._file_list_panel = panel
+        self._file_list_widget = listw
+        self._file_list_status = status
+
+    def _refresh_file_list_panel(self) -> None:
+        """依 _last_opened_file 重新填充清單；無檔時顯示提示。"""
+        listw = self._file_list_widget
+        status = self._file_list_status
+        if listw is None:
+            return
+        listw.clear()
+        path = self._last_opened_file
+        if not path or not os.path.isfile(path):
+            status.setText("尚無開啟過的檔案")
+            return
+        folder = os.path.dirname(path)
+        try:
+            names = [n for n in os.listdir(folder)
+                     if n.lower().endswith(('.html', '.htm'))
+                     and os.path.isfile(os.path.join(folder, n))]
+        except OSError as e:
+            status.setText(f"⚠ 無法讀取資料夾：{e}")
+            return
+        names.sort()
+        current = os.path.basename(path)
+        try:
+            idx = names.index(current)
+        except ValueError:
+            # 目前檔案不在排序結果中（可能已被刪除/移動）；以 lower 再試一次
+            lname = current.lower()
+            try:
+                idx = [n.lower() for n in names].index(lname)
+            except ValueError:
+                idx = -1
+        if idx < 0:
+            # 找不到當前檔，把整份列表都列出來、不特別標示
+            window = names
+            current_pos = -1
+        else:
+            lo = max(0, idx - 10)
+            hi = min(len(names), idx + 11)
+            window = names[lo:hi]
+            current_pos = idx - lo
+        status.setText(
+            f"共 {len(names)} 個檔案・顯示 {len(window)} 筆")
+        for i, name in enumerate(window):
+            item = QListWidgetItem(name)
+            item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            item.setToolTip(name)
+            item.setData(Qt.ItemDataRole.UserRole,
+                         os.path.join(folder, name))
+            if i == current_pos:
+                f = item.font()
+                f.setBold(True)
+                item.setFont(f)
+            listw.addItem(item)
+        if current_pos >= 0:
+            listw.setCurrentRow(current_pos)
+            listw.scrollToItem(
+                listw.item(current_pos),
+                QListWidget.ScrollHint.PositionAtCenter)
+
+    def _on_file_list_item_activated(self, item: QListWidgetItem) -> None:
+        target = item.data(Qt.ItemDataRole.UserRole)
+        if not target or not os.path.isfile(target):
+            self.show_status("⚠️ 檔案不存在或已被移動", "#f39c12")
+            return
+        if self._file_list_panel is not None:
+            self._file_list_panel.hide()
+        # 走與「📥 讀取設定」相同的開檔流程，確保暫存原文／提取／翻譯一併還原
+        self._open_html_path(target)
+
+    def _open_html_path(self, file_path: str) -> None:
+        """以指定路徑載入 HTML 並進入編輯面板（內部共用：檔案列表點擊等）。"""
+        try:
+            extracted = read_html_pre_content(file_path)
+            if extracted is None:
+                self.show_status(
+                    "⚠️ 無法找到標準的 <pre> 標籤，讀取可能不完整。", "#f39c12")
+        except OSError as e:
+            self.show_status(f"❌ 讀取 HTML 失敗！{e}", "#dc3545")
+            return
+        self._last_dir = os.path.dirname(file_path)
+        self.schedule_save()
+        entry = self._load_cache_entry_for_file(file_path)
+        cached_original = entry['text'] if entry else None
+        if entry:
+            cached_ext = entry.get('extracted', '')
+            if cached_ext:
+                self._translate_panel.extracted_text.setPlainText(cached_ext)
+            cached_tl = entry.get('translation', '')
+            if cached_tl:
+                self._translate_panel.ai_text.setPlainText(cached_tl)
+        self.show_edit_panel(
+            file_path,
+            original_text=cached_original,
+            display_title=os.path.splitext(os.path.basename(file_path))[0],
+            is_temp_file=False,
+        )
+
+    def _position_file_list_panel(self) -> None:
+        """把檔案列表浮層放在內容區右上角。"""
+        central = self.centralWidget()
+        w, h = central.width(), central.height()
+        if w <= 0 or h <= 0 or self._file_list_panel is None:
+            return
+        pw = min(380, max(260, w // 3))
+        ph = min(max(360, h - 32), h - 16)
+        x = max(8, w - pw - 8)
+        self._file_list_panel.setGeometry(x, 8, pw, ph)
+
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         super().resizeEvent(event)
         if (self._settings_panel is not None
                 and self._settings_panel.isVisible()):
             self._position_settings_panel()
+        if (self._file_list_panel is not None
+                and self._file_list_panel.isVisible()):
+            self._position_file_list_panel()
 
     def _on_settings_applied(self, values: dict) -> None:
         self._auto_copy = bool(values.get('auto_copy', self._auto_copy))

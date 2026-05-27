@@ -65,7 +65,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.80"
+APP_VERSION = "1.81"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -2492,8 +2492,9 @@ class MainWindow(QMainWindow):
 
         listw = QListWidget()
         listw.setFont(_ui_font(11))
-        # 檔名從右側開始顯示：左側裁切（保留話數與副檔名）。
-        listw.setTextElideMode(Qt.TextElideMode.ElideLeft)
+        # 檔名在資料時已手動中間省略（最多 30 字、不含副檔名）；Qt 的 elide 設
+        # ElideNone 避免重複裁切。
+        listw.setTextElideMode(Qt.TextElideMode.ElideNone)
         listw.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         listw.setStyleSheet(
@@ -2544,7 +2545,13 @@ class MainWindow(QMainWindow):
                 current_pos = -1
         status.setText(f"共 {len(names)} 個檔案")
         for i, name in enumerate(names):
-            item = QListWidgetItem(name)
+            stem = os.path.splitext(name)[0]
+            if len(stem) > 30:
+                # 中間省略：保留前 14 + "..." + 後 13 = 30 字
+                display = stem[:14] + "..." + stem[-13:]
+            else:
+                display = stem
+            item = QListWidgetItem(display)
             item.setTextAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             item.setToolTip(name)

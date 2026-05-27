@@ -71,6 +71,7 @@ class SettingsDialog(QWidget):
         pad_right_aa: bool,
         glossary_avoid_aa: bool,
         glossary_kana_fold: bool,
+        glossary_skip_extract: bool,
         glossary_auto_persist: bool,
         glossary_translation_only: bool,
         fetch_auto_fill_title: bool,
@@ -92,6 +93,7 @@ class SettingsDialog(QWidget):
                        glossary_sync_to_batch_quick, korean_mode,
                        experimental_extraction, pad_right_aa,
                        glossary_avoid_aa, glossary_kana_fold,
+                       glossary_skip_extract,
                        glossary_auto_persist,
                        glossary_translation_only, fetch_auto_fill_title)
         self._refresh_cache_size()
@@ -105,6 +107,7 @@ class SettingsDialog(QWidget):
                   korean_mode: bool, experimental_extraction: bool,
                   pad_right_aa: bool, glossary_avoid_aa: bool,
                   glossary_kana_fold: bool,
+                  glossary_skip_extract: bool,
                   glossary_auto_persist: bool,
                   glossary_translation_only: bool,
                   fetch_auto_fill_title: bool) -> None:
@@ -175,6 +178,18 @@ class SettingsDialog(QWidget):
             "  • 漢字、長音符號 ー、英數等非假名字元維持原樣。\n"
             "影響所有術語套用路徑（替換翻譯、重套術語、自動翻譯等）。")
         root.addWidget(self.glossary_kana_fold_cb)
+
+        self.glossary_skip_extract_cb = QCheckBox(
+            "提取日文時：跳過與術語原文完全相同的字串")
+        self.glossary_skip_extract_cb.setFont(_ui_font(12))
+        self.glossary_skip_extract_cb.setChecked(glossary_skip_extract)
+        self.glossary_skip_extract_cb.setToolTip(
+            "開啟後，「提取日文」結束時，若某條提取結果與術語表中某條術語的\n"
+            "「原文」（等號左側）一字不差完全相同，會從提取結果中剔除，\n"
+            "避免把已會被全文替換掉的術語再列出來翻譯。\n"
+            "影響：主畫面提取、自動翻譯提取、單字假名提取 三條路徑；\n"
+            "比對範圍：一般＋臨時術語表合併（含 kana fold 變體）。")
+        root.addWidget(self.glossary_skip_extract_cb)
 
         self.glossary_auto_persist_cb = QCheckBox(
             "存入術語後自動儲存到設定檔")
@@ -417,6 +432,8 @@ class SettingsDialog(QWidget):
             'pad_right_aa': self.pad_right_aa_cb.isChecked(),
             'glossary_avoid_aa': self.glossary_avoid_aa_cb.isChecked(),
             'glossary_kana_fold': self.glossary_kana_fold_cb.isChecked(),
+            'glossary_skip_extract':
+                self.glossary_skip_extract_cb.isChecked(),
             'glossary_auto_persist':
                 self.glossary_auto_persist_cb.isChecked(),
             'glossary_translation_only':

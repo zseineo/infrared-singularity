@@ -64,7 +64,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.76"
+APP_VERSION = "1.77"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -683,6 +683,7 @@ class MainWindow(QMainWindow):
         self._pad_right_aa: bool = False
         self._glossary_avoid_aa: bool = False
         self._glossary_kana_fold: bool = False
+        self._glossary_skip_extract: bool = False
         self._glossary_auto_persist: bool = False
         self._glossary_translation_only: bool = False
         self._fetch_auto_fill_title: bool = False
@@ -1226,6 +1227,14 @@ class MainWindow(QMainWindow):
             if item not in seen:
                 extracted_list.append(item)
                 seen.add(item)
+        if self._glossary_skip_extract:
+            glossary_keys = set(parse_glossary(
+                self._translate_panel.get_combined_glossary(),
+                kana_fold=self._glossary_kana_fold).keys())
+            if glossary_keys:
+                extracted_list = [
+                    item for item in extracted_list
+                    if item[0] not in glossary_keys]
         output = format_extraction_output(extracted_list)
         self._translate_panel.extracted_text.setPlainText(output)
         self._translate_panel.ext_count_label.setText(
@@ -2195,6 +2204,7 @@ class MainWindow(QMainWindow):
             pad_right_aa=self._pad_right_aa,
             glossary_avoid_aa=self._glossary_avoid_aa,
             glossary_kana_fold=self._glossary_kana_fold,
+            glossary_skip_extract=self._glossary_skip_extract,
             glossary_auto_persist=self._glossary_auto_persist,
             glossary_translation_only=self._glossary_translation_only,
             pad_space_count=self._pad_space_count,
@@ -2277,6 +2287,7 @@ class MainWindow(QMainWindow):
         self._pad_right_aa = bool(cache.pad_right_aa)
         self._glossary_avoid_aa = bool(cache.glossary_avoid_aa)
         self._glossary_kana_fold = bool(cache.glossary_kana_fold)
+        self._glossary_skip_extract = bool(cache.glossary_skip_extract)
         self._glossary_auto_persist = bool(cache.glossary_auto_persist)
         self._glossary_translation_only = bool(cache.glossary_translation_only)
         self._fetch_auto_fill_title = bool(cache.fetch_auto_fill_title)
@@ -2376,6 +2387,7 @@ class MainWindow(QMainWindow):
             pad_right_aa=self._pad_right_aa,
             glossary_avoid_aa=self._glossary_avoid_aa,
             glossary_kana_fold=self._glossary_kana_fold,
+            glossary_skip_extract=self._glossary_skip_extract,
             glossary_auto_persist=self._glossary_auto_persist,
             glossary_translation_only=self._glossary_translation_only,
             fetch_auto_fill_title=self._fetch_auto_fill_title,
@@ -2439,6 +2451,8 @@ class MainWindow(QMainWindow):
             'glossary_avoid_aa', self._glossary_avoid_aa))
         self._glossary_kana_fold = bool(values.get(
             'glossary_kana_fold', self._glossary_kana_fold))
+        self._glossary_skip_extract = bool(values.get(
+            'glossary_skip_extract', self._glossary_skip_extract))
         self._glossary_auto_persist = bool(values.get(
             'glossary_auto_persist', self._glossary_auto_persist))
         self._glossary_translation_only = bool(values.get(

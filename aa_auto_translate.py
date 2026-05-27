@@ -82,6 +82,7 @@ class AutoConfig:
     experimental: bool
     pad_right_aa: bool
     glossary_avoid_aa: bool
+    glossary_skip_extract: bool
     work_title: str
 
 
@@ -106,6 +107,7 @@ def load_config(base_dir: str) -> AutoConfig:
         experimental=c.experimental_extraction,
         pad_right_aa=c.pad_right_aa,
         glossary_avoid_aa=c.glossary_avoid_aa,
+        glossary_skip_extract=c.glossary_skip_extract,
         work_title=c.doc_title,
     )
 
@@ -197,6 +199,10 @@ def _extract(source: str, display_title: str, cfg: AutoConfig) -> str:
         if item not in seen:
             extracted_list.append(item)
             seen.add(item)
+    if cfg.glossary_skip_extract and cfg.glossary:
+        glossary_keys = set(cfg.glossary.keys())
+        extracted_list = [
+            item for item in extracted_list if item[0] not in glossary_keys]
     extracted = text_extraction.format_extraction_output(extracted_list)
     if not extracted.strip():
         raise ChapterError("提取結果為空（沒有可翻譯的文字）")

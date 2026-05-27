@@ -65,7 +65,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.81"
+APP_VERSION = "1.82"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -2492,9 +2492,9 @@ class MainWindow(QMainWindow):
 
         listw = QListWidget()
         listw.setFont(_ui_font(11))
-        # 檔名在資料時已手動中間省略（最多 30 字、不含副檔名）；Qt 的 elide 設
-        # ElideNone 避免重複裁切。
-        listw.setTextElideMode(Qt.TextElideMode.ElideNone)
+        # 檔名在資料時已手動中間省略（最多 30 字、不含副檔名）；若面板寬度仍
+        # 不足以塞下 30 字，交給 Qt 再做一次中間省略，避免前綴被右對齊裁掉。
+        listw.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         listw.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         listw.setStyleSheet(
@@ -2533,7 +2533,13 @@ class MainWindow(QMainWindow):
         except OSError as e:
             status.setText(f"⚠ 無法讀取資料夾：{e}")
             return
-        names.sort()
+        # 自然排序：把連續數字當整數比較，讓「第6話」排在「第69話」之前
+        # （原本的字串排序會因為「話」(U+8A71) > '9' 而誤把第6話夾在第69話與
+        # 第70話之間）。
+        def _natural_key(s: str):
+            return [int(tok) if tok.isdigit() else tok.lower()
+                    for tok in _re_mod.split(r'(\d+)', s)]
+        names.sort(key=_natural_key)
         current = os.path.basename(path)
         try:
             current_pos = names.index(current)

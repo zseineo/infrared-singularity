@@ -276,7 +276,7 @@ class AutoTranslatePanel(QWidget):
         self.gem_edit.setPlaceholderText("https://gemini.google.com/gem/...")
         form.addRow("Gemini Gem 網址：", self.gem_edit)
 
-        self.use_gem_cb = QCheckBox("瀏覽器模式使用不發送 Prompt (使用Gem)")
+        self.use_gem_cb = QCheckBox("瀏覽器模式使用 Gem（不發送 Prompt 2）")
         self.use_gem_cb.setToolTip(
             "本核取框只影響「翻譯 Prompt 2」在瀏覽器模式是否送出：\n"
             "  勾選 → 瀏覽器模式靠 Gem 內建 Prompt，不送出 Prompt 2。\n"

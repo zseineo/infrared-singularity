@@ -278,9 +278,11 @@ class AutoTranslatePanel(QWidget):
 
         self.use_gem_cb = QCheckBox("瀏覽器模式使用不發送 Prompt (使用Gem)")
         self.use_gem_cb.setToolTip(
-            "勾選：瀏覽器模式靠 Gem 內建 Prompt ，不送出下方 Prompt。\n"
-            "取消勾選：瀏覽器模式也會送 Prompt。\n"
-            "API 模式一律會送 Prompt，不受此選項影響。")
+            "本核取框只影響「翻譯 Prompt 2」在瀏覽器模式是否送出：\n"
+            "  勾選 → 瀏覽器模式靠 Gem 內建 Prompt，不送出 Prompt 2。\n"
+            "  取消勾選 → 瀏覽器模式會附加 Prompt 2。\n"
+            "「翻譯 Prompt 1」在瀏覽器模式『一律不送』，不受此選項影響。\n"
+            "API 模式一律會送出 Prompt 1＋Prompt 2，不受此選項影響。")
         form.addRow("", self.use_gem_cb)
 
         self.model_combo = QComboBox()
@@ -320,14 +322,22 @@ class AutoTranslatePanel(QWidget):
             else "⚠️ 非 Windows：金鑰僅 base64 混淆儲存，安全性較低")
         form.addRow("API 金鑰：", self.api_keys_edit)
 
+        # 翻譯 Prompt（兩段）——區塊 1：僅 API 送出；區塊 2：API 送，瀏覽器於未勾選
+        # 「使用 Gem」時也送（即「不送出 Prompt」的核取框為未勾選時）。
+        self.api_only_prompt_edit = QPlainTextEdit()
+        self.api_only_prompt_edit.setPlaceholderText(
+            "（區塊 1）僅 API 模式送出。瀏覽器模式『永遠不送』此區塊。\n"
+            "適合放：替代 Gem 內建人設的翻譯指令／角色設定（API 沒有 Gem 人設）。")
+        self.api_only_prompt_edit.setFixedHeight(120)
+        form.addRow("翻譯 Prompt 1：", self.api_only_prompt_edit)
+
         self.api_prompt_edit = QPlainTextEdit()
         self.api_prompt_edit.setPlaceholderText(
-            "翻譯 prompt（兩種模式都會用到）：\n"
-            "・API 模式 → 當作系統指令送出\n"
-            "・瀏覽器模式 → 附加在每個新對話的第一則訊息開頭\n"
-            "若瀏覽器模式已用內建prompt的 Gem，可留空。")
-        self.api_prompt_edit.setFixedHeight(140)
-        form.addRow("翻譯 Prompt：", self.api_prompt_edit)
+            "（區塊 2）API 模式一律送出；瀏覽器模式僅在『使用 Gem（不發送 Prompt）』\n"
+            "核取框未勾選時送出（會附加在每個新對話的第一則訊息開頭）。\n"
+            "適合放：兩種模式共用的補充指令／格式要求。")
+        self.api_prompt_edit.setFixedHeight(120)
+        form.addRow("翻譯 Prompt 2：", self.api_prompt_edit)
 
         # 動作列
         btn_row = QWidget()
@@ -447,6 +457,8 @@ class AutoTranslatePanel(QWidget):
         model = getattr(m, "_gemini_api_model", "") or API_MODELS[0]
         midx = self.api_model_combo.findText(model)
         self.api_model_combo.setCurrentIndex(midx if midx >= 0 else 0)
+        self.api_only_prompt_edit.setPlainText(
+            getattr(m, "_gemini_api_only_prompt", "") or "")
         self.api_prompt_edit.setPlainText(
             getattr(m, "_gemini_api_system_prompt", "") or "")
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -461,6 +473,7 @@ class AutoTranslatePanel(QWidget):
             "backend": self._backend,
             "browser_use_gem": self.use_gem_cb.isChecked(),
             "api_model": self.api_model_combo.currentText(),
+            "api_only_prompt": self.api_only_prompt_edit.toPlainText(),
             "api_system_prompt": self.api_prompt_edit.toPlainText(),
             "api_keys": keys,
             # 隨連線設定一併持久化的瀏覽器後端參數（已從主頁移入本浮層）

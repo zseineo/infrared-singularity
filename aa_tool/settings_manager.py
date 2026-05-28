@@ -187,9 +187,14 @@ class AppCache:
     # API 模式用的模型 id（見 aa_tool.gemini_api.API_MODELS）。
     gemini_api_model: str = "gemini-2.5-pro"
     # API 模式的系統指令（翻譯人設／要求）；金鑰另存於加密檔 aa_api_keys.dat。
+    # 兩段 prompt 的差異（v1.69）：
+    #   gemini_api_only_prompt   → 僅 API 模式送出（瀏覽器模式一律不送）
+    #   gemini_api_system_prompt → API 模式送出；瀏覽器模式於 browser_use_gem=False 時也送
+    gemini_api_only_prompt: str = ""
     gemini_api_system_prompt: str = ""
-    # 瀏覽器模式是否使用 Gem（內建人設）：True 時瀏覽器模式「不送出」翻譯 Prompt，
-    # 只有 API 模式才送。預設 True（多數使用者用 Gem）。
+    # 瀏覽器模式是否使用 Gem（內建人設）：True 時瀏覽器模式「不送出」翻譯 Prompt
+    # （只控制 gemini_api_system_prompt 那一段；gemini_api_only_prompt 在瀏覽器模式一律不送）。
+    # 預設 True（多數使用者用 Gem）。
     browser_use_gem: bool = True
     # 要求的 Gemini 模型：pro / flash / flash-lite / any。
     # 翻譯中若偵測到模型與此不符，整批自動中止（讀不到模型字串時不阻擋，會在 Log 警告）。
@@ -418,6 +423,8 @@ class SettingsManager:
             cache.gemini_api_model = str(data.get(
                 'gemini_api_model', cache.gemini_api_model)
                 or "gemini-2.5-pro")
+            cache.gemini_api_only_prompt = str(data.get(
+                'gemini_api_only_prompt', cache.gemini_api_only_prompt))
             cache.gemini_api_system_prompt = str(data.get(
                 'gemini_api_system_prompt', cache.gemini_api_system_prompt))
             cache.browser_use_gem = bool(data.get(
@@ -519,6 +526,7 @@ class SettingsManager:
                 'gemini_required_model': cache.gemini_required_model,
                 'translate_backend': cache.translate_backend,
                 'gemini_api_model': cache.gemini_api_model,
+                'gemini_api_only_prompt': cache.gemini_api_only_prompt,
                 'gemini_api_system_prompt': cache.gemini_api_system_prompt,
                 'browser_use_gem': cache.browser_use_gem,
             }

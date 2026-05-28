@@ -65,7 +65,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.83"
+APP_VERSION = "1.84"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -712,7 +712,8 @@ class MainWindow(QMainWindow):
         # 翻譯後端與 API 設定（金鑰另存於加密檔，不在 cache）
         self._translate_backend: str = "browser"
         self._gemini_api_model: str = "gemini-2.5-pro"
-        self._gemini_api_system_prompt: str = ""
+        self._gemini_api_only_prompt: str = ""  # 僅 API 送出（瀏覽器模式不送）
+        self._gemini_api_system_prompt: str = ""  # API 送；瀏覽器模式於 !use_gem 才送
         self._browser_use_gem: bool = True
         self._auto_translate_running: bool = False
         self._auto_stop_event = None  # threading.Event，執行中時設定
@@ -1689,6 +1690,7 @@ class MainWindow(QMainWindow):
         self._translate_backend = params.get("backend", "browser") or "browser"
         self._gemini_api_model = (
             params.get("api_model") or "gemini-2.5-pro")
+        self._gemini_api_only_prompt = params.get("api_only_prompt", "")
         self._gemini_api_system_prompt = params.get("api_system_prompt", "")
         self._browser_use_gem = bool(params.get("browser_use_gem", True))
         # 已從主頁移入連線設定浮層的瀏覽器後端參數，一併持久化。
@@ -2241,6 +2243,7 @@ class MainWindow(QMainWindow):
             auto_translate_until_last=self._auto_translate_until_last,
             translate_backend=self._translate_backend,
             gemini_api_model=self._gemini_api_model,
+            gemini_api_only_prompt=self._gemini_api_only_prompt,
             gemini_api_system_prompt=self._gemini_api_system_prompt,
             browser_use_gem=self._browser_use_gem,
         )
@@ -2331,6 +2334,8 @@ class MainWindow(QMainWindow):
         self._translate_backend = str(cache.translate_backend or "browser")
         self._gemini_api_model = str(
             cache.gemini_api_model or "gemini-2.5-pro")
+        self._gemini_api_only_prompt = str(
+            getattr(cache, "gemini_api_only_prompt", "") or "")
         self._gemini_api_system_prompt = str(
             cache.gemini_api_system_prompt or "")
         self._browser_use_gem = bool(cache.browser_use_gem)

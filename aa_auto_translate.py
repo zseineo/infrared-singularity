@@ -476,9 +476,13 @@ def run_auto_translate(
         keys = secure_store.load_keys(base_dir)
         if not keys:
             raise ValueError("API 模式但未設定任何 API 金鑰（請到「連線設定」輸入）")
+        # API 模式：兩段 prompt 都送出（合併為 systemInstruction，空段自動略過）
+        api_prompts = [getattr(cache, "gemini_api_only_prompt", "") or "",
+                       cache.gemini_api_system_prompt or ""]
+        api_system_prompt = "\n\n".join(p.strip() for p in api_prompts if p.strip())
         session = gemini_api.GeminiApiSession(
             keys, cache.gemini_api_model,
-            system_prompt=cache.gemini_api_system_prompt, log=log,
+            system_prompt=api_system_prompt, log=log,
             stop_event=stop_event, base_dir=base_dir)
         open_log = f"使用 Google API（模型 {cache.gemini_api_model}）…"
     else:

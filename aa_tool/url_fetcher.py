@@ -10,6 +10,7 @@
   - yaruohiroba.com（dt/dd 結構 + related-list 關聯清單）
   - yaruo-matome.com（entry-content div + nexe-prev-post ul）
   - blog.livedoor.jp（textar-aa / span.aa，無關聯記事、尾端嵌入下一話連結）
+  - asitayaruo.com（entry-content + dt/dd；本身無 prev/next，關聯記事改由分類頁 ?cat=N&paged=K 取得）
 """
 from __future__ import annotations
 
@@ -1169,6 +1170,109 @@ def _parse_livedoor(page_html: str, base_url: str, *,
 
 
 # ════════════════════════════════════════════════════════════════
+#  解析器：asitayaruo.com
+# ════════════════════════════════════════════════════════════════
+
+def _fetch_asitayaruo_category(cat_url: str, current_url: str) -> list[dict]:
+    """逐頁抓取 asitayaruo.com 分類頁的所有貼文清單，回傳「舊 → 新」時間順序的 nav。
+
+    分類頁分頁形式為 `?cat=N&paged=K`，每頁列出 50 篇（最新→最舊），
+    `<h3><a href="?p=N">TITLE</a></h3>` 為條目樣式。
+    當前 URL 對應條目 `is_current=True`、`url=None`。
+    """
+    items: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    page_num = 1
+    while page_num <= 50:  # 安全閥
+        page_url = cat_url if page_num == 1 else f"{cat_url}&paged={page_num}"
+        try:
+            cat_html = fetch_url(page_url)
+        except Exception:
+            break
+        page_added = 0
+        for m in re.finditer(
+            r'<h3><a\s+href="([^"]+)"[^>]*>\s*(.*?)\s*</a></h3>',
+            cat_html, re.DOTALL,
+        ):
+            href = html.unescape(m.group(1))
+            title = html.unescape(re.sub(r'\s+', ' ', m.group(2))).strip()
+            if not title or href in seen:
+                continue
+            seen.add(href)
+            items.append((href, title))
+            page_added += 1
+        if page_added == 0:
+            break
+        # 是否還有下一頁：尋找 `paged=K+1` 連結
+        if not re.search(rf'paged=(?:0*){page_num + 1}\b', cat_html):
+            break
+        page_num += 1
+
+    # 來源為「新 → 舊」；反轉為時間順序，讓「下一話」按鈕可以
+    # current_idx + 1 正確取得下一集。
+    items.reverse()
+
+    cur_norm = current_url.split('#')[0].rstrip('/')
+    nav: list[dict] = []
+    for href, title in items:
+        is_current = href.split('#')[0].rstrip('/') == cur_norm
+        nav.append({
+            'title': title,
+            'url': None if is_current else href,
+            'is_current': is_current,
+        })
+    return nav
+
+
+def _parse_asitayaruo(page_html: str, base_url: str, *,
+                      author_name: str = "",
+                      author_only: bool = False) -> tuple[str | None, list[dict], str]:
+    """解析 asitayaruo.com 格式（明日やる夫は馬鹿やる夫）。
+
+    內文：<div class="entry-content"> 內的 <dt>/<dd>，標頭格式為
+          「<span>N</span> ： <span ...>AUTHOR</span> ： <span>YYYY/MM/DD(曜) HH:MM:SS</span>
+           <span style="color:#ff0000">ID:XXX</span>」。
+    標題：<title>...</title>（去除站名後綴「- 明日やる夫は馬鹿やる夫」）。
+    關聯：本站文章頁面**沒有** prev/next 關聯區塊；分類資訊以 `<p class="tagst">`
+          中的 `?cat=N` 連結指向分類頁，需另發 HTTP 抓取該分類頁（分頁形式
+          `?cat=N&paged=K`）取得同系列文章清單，做為關聯記事。
+    """
+    # ── 標題 ──
+    title_m = re.search(r'<title>([^<]+)</title>', page_html)
+    page_title = html.unescape(title_m.group(1)).strip() if title_m else ""
+    page_title = re.sub(r'\s*[\|｜\-－–—]\s*明日やる夫.*$', '', page_title)
+
+    # ── 內文 ──
+    start_m = re.search(r'<div\s+class="entry-content"[^>]*>', page_html)
+    if not start_m:
+        return None, [], page_title
+
+    # entry-content 之後到 `<p class="tagst">`（分類列）為止為純內文範圍
+    end_m = re.search(r'<p\s+class="tagst"', page_html[start_m.end():])
+    content_end = start_m.end() + end_m.start() if end_m else len(page_html)
+    content_html = page_html[start_m.end():content_end]
+
+    lines_out = _extract_dt_dd_posts(
+        content_html, author_name=author_name, author_only=author_only)
+    text_content = '\n\n'.join(lines_out) if lines_out else None
+
+    # ── 關聯記事：從 tagst 取分類 URL，再 HTTP 抓分類頁 ──
+    nav_links: list[dict] = []
+    tag_m = re.search(r'<p\s+class="tagst"[^>]*>(.*?)</p>', page_html, re.DOTALL)
+    if tag_m:
+        cat_a = re.search(
+            r'<a\s+href="([^"]*\?cat=\d+)"', tag_m.group(1))
+        if cat_a:
+            cat_url = urljoin(base_url, html.unescape(cat_a.group(1)))
+            try:
+                nav_links = _fetch_asitayaruo_category(cat_url, base_url)
+            except Exception:
+                nav_links = []
+
+    return text_content, nav_links, page_title
+
+
+# ════════════════════════════════════════════════════════════════
 #  公開入口
 # ════════════════════════════════════════════════════════════════
 
@@ -1183,6 +1287,7 @@ _DOMAIN_PARSERS: dict[str, callable] = {
     'yaruohiroba.com': _parse_yaruobook,
     'yaruobook.net': _parse_yaruobook_net,
     'yaruo-matome.com': _parse_yaruo_matome,
+    'asitayaruo.com': _parse_asitayaruo,
 }
 
 

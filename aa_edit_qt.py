@@ -635,12 +635,11 @@ class EditWindow(QMainWindow):
         btn_bubble_all.clicked.connect(self._adjust_all_bubbles)
         tb.addWidget(btn_bubble_all)
 
-        btn_file_list = _make_button(
-            "📂 檔案列表", "#0d6efd", "#0b5ed7", width=95)
-        btn_file_list.setToolTip(
-            "開啟主畫面的「檔案列表」浮層（同資料夾相鄰檔案）")
-        btn_file_list.clicked.connect(self._open_file_list)
-        tb.addWidget(btn_file_list)
+        if self._on_open is not None:
+            btn_open = _make_button("📂 開啟", "#6f42c1", "#5a32a3", width=70)
+            btn_open.setToolTip("打開已儲存的 HTML 檔案")
+            btn_open.clicked.connect(self._on_open)
+            tb.addWidget(btn_open)
 
         # 比對模式時需要 disable 的控制項
         self._edit_buttons.extend([
@@ -682,11 +681,12 @@ class EditWindow(QMainWindow):
         btn_save.clicked.connect(self._save_as)
         tb.addWidget(btn_save)
 
-        if self._on_open is not None:
-            btn_open = _make_button("📂 開啟", "#6f42c1", "#5a32a3", width=70)
-            btn_open.setToolTip("打開已儲存的 HTML 檔案")
-            btn_open.clicked.connect(self._on_open)
-            tb.addWidget(btn_open)
+        btn_file_list_top = _make_button(
+            "📂 檔案列表", "#0d6efd", "#0b5ed7", width=95)
+        btn_file_list_top.setToolTip(
+            "開啟主畫面的「檔案列表」浮層（同資料夾相鄰檔案）")
+        btn_file_list_top.clicked.connect(self._open_file_list)
+        tb.addWidget(btn_file_list_top)
 
         if self._on_back is not None:
             btn_back = _make_button("← 返回", "#6c757d", "#5a6268", width=70)

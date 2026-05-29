@@ -24,7 +24,7 @@ import tempfile
 import threading
 import time
 
-from PyQt6.QtCore import Qt, QPoint, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QEvent, QPoint, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPalette, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
@@ -65,7 +65,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.85"
+APP_VERSION = "1.86"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -808,6 +808,9 @@ class MainWindow(QMainWindow):
         self._file_list_panel: QWidget | None = None
         self._file_list_widget: QListWidget | None = None
         self._file_list_status: QLabel | None = None
+        # Popup 點面板外關閉時的時間戳；防止「點工具列鈕時 Popup 先關掉、然後
+        # 同一次點擊又把面板重新打開」的閃爍 reopen。
+        self._file_list_hide_ts: float = 0.0
 
         # ── 底部動作列 ──
         self._action_bar = self._build_action_bar()
@@ -2446,9 +2449,15 @@ class MainWindow(QMainWindow):
 
     def toggle_file_list_panel(self) -> None:
         """開合「📂 檔案列表」浮層。每次開啟時依目前 _last_opened_file 重建內容。"""
+        import time
         if (self._file_list_panel is not None
                 and self._file_list_panel.isVisible()):
             self._file_list_panel.hide()
+            return
+        # Popup 旗標下，點工具列鈕時 Popup 先把面板關掉、然後同一次點擊事件
+        # 又走到 button.clicked → 這裡，會立即重新打開。用「剛關閉 < 300 ms
+        # 就視為使用者要關閉」攔下這個 reopen。
+        if time.monotonic() - self._file_list_hide_ts < 0.3:
             return
         self._build_file_list_panel()
         self._refresh_file_list_panel()
@@ -2457,6 +2466,14 @@ class MainWindow(QMainWindow):
         self._file_list_panel.raise_()
         self._file_list_panel.setFocus()
 
+    def eventFilter(self, obj, ev):  # noqa: N802 (Qt naming)
+        if (self._file_list_panel is not None
+                and obj is self._file_list_panel
+                and ev.type() == QEvent.Type.Hide):
+            import time
+            self._file_list_hide_ts = time.monotonic()
+        return super().eventFilter(obj, ev)
+
     def _build_file_list_panel(self) -> None:
         if self._file_list_panel is not None:
             return
@@ -2464,6 +2481,8 @@ class MainWindow(QMainWindow):
         # 點擊事件（不會穿透到工具列「📂 檔案列表」按鈕又把面板重新打開）。
         panel = QWidget(self, Qt.WindowType.Popup)
         panel.setObjectName("fileListPanel")
+        # 監聽 Hide 事件，記錄 Popup 點外側關閉的時間戳（供 toggle 過濾 reopen）
+        panel.installEventFilter(self)
         panel.setStyleSheet(
             "#fileListPanel { background:#343a40; border:1px solid #495057;"
             " border-radius:6px; }")

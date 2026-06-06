@@ -1046,8 +1046,11 @@ def _parse_yaruo_matome(page_html: str, base_url: str, *,
         flat = re.sub(r'<br\s*/?>', '\n', flat)
         flat = _strip_tags_keep_color(flat)
         flat = html.unescape(flat)
-        # 每行去除首字 `.`（防壓縮占位）
-        flat_lines = [re.sub(r'^\.', '', ln) for ln in flat.split('\n')]
+        # 每行去除首字 `.`（防壓縮占位）。第一行常被 <p> 的 HTML 縮排塞入
+        # 行首 tab／空白（如 `\t\t\t.3825 ：…`），需連同其前的 ASCII 空白一併
+        # 吸收，否則占位點殘留會使該樓標頭 `_POST_HEADER_RE` 失配、在「忽略
+        # 留言」模式下被整段跳過（AA 對齊用全形 U+3000，行首 ASCII 空白屬縮排可去）。
+        flat_lines = [re.sub(r'^[ \t]*\.', '', ln) for ln in flat.split('\n')]
         flat = '\n'.join(flat_lines)
         if author_name or author_only:
             flat = _filter_color_by_author(

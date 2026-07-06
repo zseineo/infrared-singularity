@@ -546,6 +546,9 @@ class EditWindow(QMainWindow):
                   activated=self._toggle_spaces)
         # Redo（Ctrl+Z 由 QTextEdit 原生處理，這裡補一個 Alt+Z 重做）
         QShortcut(QKeySequence("Alt+Z"), self, activated=self._redo)
+        # F1：把選取文字依「是否已在提取結果中」分類寫入 testcase/failcase.txt
+        QShortcut(QKeySequence("F1"), self,
+                  activated=self._add_selection_to_failcase)
 
         if scroll_to_line and scroll_to_line > 0:
             self._scroll_to_line(scroll_to_line)
@@ -2738,6 +2741,121 @@ class EditWindow(QMainWindow):
         QApplication.clipboard().setText(output)
         self._set_status(
             f"✅ 已複製 {len(out_lines)} 行到剪貼簿（已去除流水號）", "#0f0")
+
+    # ════════════════════════════════════════════════════════════
+    #  收集失敗案例（F1）→ testcase/failcase.txt
+    # ════════════════════════════════════════════════════════════
+
+    def _add_selection_to_failcase(self) -> None:
+        """F1：把編輯器中選取的文字依「是否已在提取結果中」分類寫入 failcase.txt。
+
+        - 選取內容出現在提取結果中 → 誤抓（演算法不該抓卻抓了）。
+        - 未出現在提取結果中 → 漏抓（演算法該抓卻漏了）。
+        逐行判定並寫入 testcase/failcase.txt 對應區塊，供
+        extraction-testcase-maintenance 之後折進 base.txt。此為開發用途，
+        僅在原始碼環境（testcase/ 存在）可用。
+        """
+        if self._compare_active:
+            self._set_status(
+                "⚠️ 比對模式下無法使用；請先回編輯模式（Alt+1）", "#ffc107")
+            return
+        cursor = self._active_edit_widget().textCursor()
+        if not cursor.hasSelection():
+            self._set_status("⚠️ 請先選取要記錄為失敗案例的文字", "#ffc107")
+            return
+        selected = cursor.selectedText().replace(' ', '\n')
+        sel_lines = [ln.strip() for ln in selected.split('\n') if ln.strip()]
+        if not sel_lines:
+            self._set_status("⚠️ 選取範圍內沒有內容", "#ffc107")
+            return
+        if self._extracted_provider is None:
+            self._set_status("⚠️ 無法取得提取結果，無法判定誤抓／漏抓", "#ffc107")
+            return
+        # 提取結果每行為「ID|原文」；去掉流水號前綴後併成一坨供子字串比對
+        extracted_raw = self._extracted_provider() or ""
+        contents = []
+        for ln in extracted_raw.split('\n'):
+            idx = ln.find('|')
+            contents.append(ln[idx + 1:] if idx >= 0 else ln)
+        extracted_blob = '\n'.join(contents)
+        if not extracted_blob.strip():
+            self._set_status(
+                "⚠️ 提取結果為空，無法判定誤抓／漏抓（請先完成提取）", "#ffc107")
+            return
+        wrong = []  # 誤抓：在提取結果中
+        miss = []   # 漏抓：不在提取結果中
+        for ln in sel_lines:
+            (wrong if ln in extracted_blob else miss).append(ln)
+        ok, err = self._append_to_failcase(miss, wrong)
+        if not ok:
+            self._set_status(f"⚠️ 寫入 failcase 失敗：{err}", "#ffc107")
+            return
+        parts = []
+        if wrong:
+            parts.append(f"{len(wrong)} 筆誤抓")
+        if miss:
+            parts.append(f"{len(miss)} 筆漏抓")
+        self._set_status("✅ 已寫入 failcase：" + "、".join(parts), "#0f0")
+
+    def _append_to_failcase(self, miss: list, wrong: list):
+        """把漏抓／誤抓行插入 testcase/failcase.txt 對應區塊。
+
+        回傳 (成功: bool, 錯誤訊息: str)。就地保留檔案既有結構與其他區塊，
+        區塊內既有的重複項會跳過。
+        """
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'testcase', 'failcase.txt')
+        if not os.path.isfile(path):
+            return False, 'testcase/failcase.txt 不存在（僅原始碼開發環境可用）'
+        try:
+            with open(path, encoding='utf-8') as f:
+                lines = f.read().split('\n')
+        except OSError as e:
+            return False, str(e)
+
+        def is_header(s: str) -> bool:
+            t = s.strip()
+            return t in ('漏抓', '誤抓') or t.startswith('誤嵌')
+
+        def insert_items(section: str, items: list) -> bool:
+            """在指定區塊（'漏抓'／'誤抓'）末端插入 items；就地修改 lines。"""
+            h = next((i for i, ln in enumerate(lines)
+                      if ln.strip() == section), -1)
+            if h < 0:
+                return False
+            end = len(lines)
+            for i in range(h + 1, len(lines)):
+                if is_header(lines[i]):
+                    end = i
+                    break
+            existing = {ln.strip() for ln in lines[h + 1:end] if ln.strip()}
+            fresh, seen = [], set()
+            for it in items:
+                if it not in existing and it not in seen:
+                    fresh.append(it)
+                    seen.add(it)
+            if not fresh:
+                return True
+            ins = h + 1
+            for i in range(h + 1, end):
+                if lines[i].strip():
+                    ins = i + 1
+            lines[ins:ins] = fresh
+            return True
+
+        # 每次 insert 都重新掃描 header，故處理順序不影響索引正確性
+        if wrong and not insert_items('誤抓', wrong):
+            return False, 'failcase.txt 缺少「誤抓」區塊標題'
+        if miss and not insert_items('漏抓', miss):
+            return False, 'failcase.txt 缺少「漏抓」區塊標題'
+
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines))
+        except OSError as e:
+            return False, str(e)
+        return True, ''
 
     # ════════════════════════════════════════════════════════════
     #  複製對應網址（以投稿指紋查網址讀取紀錄）

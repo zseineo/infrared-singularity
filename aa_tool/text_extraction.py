@@ -1,4 +1,5 @@
 import re
+from functools import lru_cache
 
 from .constants import DEFAULT_BASE_REGEX, DEFAULT_INVALID_REGEX, DEFAULT_SYMBOL_REGEX
 
@@ -335,6 +336,94 @@ def _is_all_particles(text: str) -> bool:
 # 排除 `・`(U+30FB 中黑點)：「そんな・・・」這類三連中黑點是日文省略號變體（等價於 `…`），
 # 屬合法日文標點而非 AA 裝飾，不應被罰分。
 _REPEAT_KATAKANA_RE = re.compile(r'([゠-ヺー-ヿ])\1{2,}')
+
+
+# ── janome 形態素解析訊號（選用依賴，未安裝時整個機制停用、行為不變）──
+# 「這段字串是不是真日文」的語言學訊號：真日文幾乎全由詞典已知詞構成、
+# 且含 ≥2 字實詞；AA 碎片則全是未知詞（彡7ぅこ）或單字元已知詞拼湊（にんり）。
+# 僅在候選分數落於「邊界帶」時查詢（見 _score_candidate 尾端），把 regex 規則
+# 難以裁決的 borderline 案例交給詞典裁決，同時最小化對既有行為的擾動。
+_JANOME_TOKENIZER = None
+_JANOME_FAILED = False
+
+
+def _get_janome():
+    """惰性初始化 janome Tokenizer；未安裝時回傳 None（機制靜默停用）。"""
+    global _JANOME_TOKENIZER, _JANOME_FAILED
+    if _JANOME_TOKENIZER is None and not _JANOME_FAILED:
+        try:
+            from janome.tokenizer import Tokenizer
+            _JANOME_TOKENIZER = Tokenizer()
+        except Exception:
+            _JANOME_FAILED = True
+    return _JANOME_TOKENIZER
+
+
+def _is_cjk_char(ch: str) -> bool:
+    cp = ord(ch)
+    return (0x3041 <= cp <= 0x30FF or 0x4E00 <= cp <= 0x9FFF
+            or ch in '々ー')
+
+
+@lru_cache(maxsize=4096)
+def _janome_signal(core: str) -> int:
+    """以形態素解析判定 core 的「日文性」：+2 強日文／-2 強雜訊／0 不確定。
+
+    規則（見探測紀錄 testcase/corpus/review/）：
+    - 已知詞（reading != '*'）字元數／CJK 總字元數 = known ratio。
+    - 未知的**片假名**詞（相異字 ≥2、長 ≥3）視為已知 — 創作角色名
+      （パーヴァンシー、デルタスターミー）必然不在詞典。
+    - 未知的**同字重複假名**詞（ぇぇぇぇ 拉長）不列入分母（中性）。
+    - ratio ≥0.95 且有 ≥2 字已知實詞 → +2；
+      ratio <0.5 **或**最長已知詞僅 1 字（にんり、杙ん汐 型拼湊）→ -2。
+    含半形片假名時不判定（janome 解不動，交回其他規則）。
+    """
+    tk = _get_janome()
+    if tk is None or len(core) < 2:
+        return 0
+    if any(ch in _HALFWIDTH_KANA_CHARS for ch in core):
+        return 0
+    if len(set(core)) <= 1:
+        return 0  # 同字重複（「しししし」拉長/裝飾）：しし=獅子 等詞典巧合
+                  # 會誤判為強日文，一律中性交回 _REPEAT_* 懲罰處理
+    total = known = 0
+    max_known_len = 0
+    try:
+        tokens = list(tk.tokenize(core))
+    except Exception:
+        return 0
+    for t in tokens:
+        surf = t.surface
+        if t.part_of_speech.split(',')[0] == '記号':
+            continue
+        if not any(_is_cjk_char(c) for c in surf):
+            continue  # 純數字/latin token 不計
+        if t.reading != '*':
+            total += len(surf)
+            known += len(surf)
+            max_known_len = max(max_known_len, len(surf))
+            continue
+        # 未知詞
+        if len(set(surf)) == 1:
+            continue  # 同字重複（拉長ぇぇぇぇ）不列入分母
+        if (len(surf) >= 3
+                and all(0x30A0 <= ord(c) <= 0x30FF for c in surf)):
+            total += len(surf)
+            known += len(surf)  # 片假名專名視為合法內容（不計入 max_known —
+            continue            # 未知片假名 run 不足以單獨證明是日文，見 +2 條件）
+        total += len(surf)
+    if total < 2:
+        return 0
+    ratio = known / total
+    if ratio >= 0.95 and max_known_len >= 2:
+        return 2
+    if ratio < 0.5 or max_known_len <= 1:
+        # 吃音（片假名+讀點+同片假名，「ヤ、ヤバい」）是強對話特徵，
+        # 俚語（ヤバい）常不在詞典，不可因未知詞比例誤殺。
+        if _KATA_STUTTER_RE.search(core):
+            return 0
+        return -2
+    return 0
 
 
 # 成對術語括號（【…】《…》〔…〕『…』）：名牌／標籤／技能名／狀態欄常見型
@@ -804,6 +893,26 @@ def _score_candidate(text: str, line: str, start: int, end: int,
                                 or is_bracket_term or has_num_option
                                 or any(ch in text for ch in '！？')):
         s -= 2
+    # janome 形態素解析仲裁（僅邊界帶，選用依賴，未安裝時無作用）：
+    # - 救援：差 1 分及格的候選（0~1 分）若詞典判定為強日文（j>0）→ +2 救回
+    #   （「ナザリック地下大墳墓」：無平假名 -3 後卡在 1 分，但全為已知詞）。
+    #   僅限「完整空白段」候選（兩側緊鄰空白或行界）— 部分段救援會製造
+    #   「ターン目」「攻撃力に+」這類切半碎片，也會放行「^笊うぅｘ＼」中段雜湊。
+    # - 擊殺：2~6 分的候選若詞典判定為強雜訊（j<0）→ 硬否決壓到 1 分
+    #   （「にんり」假名 run＋助詞 bonus 湊到 6 分，但全是單字元拼湊）。
+    #   含全形 ！？ 的候選不殺 — 擬聲/俚語喊叫（「ぐぬぬ！」）常不在詞典。
+    # 高分（≥7）與深負分不查詢 — 規則信號已足夠明確，也省 tokenize 成本。
+    if 0 <= s <= 1:
+        is_whole_segment = ((start == 0 or line[start - 1] in ' 　')
+                            and (end >= len(line) or line[end] in ' 　'))
+        if is_whole_segment and _janome_signal(core) > 0:
+            s += 2
+    elif (2 <= s <= 6 and len(core) >= 3
+          and not any(ch in text for ch in '！？')):
+        # 長度 ≥3 才殺：「私だ」「君は」這類 2 字真句每個 token 都是單字元，
+        # 與「にんり」型拼湊無法用詞典區分，交回既有規則。
+        if _janome_signal(core) < 0:
+            s = 1
     return s
 
 

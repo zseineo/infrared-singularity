@@ -1179,11 +1179,15 @@ def _extract_experimental_line(
     invalid_regex: re.Pattern,
     symbol_regex: re.Pattern,
     block: str = 'neutral',
+    rejected_sink: list | None = None,
 ) -> list[tuple[str, int, int]]:
     """對單行執行錨點掃描 → 邊界擴展 → 分數過濾。
 
     `block`：本行所屬區塊（'text'/'struct'/'aa'/'neutral'，見 `_classify_blocks`）。
     預設 'neutral' — 單行呼叫（failcase 驗證）無區塊脈絡，行為與舊版一致。
+    `rejected_sink`：非 None 時，把「有錨點、通過 min_len／invalid_regex，
+    但被**分數**或**孤立過濾**剔除」的候選文字 append 進去（方案 H 文件級
+    名牌辭典的落選候選收集用）。預設 None，行為與未收集時完全一致。
 
     Returns: [(text, start, end), ...] 已通過分數過濾，但尚未經過後處理。
     """
@@ -1250,6 +1254,8 @@ def _extract_experimental_line(
             continue
         if _score_candidate(text, line, s, e, symbol_regex,
                             block) < _SCORE_THRESHOLD:
+            if rejected_sink is not None:
+                rejected_sink.append(text)
             continue
         # 短純片假名喊叫閘：恰好「2 片假名 + 標點」的最短型（如「クソ！」）
         # 僅在括號區間內保留 — 括號外的同型碎片多為 AA 圖裝飾。
@@ -1268,11 +1274,63 @@ def _extract_experimental_line(
     # 本就可獨立成立，「同行長伴隨」的信賴指標只在 AA 混雜脈絡下才需要。
     has_long_companion = any(len(t) >= 5 for t, _, _ in out)
     if not has_long_companion and block not in ('text', 'struct'):
-        out = [(t, s, e) for t, s, e in out
-               if len(t) >= 4
-               or _is_strong_short_candidate(t)
-               or _is_right_edge_dialogue(line, s, e)
-               or _is_dialogue_box_bounded(line, s, e)]
+        kept = []
+        for t, s, e in out:
+            if (len(t) >= 4
+                    or _is_strong_short_candidate(t)
+                    or _is_right_edge_dialogue(line, s, e)
+                    or _is_dialogue_box_bounded(line, s, e)):
+                kept.append((t, s, e))
+            elif rejected_sink is not None:
+                rejected_sink.append(t)
+        out = kept
+    return out
+
+
+# 方案 H：文件級名牌辭典的救援候選字元集 — 純假名／漢字（含 々），
+# 不含任何標點、半形片假名、拉丁與疊字標記（ゝゞヽヾ 另行排除）。
+# AA 裝飾串（「ﾆﾆﾆ/」「<丶、」）全數擋在字元集外。
+_RESCUE_TEXT_RE = re.compile(r'[ぁ-ゖ゠-ヿ一-鿿々]{3,}')
+
+
+def _collect_document_rescues(
+    lines: list[str],
+    blocks: list[str],
+    invalid_regex: re.Pattern,
+    symbol_regex: re.Pattern,
+) -> dict[str, list[int]]:
+    """方案 H：文件級名牌辭典（`extract_text` 與 `analyze_extraction` 共用）。
+
+    第一遍對全文跑候選管線，收集「倖存文字」與「落選候選」；
+    落選字串同時滿足下列全部條件者入選救援辭典：
+    1. 純假名漢字、長度 ≥3、相異字元 ≥2、無疊字標記（`_RESCUE_TEXT_RE`）；
+    2. 於 **≥2 個不同行**落選 — AA 圖旁名牌（「バラン」×26、「カルラ」）
+       逐字重複出現，AA 裝飾極少以「純假名漢字＋多行逐字相同」重複；
+    3. 該字串是某個**已提取文字**的子字串 — 名字出現在正文對話／狀態表中，
+       佐證其為真實內容（人類判讀名牌的文件級訊號）。
+
+    Returns: {text: [line_num, ...]}（僅含入選字串的落選行號，升冪）。
+    呼叫端限制：僅在 `len(lines) >= 5` 時呼叫（單行相容防線與區塊分類一致）。
+    """
+    survivor_texts: set[str] = set()
+    rejected: dict[str, set[int]] = {}
+    for line_num, line in enumerate(lines, 1):
+        if _POSTER_LINE_RE.search(line):
+            continue
+        proc_line = _DICE_NOTATION_RE.sub(r'\1：\2', line)
+        sink: list[str] = []
+        for t, _s, _e in _extract_experimental_line(
+                proc_line, invalid_regex, symbol_regex,
+                block=blocks[line_num - 1], rejected_sink=sink):
+            survivor_texts.add(t)
+        for t in sink:
+            if (_RESCUE_TEXT_RE.fullmatch(t) and len(set(t)) >= 2
+                    and not any(c in 'ゝゞヽヾ' for c in t)):
+                rejected.setdefault(t, set()).add(line_num)
+    out: dict[str, list[int]] = {}
+    for t, lns in rejected.items():
+        if len(lns) >= 2 and any(t in s for s in survivor_texts):
+            out[t] = sorted(lns)
     return out
 
 
@@ -1422,10 +1480,18 @@ def extract_text(
             author_tripcode = max(runs, key=len)
 
     use_experimental = experimental and not korean_mode
-    # 區塊分類前置掃描（僅實驗管線使用）：整份文本逐行分類為 text/aa/neutral，
-    # 提供垂直（跨行）脈絡給評分機制。輸入 <5 行時全為 neutral（單行相容）。
+    # 區塊分類前置掃描（僅實驗管線使用）：整份文本逐行分類為
+    # text/struct/aa/neutral，提供垂直（跨行）脈絡給評分機制。
+    # 輸入 <5 行時全為 neutral（單行相容）。
     blocks = (_classify_blocks(lines, symbol_regex)
               if use_experimental else [])
+    # 方案 H：文件級名牌辭典（兩遍掃描）。第一遍收集全文落選候選與已提取
+    # 文字，建救援辭典（見 `_collect_document_rescues`）；主迴圈後第二遍
+    # 把入選字串的落選出現補回。<5 行時停用 — 與區塊分類同一道單行相容防線。
+    rescues: dict[str, list[int]] = {}
+    if use_experimental and len(lines) >= 5:
+        rescues = _collect_document_rescues(
+            lines, blocks, invalid_regex, symbol_regex)
 
     for line_num, line in enumerate(lines, 1):
         if line_num == title_line_num:
@@ -1514,6 +1580,33 @@ def extract_text(
                 if text:
                     extracted.append((text, line_num))
 
+    # 方案 H 第二遍：救援辭典入選字串的落選出現補回。走與主迴圈相同的
+    # 後段管線（postprocess／作者過濾／自訂濾網）；救援字串為純假名漢字，
+    # 骰子還原與括號補完必為 no-op，不重複套用。同 (text, line) 已提取
+    # 者不重複補；`format_extraction_output` 的穩定排序會把補回項歸位。
+    if rescues:
+        seen = set(extracted)
+        for text, line_nums in sorted(rescues.items()):
+            for ln in line_nums:
+                if ln == title_line_num:
+                    continue
+                out_t = _postprocess_text(text, korean_mode=False,
+                                          experimental=True)
+                if len(out_t) < 3:
+                    continue
+                if author_target:
+                    stripped = out_t.strip()
+                    if stripped == author_target or (
+                            author_tripcode
+                            and stripped == author_tripcode):
+                        continue
+                out_t = _strip_speaker_tag(out_t)
+                if any(reg.search(out_t) for reg in custom_regexes):
+                    continue
+                if out_t and (out_t, ln) not in seen:
+                    extracted.append((out_t, ln))
+                    seen.add((out_t, ln))
+
     return extracted
 
 
@@ -1556,6 +1649,11 @@ def analyze_extraction(
     lines = text.split('\n')
     blocks = (_classify_blocks(lines, symbol_regex)
               if use_experimental else [])
+    # 方案 H 鏡射：與 extract_text 相同的救援辭典（<5 行時停用）
+    rescue_map: dict[str, list[int]] = {}
+    if use_experimental and len(lines) >= 5:
+        rescue_map = _collect_document_rescues(
+            lines, blocks, invalid_regex, symbol_regex)
     if use_experimental:
         report.append("【實驗性日文提取演算法啟用】錨點掃描＋分數制過濾")
         report.append("")
@@ -1568,7 +1666,8 @@ def analyze_extraction(
         report.append(f"原始字串: '{line}'")
         if use_experimental:
             report.append(f"[區塊分類] {block}"
-                          "（text=文字區塊 +2／aa=AA 區塊 -2／neutral=中性）")
+                          "（text=文字區塊 +2／struct=結構化區塊 +2 且豁免"
+                          " janome 擊殺／aa=AA 區塊 -2／neutral=中性）")
 
         if _POSTER_LINE_RE.search(line):
             report.append("  -> ❌ 整行剔除：判定為發文者行（含 ID:xxxxxx trip code）。")
@@ -1720,6 +1819,15 @@ def analyze_extraction(
                     continue
                 if text:
                     report.append(f"    -> ✅ 成功提取最終文字: '{text}'")
+            # 步驟 5：方案 H 文件級名牌救援（與 extract_text 的第二遍一致）
+            rescue_hits = [(t, lns) for t, lns in sorted(rescue_map.items())
+                           if line_idx in lns]
+            if rescue_hits:
+                report.append("\n[步驟 5] 文件級名牌救援（方案 H）：")
+                for t, lns in rescue_hits:
+                    report.append(
+                        f"  - '{t}'：同字串於全文 {len(lns)} 行落選、"
+                        "且見於正文提取內容 → ✅ 救回")
             report.append("\n" + "=" * 40 + "\n")
             continue
 

@@ -3,6 +3,11 @@
 以版號為單位彙整每次更新的摘要。最新版本置於最上方。
 逐筆技術細節請見 git commit 歷史；本檔僅記人類可讀的更新重點。
 
+## v1.92
+
+- 實驗性提取演算法：`_score_candidate` 重構為**規則權重表**（`_SCORE_WEIGHTS`＋`_SCORE_THRESHOLD`，janome 邊界帶隨門檻連動）——行為零變化（語料指標與 base.txt 快照與 v1.91 完全一致），權重集中管理、可供離線擬合。
+- 新增 `testcase/corpus/fit_weights.py`（方案 D：語料擬合權重的 logistic regression 工具，含 LOO 交叉驗證與真實管線試套）。**擬合實驗結論：不採用**——候選層級互有勝負，但量化權重套進全管線後 F1=0.955 低於手調 0.963 且快照 FAIL；維持手調權重，詳見 testcase/corpus/README.md。
+
 ## v1.91
 
 - 實驗性提取演算法：新增 **janome 形態素解析仲裁**（選用依賴 `janome>=0.5`，`pip install janome`；未安裝時該訊號自動停用、其餘行為不變）。只在候選分數的「邊界帶」查詢詞典訊號：

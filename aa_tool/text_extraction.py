@@ -713,64 +713,112 @@ def _class_transitions(text: str) -> int:
     return n
 
 
+# ── 方案 D：規則權重表 ──────────────────────────────────────────
+# `_score_candidate` 的每條規則是一個「特徵」；權重集中於此表（現值＝人工調校版，
+# testcase/corpus/fit_weights.py 可用語料離線擬合後改寫此表）。分數門檻與 janome
+# 邊界帶皆以 `_SCORE_THRESHOLD` 為基準（見各呼叫端）。
+_SCORE_THRESHOLD = 2
+_SCORE_WEIGHTS = {
+    'kana_run': 3,          # ≥2 連續平/片假名
+    'particle': 2,          # 含 ≥1 助詞
+    'multi_particle': 2,    # 助詞 count ≥2 且非整段助詞
+    'len5': 1,              # 長度 ≥5
+    'okurigana': 3,         # 漢字+平假名+漢字
+    'kanji_hira': 2,        # 漢字+平假名（與 okurigana 互斥）
+    'num_option': 3,        # 數字選項/範圍
+    'fw_exclaim': 2,        # 全形 ！？（與下兩者互斥）
+    'hw_exclaim': 1,        # 半形 !?
+    'jp_punct': 1,          # 。、…
+    'right_edge': 2,        # 行尾對話
+    'box_bounded': 2,       # 對話框內
+    'name_tag': 2,          # 名牌前綴
+    'bracket_term': 2,      # 成對術語括號
+    'density_no_strong': -4,   # 局部密度 >0.4 且非 strong_jp
+    'density_strong': -1,      # 局部密度 >0.4 但 strong_jp
+    'self_noise': -5,          # 自身噪聲 >0.4（非文字區塊）
+    'class_trans': -2,         # 類別跳轉率 ≥0.5
+    'repeat_kata': -3,         # 連續同片假名
+    'repeat_small_hira': -3,   # 連續同小字假名
+    'repeat_hira': -3,         # 連續同平假名
+    'latin_prefix': -6,        # AA latin 前綴
+    'latin_suffix': -3,        # AA latin 尾綴
+    'small_kata_prefix': -3,   # 小字片假名前綴
+    'punct_prefix': -4,        # 雜訊標點前綴
+    'hira_kata_hira': -3,      # 平假名夾片假名
+    'kata_hira_kata': -3,      # 片假名夾平假名
+    'no_hira': -3,             # len≥4 無平假名非 strong（非文字區塊）
+    'block_text': 2,           # 文字區塊
+    'block_aa': -2,            # AA 區塊（無平假名、無豁免）
+}
+# fit_weights.py 收集特徵用：設為 callable(text, fired_features: dict) 時，
+# 每次評分都會回呼一次（在 janome 仲裁之前）。正常執行時為 None。
+_FEATURE_HOOK = None
+
+
 def _score_candidate(text: str, line: str, start: int, end: int,
                      symbol_regex: re.Pattern,
                      block: str = 'neutral') -> int:
+    fired: dict[str, int] = {}
+
+    def w(name: str) -> int:
+        fired[name] = 1
+        return _SCORE_WEIGHTS[name]
+
     s = 0
     has_run = bool(_HIRAGANA_RUN_RE.search(text)
                    or _KATAKANA_RUN_RE.search(text))
     if has_run:
-        s += 3
+        s += w('kana_run')
     particle_count = sum(1 for ch in text if ch in _PARTICLES)
     distinct_particles = len({ch for ch in text if ch in _PARTICLES})
     all_particles = _is_all_particles(text)
     if particle_count >= 1:
-        s += 2
+        s += w('particle')
     if particle_count >= 2 and not all_particles:
-        s += 2  # 多重助詞 = 強烈日文對話信號（容忍局部 AA 噪聲）；
-                # 整段都是助詞、無實詞（如 AA 裡的「にへ」）不算
+        s += w('multi_particle')  # 多重助詞 = 強烈日文對話信號（容忍局部 AA 噪聲）；
+                                  # 整段都是助詞、無實詞（如 AA 裡的「にへ」）不算
     if len(text) >= 5:
-        s += 1
+        s += w('len5')
     # 送り仮名 pattern（漢字+1平假名+漢字）— 動詞活用形 + 後接漢字的強日文信號，
     # 涵蓋「頑張れ御貴族様」「歩いて行く」這類 kanji-heavy、無連續假名、無格助詞的情況。
     # 給 +3 較高分數補償「不再列入 strong_jp」的影響（見 `strong_jp` 註解）。
     if _OKURIGANA_RE.search(text):
-        s += 3
+        s += w('okurigana')
     # 漢字+平假名 pattern — 動詞活用 / 形容詞活用 / 名詞+助詞 的強日文信號。
     # 涵蓋「奪う」「私だ」「行く」這類短而標準的日文。AA 圖極少湊出此 pattern。
     elif _KANJI_HIRA_RE.search(text):
-        s += 2
+        s += w('kanji_hira')
     # 數字選項 pattern — 安価/投票格式（「１０：ご主人様」「１～３：ママぁ」）。
     # 使用者觀察：選項後通常不接 AA 圖，是強對話信號，給較高 bonus。
     has_num_option = bool(_NUMBER_OPTION_RE.search(text)
                           or _NUMBER_RANGE_RE.match(text))
     if has_num_option:
-        s += 3
+        s += w('num_option')
     # 句末標點 bonus。全形 `！？` 是強口語/對話信號（+2）；半形 `!?` 在 AA 圖
     # 中常被借作裝飾，信號較弱（+1）；`。、…` 一般日文標點（+1）。
     if any(ch in text for ch in '！？'):
-        s += 2
+        s += w('fw_exclaim')
     elif any(ch in text for ch in '!?'):
-        s += 1
+        s += w('hw_exclaim')
     elif any(ch in text for ch in '。、…'):
-        s += 1
+        s += w('jp_punct')
     # 行尾對話 bonus + 多重懲罰豁免：典型 AA 排版（左圖右文），右側候選
     # 且左側有寬空白間隔時，幾乎肯定是對話。免疫局部密度／類別跳轉／
     # 連續同片假名（涵蓋「ハハハ」笑聲）／連續小字假名等懲罰。
     is_right_edge = _is_right_edge_dialogue(line, start, end)
     if is_right_edge:
-        s += 2
+        s += w('right_edge')
     # 對話框內 bonus + 密度豁免：候選兩側被 ｜| / ＜＞ / │ 包夾時。
     # 對話框內的合法日文（如「│一旦止め―――│」）因 │ 邊框會把局部 AA 密度
     # 拉高被誤殺；偵測到對話框邊界時，把它視為強日文信號豁免密度懲罰。
     is_box_bounded = _is_dialogue_box_bounded(line, start, end)
     if is_box_bounded:
-        s += 2
+        s += w('box_bounded')
     # 名牌前綴 bonus + 密度豁免：候選前方為「【說話者】───」名牌時，
     # 名牌後的對話常被破折號 `───`（屬 symbol_regex）拉高局部密度而誤殺。
     has_name_tag = bool(_NAME_TAG_PREFIX_RE.search(line[:start]))
     if has_name_tag:
-        s += 2
+        s += w('name_tag')
     # 成對術語括號 bonus + 密度/無平假名豁免：候選整體是「【…】《…》〔…〕『…』」
     # 成對括號術語（名牌/標籤/技能名，如「【質問】」「【フリーナ】」「《頭砕》」）。
     # AA 圖幾乎不會湊出「成對全形術語括號＋內含 CJK 實字」，視為強日文信號 —
@@ -783,7 +831,7 @@ def _score_candidate(text: str, line: str, start: int, end: int,
         0x3041 <= ord(c) <= 0x30FF or 0x4E00 <= ord(c) <= 0x9FFF or c == '々'
         for c in core[1:-1])
     if is_bracket_term:
-        s += 2
+        s += w('bracket_term')
     # AA 噪聲懲罰：在「強日文信號」缺席時才嚴罰。
     # 注意：`_OKURIGANA_RE` 與 `_KANJI_HIRA_RE` 雖然有分數 bonus，但不列入
     # strong_jp — AA 圖中「kanji+hira」「kanji-hira-kanji」三字偶然碰撞時
@@ -811,9 +859,9 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     # 從原本 0.6 降到 0.4，否則 AA padding 大量空白會把比例壓低逃避懲罰。
     density = _local_aa_density(line, start, end, symbol_regex, 8)
     if density > 0.4 and not strong_jp:
-        s -= 4
+        s += w('density_no_strong')
     elif density > 0.4:
-        s -= 1
+        s += w('density_strong')
     # 候選「自身」AA 噪聲密度懲罰：候選文字本身含過多 AA 噪聲字元（symbol_regex
     # 命中 / 半形片假名 / AA 標點）時，即使有 has_run 等強信號也幾乎肯定是 AA
     # 碎片（如「丈ｒうっ.o.,.」這類錨點假名混入點線雜訊）。此懲罰不受 strong_jp
@@ -823,7 +871,7 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     # 會把噪聲比拉過 0.4，但候選本體是乾淨的日文。
     if (len(text) >= 4 and block != 'text'
             and aa_noise_ratio(core, symbol_regex) > 0.4):
-        s -= 5
+        s += w('self_noise')
     # 註：曾評估「整行 AA 比例懲罰」，但實測無效 — AA 圖常用 content-class 字元
     # （latin `i`/`l`、漢字 `彡`/`从`）當裝飾「柱子」，會把整行比例稀釋（如
     # `|i:i:i|` 中的 `i` 算 content），導致純 AA 行的比例反而比合法短句行還低。
@@ -835,38 +883,38 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     # -漢字-平假名-閉括號，類別頻繁跳轉但合法）被誤殺。
     if (len(text) >= 6 and _class_transitions(text) / len(text) >= 0.5
             and not strong_jp):
-        s -= 2
+        s += w('class_trans')
     # 連續相同片假名懲罰：AA 圖邊框/裝飾特徵；行尾對話豁免（涵蓋「ハハハ」笑聲）
     if _REPEAT_KATAKANA_RE.search(text) and not is_right_edge:
-        s -= 3
+        s += w('repeat_kata')
     # 連續相同小字假名懲罰：「ぃぃぃ」這類 AA 裝飾
     if _REPEAT_SMALL_HIRA_RE.search(text) and not is_right_edge:
-        s -= 3
+        s += w('repeat_small_hira')
     # 連續相同平假名懲罰：「んんんんん」這類 AA 裝飾；行尾豁免（涵蓋「ふふふ」笑聲）
     if _REPEAT_HIRA_RE.search(text) and not is_right_edge:
-        s -= 3
+        s += w('repeat_hira')
     # AA latin 前綴懲罰：「jニ二スミー」「j爻そ」「jI斗ぅ示」這類片段。真實日文
     # 不會以單個 latin 字母開始 CJK 詞，是強 AA 信號；給 -6 以壓過「has_run +3」「
     # 多重助詞 +2」等加成（如「rへへハ」count=2 へへ 取得 +2 bonus，但同助詞重複
     # 非真實對話信號）。base 中唯一命中此規則的「Anリュウシ ニヨッテ…」走
     # `_find_kata_sentence` 旁路、不經評分，故不受影響。
     if _AA_LATIN_PREFIX_RE.match(text):
-        s -= 6
+        s += w('latin_prefix')
     # AA latin 尾綴懲罰：「行灯な心マi」這類片段
     if _AA_LATIN_SUFFIX_RE.search(text):
-        s -= 3
+        s += w('latin_suffix')
     # AA 小字片假名前綴懲罰：「ィｆ芥ぅ」這類片段
     if _AA_SMALL_KATA_PREFIX_RE.match(text):
-        s -= 3
+        s += w('small_kata_prefix')
     # AA 雜訊標點前綴懲罰：「-へ!.」「,..へ！-」「.込り!」這類片段
     if _AA_PUNCT_PREFIX_RE.match(text):
-        s -= 4
+        s += w('punct_prefix')
     # 平假名夾真片假名懲罰：「とつこンっ」的「こンっ」這類片假名單字夾在平假名間。
     if _HIRA_KATA_HIRA_RE.search(text):
-        s -= 3
+        s += w('hira_kata_hira')
     # 片假名夾真平假名懲罰（kata-hira-kata，如「モもト」）— 對稱的 AA 碎片特徵
     if _KATA_HIRA_KATA_RE.search(text):
-        s -= 3
+        s += w('kata_hira_kata')
     # 無平假名候選（純片假名＋裝飾，無平假名）懲罰：「ニニー―――ニ」「ニニァ-」
     # 這類片段。真實日文 ≥4 char 內容幾乎都含平假名（即使片假名為主的詞也常接
     # 助詞 の/だ 等）；right_edge / box_bounded / spaced-out 等強信號可豁免（涵蓋
@@ -876,7 +924,7 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     # 在文章／狀態表行中是常態而非 AA 碎片信號。
     if (len(text) >= 4 and not any_hira and not strong_jp
             and block != 'text'):
-        s -= 3
+        s += w('no_hira')
     # 區塊脈絡（見 `_classify_blocks`）：
     # - 文字區塊 +2：段落／狀態表／留言區的候選幾乎必為真文字，補償
     #   「無平假名 -3」對純漢字/片假名名詞（「常時効果：…」「アリス」）的誤殺。
@@ -887,12 +935,15 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     #   豁免：右端對話／名牌／成對術語括號／全形 ！？（喊叫，AA 借用的是半形
     #   !?）／骰子・選項格式（「【1D100:13】」無假名但是合法內容）。
     if block == 'text':
-        s += 2
+        s += w('block_text')
     elif block == 'aa' and not (any_hira
                                 or is_right_edge or has_name_tag
                                 or is_bracket_term or has_num_option
                                 or any(ch in text for ch in '！？')):
-        s -= 2
+        s += w('block_aa')
+    # 特徵收集回呼（fit_weights.py 離線擬合用）— 在 janome 仲裁前回報
+    if _FEATURE_HOOK is not None:
+        _FEATURE_HOOK(text, fired)
     # janome 形態素解析仲裁（僅邊界帶，選用依賴，未安裝時無作用）：
     # - 救援：差 1 分及格的候選（0~1 分）若詞典判定為強日文（j>0）→ +2 救回
     #   （「ナザリック地下大墳墓」：無平假名 -3 後卡在 1 分，但全為已知詞）。
@@ -902,17 +953,18 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     #   （「にんり」假名 run＋助詞 bonus 湊到 6 分，但全是單字元拼湊）。
     #   含全形 ！？ 的候選不殺 — 擬聲/俚語喊叫（「ぐぬぬ！」）常不在詞典。
     # 高分（≥7）與深負分不查詢 — 規則信號已足夠明確，也省 tokenize 成本。
-    if 0 <= s <= 1:
+    t = _SCORE_THRESHOLD
+    if t - 2 <= s <= t - 1:
         is_whole_segment = ((start == 0 or line[start - 1] in ' 　')
                             and (end >= len(line) or line[end] in ' 　'))
         if is_whole_segment and _janome_signal(core) > 0:
             s += 2
-    elif (2 <= s <= 6 and len(core) >= 3
+    elif (t <= s <= t + 4 and len(core) >= 3
           and not any(ch in text for ch in '！？')):
         # 長度 ≥3 才殺：「私だ」「君は」這類 2 字真句每個 token 都是單字元，
         # 與「にんり」型拼湊無法用詞典區分，交回既有規則。
         if _janome_signal(core) < 0:
-            s = 1
+            s = t - 1
     return s
 
 
@@ -1142,7 +1194,8 @@ def _extract_experimental_line(
             continue
         if invalid_regex.match(text):
             continue
-        if _score_candidate(text, line, s, e, symbol_regex, block) < 2:
+        if _score_candidate(text, line, s, e, symbol_regex,
+                            block) < _SCORE_THRESHOLD:
             continue
         # 短純片假名喊叫閘：恰好「2 片假名 + 標點」的最短型（如「クソ！」）
         # 僅在括號區間內保留 — 括號外的同型碎片多為 AA 圖裝飾。
@@ -1547,8 +1600,9 @@ def analyze_extraction(
                 report.append(
                     f"    [分數] 局部AA密度={density:.2f}, "
                     f"類別跳轉率={trans_ratio:.2f}, score={score}")
-                if score < 2:
-                    report.append("    -> ❌ 剔除：score < 2。")
+                if score < _SCORE_THRESHOLD:
+                    report.append(
+                        f"    -> ❌ 剔除：score < {_SCORE_THRESHOLD}。")
                     continue
                 if (_SHORT_KATA_UTT_RE.match(t)
                         and not _in_bracket_region(proc_line, s, e)):

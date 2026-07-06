@@ -337,8 +337,109 @@ def _is_all_particles(text: str) -> bool:
 _REPEAT_KATAKANA_RE = re.compile(r'([゠-ヺー-ヿ])\1{2,}')
 
 
-def _find_anchors(line: str) -> list[tuple[int, int]]:
-    """掃描行內所有錨點 [start, end) 區間，依起點排序。"""
+# 成對術語括號（【…】《…》〔…〕『…』）：名牌／標籤／技能名／狀態欄常見型
+# （如「【質問】」「【フリーナ】」「《頭砕》」「〔砲剣〕」）。內容不可含空白或
+# 巢狀括號；「」（） 不納入 — AA 圖常借 「（ 作裝飾筆畫，成對誤命中率高。
+_BRACKET_TERM_RE = re.compile(
+    r'[【《〔『][^\s　【】《》〔〕『』]{1,12}[】》〕』]')
+# 連續 ≥3 漢字：純漢字名詞（「主人公」「難易度」「王国元老院」）。只在
+# 「文字區塊」內作為錨點 — AA 圖大量借用裝飾漢字（淡上丕旦丑…），
+# 無區塊脈絡時此錨點假陽性過高。
+_KANJI_RUN3_RE = re.compile(r'[一-鿿々]{3,}')
+# 連續 ≥4 個相同非空白字元：AA 牆／表格框線／量表（ニニニニ、工工工、■■■■）
+# 的行級特徵。行級分類用；與候選級的 _REPEAT_*_RE（≥3）門檻不同 — 行級容忍
+# 「あああ」「………」等 3 連合法重複。
+_SAME_CHAR_RUN4_RE = re.compile(r'(\S)\1{3,}')
+# 半形片假名（含濁點半濁點）run ≥3 — 文字區塊限定錨點用
+_HALFWIDTH_KANA_RUN3_RE = re.compile(r'[ｦ-ﾟ]{3,}')
+# 行級「文字行」訊號：連續 ≥3 個真平假名（AA 圖散落的 して/いう/にへ 至多
+# 2 連；真對話/說明文幾乎必有 3 連，如「でした」「ということ」）。
+# 同字重複（んんん）另以 distinct ≥2 過濾。
+_LINE_HIRA_RUN3_RE = re.compile(r'[ぁ-ゖ]{3,}')
+
+
+def _line_block_signal(line: str, symbol_regex: re.Pattern) -> str:
+    """單行的區塊訊號：'T'（文字行）/ 'A'（AA 行）/ '-'（不確定）。
+
+    - 'T'：含「連續 ≥3 個真平假名、且 ≥2 相異」的 run，**且**行級噪聲比 <0.3。
+      AA 圖的散落平假名（して/いう/ぃじ）至多 2 連、裝飾重複（んんん）同字 —
+      都不命中；對話與說明文幾乎必有此 run。噪聲比條件排除「左 AA 圖＋右對話」
+      的混合行 — 那種行的對話靠右端/對話框機制保護即可，整行當文字行反而會
+      讓左側 AA 牆碎片（ニニ…）搭上文字區塊加分。
+    - 'A'：平假名 ≤1、實體字元 ≥6，且「AA 噪聲字元 ∪ 同字 4 連 run」佔比 ≥ 0.5。
+      同字 run 涵蓋 symbol_regex 未收錄的 AA 牆用字（全形 ニ、二、工、■…）。
+    - '-'：字太少或訊號不明，交由 `_classify_blocks` 的鄰行填補決定。
+    """
+    non_space = 0
+    hira = 0
+    marked = [False] * len(line)
+    for i, ch in enumerate(line):
+        if ch.isspace():
+            continue
+        non_space += 1
+        if 0x3041 <= ord(ch) <= 0x3096:  # 真平假名（排除 ゝゞ 疊字標記）
+            hira += 1
+        if (ch in _HALFWIDTH_KANA_CHARS or ch in _AA_PUNCT_CHARS
+                or symbol_regex.match(ch)):
+            marked[i] = True
+    for m in _SAME_CHAR_RUN4_RE.finditer(line):
+        for i in range(m.start(), m.end()):
+            marked[i] = True
+    noise = sum(1 for i, ch in enumerate(line)
+                if marked[i] and not ch.isspace())
+    ratio = noise / non_space if non_space else 0.0
+    if (non_space and ratio < 0.3
+            and any(len(set(m.group(0))) >= 2
+                    for m in _LINE_HIRA_RUN3_RE.finditer(line))):
+        return 'T'
+    # 漢字密集的說明文行（如 RPG 技能描述「攻撃力に+(SL/2)を加算した[斬]攻撃
+    # を行う。」）常無 3 連平假名 run，但有多個散落平假名且幾乎零 AA 噪聲。
+    # 額外要求整行無半形片假名 — 低噪聲但含 ﾆﾆ 等半形片假名的行仍是 AA。
+    if (hira >= 4 and non_space >= 8 and ratio < 0.15
+            and not any(ch in _HALFWIDTH_KANA_CHARS for ch in line)):
+        return 'T'
+    if hira <= 1 and non_space >= 6 and noise / non_space >= 0.5:
+        return 'A'
+    return '-'
+
+
+def _classify_blocks(lines: list[str], symbol_regex: re.Pattern) -> list[str]:
+    """全文前置掃描：把每行分類為 'text' / 'aa' / 'neutral' 區塊。
+
+    步驟：逐行算 `_line_block_signal` → 夾在**同標籤**行之間、長度 ≤2 的
+    '-' 縫隙以該標籤填補（run-length 平滑）→ 'T'→'text'、'A'→'aa'、其餘 neutral。
+
+    輸入 <5 行時一律回傳 neutral：單行／小片段（如 failcase 驗證、
+    extraction-testcase-maintenance skill 的逐行呼叫）無垂直脈絡可言，
+    必須與無區塊機制時的行為完全一致。
+    """
+    n = len(lines)
+    if n < 5:
+        return ['neutral'] * n
+    raw = [_line_block_signal(line, symbol_regex) for line in lines]
+    # 縫隙填補：'-' run（長度 ≤2）兩側緊鄰的非 '-' 標籤相同 → 填為該標籤
+    i = 0
+    while i < n:
+        if raw[i] != '-':
+            i += 1
+            continue
+        j = i
+        while j < n and raw[j] == '-':
+            j += 1
+        if (j - i) <= 2 and i > 0 and j < n and raw[i - 1] == raw[j]:
+            for k in range(i, j):
+                raw[k] = raw[i - 1]
+        i = j
+    mapping = {'T': 'text', 'A': 'aa', '-': 'neutral'}
+    return [mapping[r] for r in raw]
+
+
+def _find_anchors(line: str, in_text_block: bool = False) -> list[tuple[int, int]]:
+    """掃描行內所有錨點 [start, end) 區間，依起點排序。
+
+    `in_text_block=True`（行位於文字區塊）時額外啟用「連續 ≥3 漢字」錨點，
+    捕捉純漢字名詞（狀態表欄位、名牌）；AA 區塊／中性行不啟用（假陽性高）。
+    """
     anchors: list[tuple[int, int]] = []
     for m in _HIRAGANA_RUN_RE.finditer(line):
         anchors.append((m.start(), m.end()))
@@ -362,6 +463,20 @@ def _find_anchors(line: str) -> list[tuple[int, int]]:
         anchors.append((m.start(), m.end()))
     for m in _KATA_UTT_RE.finditer(line):
         anchors.append((m.start(), m.end()))
+    # 成對術語括號錨點（不限區塊）：內容需含 CJK 實字（漢字／假名）才算，
+    # 排除「【1D100:38】」這類純骰子（另有 _DICE 處理）以外的純英數雜訊。
+    for m in _BRACKET_TERM_RE.finditer(line):
+        inner = m.group(0)[1:-1]
+        if any(0x3041 <= ord(c) <= 0x30FF or 0x4E00 <= ord(c) <= 0x9FFF
+               or c == '々' for c in inner):
+            anchors.append((m.start(), m.end()))
+    if in_text_block:
+        for m in _KANJI_RUN3_RE.finditer(line):
+            anchors.append((m.start(), m.end()))
+        # 半形片假名 run ≥3：文字行中的半形片假名詞（「ﾓﾝｽﾀｰ」「ｴﾝｼｪﾝﾄ」）。
+        # AA 區塊／中性行不啟用 — 半形片假名正是 AA 最大宗噪聲。
+        for m in _HALFWIDTH_KANA_RUN3_RE.finditer(line):
+            anchors.append((m.start(), m.end()))
     anchors.sort()
     return anchors
 
@@ -375,15 +490,34 @@ def _is_valid_char(ch: str) -> bool:
     return bool(_VALID_CHAR_RE.match(ch))
 
 
-def _expand_boundary(line: str, start: int, end: int) -> tuple[int, int]:
-    """從錨點 [start, end) 向兩側擴張到非 valid char / 連續空白邊界。"""
+# 文字區塊限定的擴展字元：`/()[]<>=` 等在 AA 圖中是線條筆畫（故不在
+# `_VALID_CHAR_RE`），但在文章／狀態表行中是內容的一部分（「TP2<腕>：白兵・
+# 砲剣/攻撃力に+((SL/2)+7)を加算した[斬]攻撃」「初手､10まんボルト」「◆参加
+# メンバー」「お見事───」）。只在行屬於文字區塊時放行，避免把句子切碎。
+# 不含 `│|｜┃`（對話框／表格欄邊界，跨欄合併會把不同欄位黏在一起）。
+_TEXT_BLOCK_EXTRA_CHARS = set('/()[]<>＜＞=＝｡､・◆◇■□─━')
+
+
+def _expand_boundary(line: str, start: int, end: int,
+                     block: str = 'neutral') -> tuple[int, int]:
+    """從錨點 [start, end) 向兩側擴張到非 valid char / 連續空白邊界。
+
+    `block=='text'` 時額外放行 `_TEXT_BLOCK_EXTRA_CHARS` 與半形片假名 —
+    文字行中的半形片假名是內容（「ﾓﾝｽﾀｰ」「ｹﾞﾌﾝｹﾞﾌﾝ」）而非 AA 噪聲。
+    """
+    def ok(ch: str) -> bool:
+        if block == 'text' and (ch in _TEXT_BLOCK_EXTRA_CHARS
+                                or ch in _HALFWIDTH_KANA_CHARS):
+            return True
+        return _is_valid_char(ch)
+
     # 向左
     while start > 0:
         ch = line[start - 1]
         if ch in (' ', '　'):
             # 只要遇到空白就停（連續空白 / AA padding 邊界）
             break
-        if not _is_valid_char(ch):
+        if not ok(ch):
             break
         start -= 1
     # 向右
@@ -391,7 +525,7 @@ def _expand_boundary(line: str, start: int, end: int) -> tuple[int, int]:
         ch = line[end]
         if ch in (' ', '　'):
             break
-        if not _is_valid_char(ch):
+        if not ok(ch):
             break
         end += 1
     return start, end
@@ -491,7 +625,8 @@ def _class_transitions(text: str) -> int:
 
 
 def _score_candidate(text: str, line: str, start: int, end: int,
-                     symbol_regex: re.Pattern) -> int:
+                     symbol_regex: re.Pattern,
+                     block: str = 'neutral') -> int:
     s = 0
     has_run = bool(_HIRAGANA_RUN_RE.search(text)
                    or _KATAKANA_RUN_RE.search(text))
@@ -547,6 +682,19 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     has_name_tag = bool(_NAME_TAG_PREFIX_RE.search(line[:start]))
     if has_name_tag:
         s += 2
+    # 成對術語括號 bonus + 密度/無平假名豁免：候選整體是「【…】《…》〔…〕『…』」
+    # 成對括號術語（名牌/標籤/技能名，如「【質問】」「【フリーナ】」「《頭砕》」）。
+    # AA 圖幾乎不會湊出「成對全形術語括號＋內含 CJK 實字」，視為強日文信號 —
+    # 否則純漢字/純片假名術語會被「無平假名 -3」誤殺（「【２年後】」「【戦闘準備】」）。
+    # 首尾的半形點點串（`..【２年後】`「大将赤犬が.....」）是本站台常見的
+    # 裝飾性省略點，不影響候選本體的判定 — 括號術語比對與自身噪聲計算
+    # 都以剝除首尾點點後的核心為準（候選文字本身保留點點）。
+    core = text.strip('.．')
+    is_bracket_term = bool(_BRACKET_TERM_RE.fullmatch(core)) and any(
+        0x3041 <= ord(c) <= 0x30FF or 0x4E00 <= ord(c) <= 0x9FFF or c == '々'
+        for c in core[1:-1])
+    if is_bracket_term:
+        s += 2
     # AA 噪聲懲罰：在「強日文信號」缺席時才嚴罰。
     # 注意：`_OKURIGANA_RE` 與 `_KANJI_HIRA_RE` 雖然有分數 bonus，但不列入
     # strong_jp — AA 圖中「kanji+hira」「kanji-hira-kanji」三字偶然碰撞時
@@ -568,6 +716,7 @@ def _score_candidate(text: str, line: str, start: int, end: int,
                  or is_right_edge
                  or is_box_bounded
                  or has_name_tag
+                 or is_bracket_term
                  or bool(_LONG_HIRA_RUN_RE.search(text)))
     # 注意：分母改為「非空白字元數」後（見 `_local_aa_density`），閾值
     # 從原本 0.6 降到 0.4，否則 AA padding 大量空白會把比例壓低逃避懲罰。
@@ -580,7 +729,11 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     # 命中 / 半形片假名 / AA 標點）時，即使有 has_run 等強信號也幾乎肯定是 AA
     # 碎片（如「丈ｒうっ.o.,.」這類錨點假名混入點線雜訊）。此懲罰不受 strong_jp
     # 豁免 — strong_jp 豁免的是「鄰近」AA 噪聲，候選自身內部噪聲是更直接的證據。
-    if len(text) >= 4 and aa_noise_ratio(text, symbol_regex) > 0.4:
+    # 文字行豁免：半形片假名詞（「ﾓﾝｽﾀｰ」）在文字行是內容非噪聲。
+    # 以 core（剝除首尾點點）計算 — 「大将赤犬が.....」的裝飾點點
+    # 會把噪聲比拉過 0.4，但候選本體是乾淨的日文。
+    if (len(text) >= 4 and block != 'text'
+            and aa_noise_ratio(core, symbol_regex) > 0.4):
         s -= 5
     # 註：曾評估「整行 AA 比例懲罰」，但實測無效 — AA 圖常用 content-class 字元
     # （latin `i`/`l`、漢字 `彡`/`从`）當裝飾「柱子」，會把整行比例稀釋（如
@@ -630,8 +783,27 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     # 助詞 の/だ 等）；right_edge / box_bounded / spaced-out 等強信號可豁免（涵蓋
     # 「ハハハハッ」笑聲在行尾、「（クソ！」含全形 `！` 等情況）。門檻取 ≥4 以擋下
     # 「ニニァ-」這類 4 字純片假名＋小字＋標點碎片。
-    if len(text) >= 4 and not any_hira and not strong_jp:
+    # 文字區塊豁免：純漢字/片假名名詞（「常時効果：…」「『熟達狙撃指令』…」）
+    # 在文章／狀態表行中是常態而非 AA 碎片信號。
+    if (len(text) >= 4 and not any_hira and not strong_jp
+            and block != 'text'):
         s -= 3
+    # 區塊脈絡（見 `_classify_blocks`）：
+    # - 文字區塊 +2：段落／狀態表／留言區的候選幾乎必為真文字，補償
+    #   「無平假名 -3」對純漢字/片假名名詞（「常時効果：…」「アリス」）的誤殺。
+    # - AA 區塊 -2：AA 圖深處「無平假名」的候選（「二二ニニニ」「小、」型碎片）
+    #   額外扣分。含平假名的候選不罰 — AA 行右側常嵌真對話（「えぇ」「そして」
+    #   「だから……」），它們未必符合右端/對話框判定，但幾乎都含平假名；
+    #   而 AA 牆/框線碎片幾乎都無平假名。
+    #   豁免：右端對話／名牌／成對術語括號／全形 ！？（喊叫，AA 借用的是半形
+    #   !?）／骰子・選項格式（「【1D100:13】」無假名但是合法內容）。
+    if block == 'text':
+        s += 2
+    elif block == 'aa' and not (any_hira
+                                or is_right_edge or has_name_tag
+                                or is_bracket_term or has_num_option
+                                or any(ch in text for ch in '！？')):
+        s -= 2
     return s
 
 
@@ -791,8 +963,12 @@ def _extract_experimental_line(
     line: str,
     invalid_regex: re.Pattern,
     symbol_regex: re.Pattern,
+    block: str = 'neutral',
 ) -> list[tuple[str, int, int]]:
     """對單行執行錨點掃描 → 邊界擴展 → 分數過濾。
+
+    `block`：本行所屬區塊（'text'/'aa'/'neutral'，見 `_classify_blocks`）。
+    預設 'neutral' — 單行呼叫（failcase 驗證）無區塊脈絡，行為與舊版一致。
 
     Returns: [(text, start, end), ...] 已通過分數過濾，但尚未經過後處理。
     """
@@ -814,10 +990,10 @@ def _extract_experimental_line(
             continue
         out.append((text, s, e))
 
-    anchors = _find_anchors(line)
+    anchors = _find_anchors(line, in_text_block=(block == 'text'))
     if not anchors:
         return out
-    expanded = [_expand_boundary(line, s, e) for s, e in anchors]
+    expanded = [_expand_boundary(line, s, e, block) for s, e in anchors]
     expanded = _merge_overlapping(expanded)
 
     for s, e in expanded:
@@ -857,7 +1033,7 @@ def _extract_experimental_line(
             continue
         if invalid_regex.match(text):
             continue
-        if _score_candidate(text, line, s, e, symbol_regex) < 2:
+        if _score_candidate(text, line, s, e, symbol_regex, block) < 2:
             continue
         # 短純片假名喊叫閘：恰好「2 片假名 + 標點」的最短型（如「クソ！」）
         # 僅在括號區間內保留 — 括號外的同型碎片多為 AA 圖裝飾。
@@ -872,8 +1048,10 @@ def _extract_experimental_line(
     # 空白而非 AA 噪聲）；改以「同行是否有實質日文對話」作為信賴指標。
     # 例：「さぁ 燃料をくべましょう」中的「さぁ」(len 2) 因有 9-char 伴隨而保留；
     #     「／／／ ｨへ、ヾ　 ｀＞、」中的「へ、」因孤立而剔除。
+    # 文字區塊內不套用孤立過濾：段落／狀態表行的短候選（「アリス」「くさ」）
+    # 本就可獨立成立，「同行長伴隨」的信賴指標只在 AA 混雜脈絡下才需要。
     has_long_companion = any(len(t) >= 5 for t, _, _ in out)
-    if not has_long_companion:
+    if not has_long_companion and block != 'text':
         out = [(t, s, e) for t, s, e in out
                if len(t) >= 4
                or _is_strong_short_candidate(t)
@@ -1028,6 +1206,10 @@ def extract_text(
             author_tripcode = max(runs, key=len)
 
     use_experimental = experimental and not korean_mode
+    # 區塊分類前置掃描（僅實驗管線使用）：整份文本逐行分類為 text/aa/neutral，
+    # 提供垂直（跨行）脈絡給評分機制。輸入 <5 行時全為 neutral（單行相容）。
+    blocks = (_classify_blocks(lines, symbol_regex)
+              if use_experimental else [])
 
     for line_num, line in enumerate(lines, 1):
         if line_num == title_line_num:
@@ -1039,7 +1221,8 @@ def extract_text(
 
         if use_experimental:
             for raw_text, cand_s, _e in _extract_experimental_line(
-                    proc_line, invalid_regex, symbol_regex):
+                    proc_line, invalid_regex, symbol_regex,
+                    block=blocks[line_num - 1]):
                 # 把骰子內的全形 `：` 還原為半形 `:`
                 text = _DICE_NOTATION_FW_RE.sub(r'\1:\2', raw_text)
                 text = _postprocess_text(text, korean_mode=False,
@@ -1155,6 +1338,8 @@ def analyze_extraction(
     report: list[str] = []
     text = _BIDI_CONTROL_RE.sub('', text)
     lines = text.split('\n')
+    blocks = (_classify_blocks(lines, symbol_regex)
+              if use_experimental else [])
     if use_experimental:
         report.append("【實驗性日文提取演算法啟用】錨點掃描＋分數制過濾")
         report.append("")
@@ -1162,8 +1347,12 @@ def analyze_extraction(
     for line_idx, line in enumerate(lines, 1):
         if not line.strip():
             continue
+        block = blocks[line_idx - 1] if use_experimental else 'neutral'
         report.append(f"--- 開始分析字串 (第 {line_idx} 行) ---")
         report.append(f"原始字串: '{line}'")
+        if use_experimental:
+            report.append(f"[區塊分類] {block}"
+                          "（text=文字區塊 +2／aa=AA 區塊 -2／neutral=中性）")
 
         if _POSTER_LINE_RE.search(line):
             report.append("  -> ❌ 整行剔除：判定為發文者行（含 ID:xxxxxx trip code）。")
@@ -1204,7 +1393,8 @@ def analyze_extraction(
                     mark = "剔除(invalid)" if invalid_regex.match(t) else "保留"
                     report.append(f"  片假名整句 '{t}' (pos {s}-{e}) -> {mark}")
 
-            anchors = _find_anchors(proc_line)
+            anchors = _find_anchors(proc_line,
+                                    in_text_block=(block == 'text'))
             report.append(f"[步驟 1] 錨點掃描：找到 {len(anchors)} 個錨點")
             for ai, (s, e) in enumerate(anchors):
                 report.append(
@@ -1214,7 +1404,7 @@ def analyze_extraction(
                 report.append("\n" + "=" * 40 + "\n")
                 continue
             expanded = _merge_overlapping(
-                [_expand_boundary(proc_line, s, e) for s, e in anchors]
+                [_expand_boundary(proc_line, s, e, block) for s, e in anchors]
             ) if anchors else []
             report.append(f"[步驟 2] 邊界擴展與合併：得到 {len(expanded)} 個 candidate")
             for ci, (s, e) in enumerate(expanded):
@@ -1243,7 +1433,8 @@ def analyze_extraction(
                     proc_line, s, e, symbol_regex, 8)
                 trans = _class_transitions(t)
                 trans_ratio = trans / len(t) if len(t) > 0 else 0
-                score = _score_candidate(t, proc_line, s, e, symbol_regex)
+                score = _score_candidate(t, proc_line, s, e, symbol_regex,
+                                         block)
                 report.append(
                     f"    [分數] 局部AA密度={density:.2f}, "
                     f"類別跳轉率={trans_ratio:.2f}, score={score}")
@@ -1261,7 +1452,7 @@ def analyze_extraction(
             # 步驟 3：短候選孤立過濾。survivors 取自與 extract_text 相同的函式，
             # 確保「倖存清單」「最終結果」與實際提取完全一致。
             survivors = _extract_experimental_line(
-                proc_line, invalid_regex, symbol_regex)
+                proc_line, invalid_regex, symbol_regex, block=block)
             survivor_spans = {(s, e) for _t, s, e in survivors}
             has_companion = any(len(t) >= 5 for t, _s, _e in survivors)
             report.append(

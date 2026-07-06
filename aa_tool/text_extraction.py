@@ -445,16 +445,29 @@ _HALFWIDTH_KANA_RUN3_RE = re.compile(r'[ｦ-ﾟ]{3,}')
 # 2 連；真對話/說明文幾乎必有 3 連，如「でした」「ということ」）。
 # 同字重複（んんん）另以 distinct ≥2 過濾。
 _LINE_HIRA_RUN3_RE = re.compile(r'[ぁ-ゖ]{3,}')
+# 行級「結構化行」（'S'）訊號用：狀態表／對話框行的框線前導字元（重線框、
+# 雙線框；AA 筆畫慣用的是細線 │ 與半形 |，不在此列）與 ■□ 量表字元。
+# 框線／量表／半形 | 是結構標記而非 AA 筆畫 — 計算 'S' 噪聲比時從分子
+# 分母同時剔除（┏┓┣┫━ 等都在 DEFAULT_SYMBOL_REGEX 裡，不剔除的話
+# 狀態表行會因框線與量表被誤標成 'A'）。
+_BOX_LEAD_CHARS = set('┃┏┓┗┛┣┫┠┨┝┥║╔╗╚╝╠╣')
+_GAUGE_CHARS = set('■□')
 
 
 def _line_block_signal(line: str, symbol_regex: re.Pattern) -> str:
-    """單行的區塊訊號：'T'（文字行）/ 'A'（AA 行）/ '-'（不確定）。
+    """單行的區塊訊號：'T'（文字行）/ 'S'（結構化行）/ 'A'（AA 行）/ '-'（不確定）。
 
     - 'T'：含「連續 ≥3 個真平假名、且 ≥2 相異」的 run，**且**行級噪聲比 <0.3。
       AA 圖的散落平假名（して/いう/ぃじ）至多 2 連、裝飾重複（んんん）同字 —
       都不命中；對話與說明文幾乎必有此 run。噪聲比條件排除「左 AA 圖＋右對話」
       的混合行 — 那種行的對話靠右端/對話框機制保護即可，整行當文字行反而會
       讓左側 AA 牆碎片（ニニ…）搭上文字區塊加分。
+    - 'S'：結構化行 — RPG 狀態表／對話框的框內內容列（「┃〔ＳTＲ〕 09 ■■」
+      「┃バラン」「　||　敵陣：デルタスターミー」）。判定：行首（去空白）為
+      框線字元（`_BOX_LEAD_CHARS`）或 `||`，且剔除框線／量表／`|` 後
+      噪聲比 <0.3、並含 ≥2 個假名漢字實字**或**成對術語括號（【ＨＰ】型全形
+      英數標籤也算）。映為 'struct'：文字區塊特權與 'T' 相同，
+      另外豁免 janome 擊殺帶（見 `_classify_blocks`）。
     - 'A'：平假名 ≤1、實體字元 ≥6，且「AA 噪聲字元 ∪ 同字 4 連 run」佔比 ≥ 0.5。
       同字 run 涵蓋 symbol_regex 未收錄的 AA 牆用字（全形 ニ、二、工、■…）。
     - '-'：字太少或訊號不明，交由 `_classify_blocks` 的鄰行填補決定。
@@ -487,16 +500,43 @@ def _line_block_signal(line: str, symbol_regex: re.Pattern) -> str:
     if (hira >= 4 and non_space >= 8 and ratio < 0.15
             and not any(ch in _HALFWIDTH_KANA_CHARS for ch in line)):
         return 'T'
+    # 'S'：框線前導的結構化行。狀態表數值列（「┃〔ＳTＲ〕 09 ■■■■」）平假名
+    # 少、框線量表又命中噪聲字元集，若不特判會被誤標 'A' 或落成 '-'（技能描述
+    # 「┃　TP1<腕> ：遠隔・槍/攻撃力に+(SL/2)した…」散落平假名 <4 不滿足規則二）
+    # → 擴展字元不放行 → 在 /() 處切碎。框線／量表／半形 | 是結構標記，從噪聲
+    # 比的分子分母同時剔除後再判。
+    stripped = line.lstrip(' 　')
+    if stripped and (stripped[0] in _BOX_LEAD_CHARS
+                     or stripped.startswith('||')):
+        s_non_space = s_noise = content = 0
+        for i, ch in enumerate(line):
+            if (ch.isspace() or ch in _BOX_LEAD_CHARS
+                    or ch in _GAUGE_CHARS or ch == '|'):
+                continue
+            s_non_space += 1
+            if marked[i]:
+                s_noise += 1
+            cp = ord(ch)
+            if 0x3041 <= cp <= 0x30FF or 0x4E00 <= cp <= 0x9FFF or ch == '々':
+                content += 1
+        if (s_non_space and s_noise / s_non_space < 0.3
+                and (content >= 2 or _BRACKET_TERM_RE.search(line))):
+            return 'S'
     if hira <= 1 and non_space >= 6 and noise / non_space >= 0.5:
         return 'A'
     return '-'
 
 
 def _classify_blocks(lines: list[str], symbol_regex: re.Pattern) -> list[str]:
-    """全文前置掃描：把每行分類為 'text' / 'aa' / 'neutral' 區塊。
+    """全文前置掃描：把每行分類為 'text' / 'struct' / 'aa' / 'neutral' 區塊。
 
     步驟：逐行算 `_line_block_signal` → 夾在**同標籤**行之間、長度 ≤2 的
-    '-' 縫隙以該標籤填補（run-length 平滑）→ 'T'→'text'、'A'→'aa'、其餘 neutral。
+    '-' 縫隙以該標籤填補（run-length 平滑）→ 'T'→'text'、'S'→'struct'、
+    'A'→'aa'、其餘 neutral。'struct' 享有與 'text' 相同的文字區塊特權
+    （錨點／擴展字元／孤立過濾豁免／評分），**唯一差異**是 janome 擊殺帶
+    只對 'struct' 豁免 — 'T' 涵蓋「左 AA＋右對話」混合行，AA 半邊的生僻
+    漢字串（「奚从杙鈊、」）仍需擊殺；'S' 是框線引導的名牌／表格行，
+    未知專名（「カルラ」「〕Rank4/ヒーターシールド」）先驗上是內容。
 
     輸入 <5 行時一律回傳 neutral：單行／小片段（如 failcase 驗證、
     extraction-testcase-maintenance skill 的逐行呼叫）無垂直脈絡可言，
@@ -519,7 +559,7 @@ def _classify_blocks(lines: list[str], symbol_regex: re.Pattern) -> list[str]:
             for k in range(i, j):
                 raw[k] = raw[i - 1]
         i = j
-    mapping = {'T': 'text', 'A': 'aa', '-': 'neutral'}
+    mapping = {'T': 'text', 'S': 'struct', 'A': 'aa', '-': 'neutral'}
     return [mapping[r] for r in raw]
 
 
@@ -559,6 +599,12 @@ def _find_anchors(line: str, in_text_block: bool = False) -> list[tuple[int, int
         if any(0x3041 <= ord(c) <= 0x30FF or 0x4E00 <= ord(c) <= 0x9FFF
                or c == '々' for c in inner):
             anchors.append((m.start(), m.end()))
+        elif (in_text_block and all(c.isalnum() for c in inner)
+                and any(c.isalpha() for c in inner)):
+            # 文字區塊限定：全形／半形英數標籤（「【ＨＰ】」「〔ＳTＲ〕」）。
+            # 需含字母 — 純數字（「【123】」）非標籤；「【1D100:38】」的 `:`
+            # 使 isalnum 不成立，仍被排除（骰子另有 _DICE 處理）。
+            anchors.append((m.start(), m.end()))
     if in_text_block:
         for m in _KANJI_RUN3_RE.finditer(line):
             anchors.append((m.start(), m.end()))
@@ -584,19 +630,23 @@ def _is_valid_char(ch: str) -> bool:
 # 砲剣/攻撃力に+((SL/2)+7)を加算した[斬]攻撃」「初手､10まんボルト」「◆参加
 # メンバー」「お見事───」）。只在行屬於文字區塊時放行，避免把句子切碎。
 # 不含 `│|｜┃`（對話框／表格欄邊界，跨欄合併會把不同欄位黏在一起）。
-_TEXT_BLOCK_EXTRA_CHARS = set('/()[]<>＜＞=＝｡､・◆◇■□─━')
+# `÷×` 是狀態表算式用字（「(遠隔攻撃の達成値÷10)」）；`〔〕` 讓「〔盾　〕
+# Rank4/ヒーターシールド」這類「內含空白的括號標籤＋接續內容」段落，
+# 從右側錨點左擴時能把段內的 `〕` 一併收進（gold 粒度即為 `〕Rank4/…`）。
+_TEXT_BLOCK_EXTRA_CHARS = set('/()[]<>＜＞=＝｡､・◆◇■□─━÷×〔〕')
 
 
 def _expand_boundary(line: str, start: int, end: int,
                      block: str = 'neutral') -> tuple[int, int]:
     """從錨點 [start, end) 向兩側擴張到非 valid char / 連續空白邊界。
 
-    `block=='text'` 時額外放行 `_TEXT_BLOCK_EXTRA_CHARS` 與半形片假名 —
-    文字行中的半形片假名是內容（「ﾓﾝｽﾀｰ」「ｹﾞﾌﾝｹﾞﾌﾝ」）而非 AA 噪聲。
+    `block` 為 'text'／'struct' 時額外放行 `_TEXT_BLOCK_EXTRA_CHARS` 與
+    半形片假名 — 文字行中的半形片假名是內容（「ﾓﾝｽﾀｰ」「ｹﾞﾌﾝｹﾞﾌﾝ」）
+    而非 AA 噪聲。
     """
     def ok(ch: str) -> bool:
-        if block == 'text' and (ch in _TEXT_BLOCK_EXTRA_CHARS
-                                or ch in _HALFWIDTH_KANA_CHARS):
+        if block in ('text', 'struct') and (ch in _TEXT_BLOCK_EXTRA_CHARS
+                                            or ch in _HALFWIDTH_KANA_CHARS):
             return True
         return _is_valid_char(ch)
 
@@ -869,7 +919,7 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     # 文字行豁免：半形片假名詞（「ﾓﾝｽﾀｰ」）在文字行是內容非噪聲。
     # 以 core（剝除首尾點點）計算 — 「大将赤犬が.....」的裝飾點點
     # 會把噪聲比拉過 0.4，但候選本體是乾淨的日文。
-    if (len(text) >= 4 and block != 'text'
+    if (len(text) >= 4 and block not in ('text', 'struct')
             and aa_noise_ratio(core, symbol_regex) > 0.4):
         s += w('self_noise')
     # 註：曾評估「整行 AA 比例懲罰」，但實測無效 — AA 圖常用 content-class 字元
@@ -923,7 +973,7 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     # 文字區塊豁免：純漢字/片假名名詞（「常時効果：…」「『熟達狙撃指令』…」）
     # 在文章／狀態表行中是常態而非 AA 碎片信號。
     if (len(text) >= 4 and not any_hira and not strong_jp
-            and block != 'text'):
+            and block not in ('text', 'struct')):
         s += w('no_hira')
     # 區塊脈絡（見 `_classify_blocks`）：
     # - 文字區塊 +2：段落／狀態表／留言區的候選幾乎必為真文字，補償
@@ -934,7 +984,7 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     #   而 AA 牆/框線碎片幾乎都無平假名。
     #   豁免：右端對話／名牌／成對術語括號／全形 ！？（喊叫，AA 借用的是半形
     #   !?）／骰子・選項格式（「【1D100:13】」無假名但是合法內容）。
-    if block == 'text':
+    if block in ('text', 'struct'):
         s += w('block_text')
     elif block == 'aa' and not (any_hira
                                 or is_right_edge or has_name_tag
@@ -959,10 +1009,14 @@ def _score_candidate(text: str, line: str, start: int, end: int,
                             and (end >= len(line) or line[end] in ' 　'))
         if is_whole_segment and _janome_signal(core) > 0:
             s += 2
-    elif (t <= s <= t + 4 and len(core) >= 3
+    elif (t <= s <= t + 4 and len(core) >= 3 and block != 'struct'
           and not any(ch in text for ch in '！？')):
         # 長度 ≥3 才殺：「私だ」「君は」這類 2 字真句每個 token 都是單字元，
         # 與「にんり」型拼湊無法用詞典區分，交回既有規則。
+        # 'struct'（框線引導的名牌／表格行）不殺：未知專名（「カルラ」
+        # 「〕Rank4/ヒーターシールド」）max_known_len=0 必被 -2 誤殺。
+        # 'text' 仍殺 — 'T' 涵蓋「左 AA＋右對話」混合行，AA 半邊的生僻
+        # 漢字串（「奚从杙鈊、」）需要擊殺帶擋下。
         if _janome_signal(core) < 0:
             s = t - 1
     return s
@@ -1128,7 +1182,7 @@ def _extract_experimental_line(
 ) -> list[tuple[str, int, int]]:
     """對單行執行錨點掃描 → 邊界擴展 → 分數過濾。
 
-    `block`：本行所屬區塊（'text'/'aa'/'neutral'，見 `_classify_blocks`）。
+    `block`：本行所屬區塊（'text'/'struct'/'aa'/'neutral'，見 `_classify_blocks`）。
     預設 'neutral' — 單行呼叫（failcase 驗證）無區塊脈絡，行為與舊版一致。
 
     Returns: [(text, start, end), ...] 已通過分數過濾，但尚未經過後處理。
@@ -1151,7 +1205,7 @@ def _extract_experimental_line(
             continue
         out.append((text, s, e))
 
-    anchors = _find_anchors(line, in_text_block=(block == 'text'))
+    anchors = _find_anchors(line, in_text_block=block in ('text', 'struct'))
     if not anchors:
         return out
     expanded = [_expand_boundary(line, s, e, block) for s, e in anchors]
@@ -1213,7 +1267,7 @@ def _extract_experimental_line(
     # 文字區塊內不套用孤立過濾：段落／狀態表行的短候選（「アリス」「くさ」）
     # 本就可獨立成立，「同行長伴隨」的信賴指標只在 AA 混雜脈絡下才需要。
     has_long_companion = any(len(t) >= 5 for t, _, _ in out)
-    if not has_long_companion and block != 'text':
+    if not has_long_companion and block not in ('text', 'struct'):
         out = [(t, s, e) for t, s, e in out
                if len(t) >= 4
                or _is_strong_short_candidate(t)
@@ -1556,7 +1610,7 @@ def analyze_extraction(
                     report.append(f"  片假名整句 '{t}' (pos {s}-{e}) -> {mark}")
 
             anchors = _find_anchors(proc_line,
-                                    in_text_block=(block == 'text'))
+                                    in_text_block=block in ('text', 'struct'))
             report.append(f"[步驟 1] 錨點掃描：找到 {len(anchors)} 個錨點")
             for ai, (s, e) in enumerate(anchors):
                 report.append(

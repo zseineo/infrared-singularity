@@ -2786,7 +2786,16 @@ class EditWindow(QMainWindow):
         miss = []   # 漏抓：不在提取結果中
         for ln in sel_lines:
             (wrong if ln in extracted_blob else miss).append(ln)
-        ok, err = self._append_to_failcase(miss, wrong)
+        # 以編輯器全文指紋查來源網址（供之後修 G/H 等需整篇脈絡的問題時重抓全文）；
+        # 查不到不阻擋寫入，只在 toast 標示。
+        url = ''
+        if self._url_for_text_provider is not None:
+            try:
+                url = self._url_for_text_provider(
+                    self.editor.toPlainText()) or ''
+            except Exception:
+                url = ''
+        ok, err = self._append_to_failcase(miss, wrong, url)
         if not ok:
             self._set_status(f"⚠️ 寫入 failcase 失敗：{err}", "#ffc107")
             return
@@ -2795,13 +2804,16 @@ class EditWindow(QMainWindow):
             parts.append(f"{len(wrong)} 筆誤抓")
         if miss:
             parts.append(f"{len(miss)} 筆漏抓")
-        self._set_status("✅ 已寫入 failcase：" + "、".join(parts), "#0f0")
+        tail = "（附來源網址）" if url else "（⚠️ 查無來源網址）"
+        self._set_status(
+            "✅ 已寫入 failcase：" + "、".join(parts) + tail, "#0f0")
 
-    def _append_to_failcase(self, miss: list, wrong: list):
+    def _append_to_failcase(self, miss: list, wrong: list, url: str = ''):
         """把漏抓／誤抓行插入 testcase/failcase.txt 對應區塊。
 
         回傳 (成功: bool, 錯誤訊息: str)。就地保留檔案既有結構與其他區塊，
-        區塊內既有的重複項會跳過。
+        區塊內既有的重複項會跳過。`url` 非空時，於本批新增項上方插入一行
+        `# 來源：<url>` 註解（案例文字行本身維持乾淨，不污染 skill 的驗證輸入）。
         """
         path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
@@ -2829,7 +2841,9 @@ class EditWindow(QMainWindow):
                 if is_header(lines[i]):
                     end = i
                     break
-            existing = {ln.strip() for ln in lines[h + 1:end] if ln.strip()}
+            # 去重時忽略 `#` 註解行（來源網址），只比對實際案例文字
+            existing = {ln.strip() for ln in lines[h + 1:end]
+                        if ln.strip() and not ln.lstrip().startswith('#')}
             fresh, seen = [], set()
             for it in items:
                 if it not in existing and it not in seen:
@@ -2837,11 +2851,12 @@ class EditWindow(QMainWindow):
                     seen.add(it)
             if not fresh:
                 return True
+            block = ([f'# 來源：{url}'] + fresh) if url else fresh
             ins = h + 1
             for i in range(h + 1, end):
                 if lines[i].strip():
                     ins = i + 1
-            lines[ins:ins] = fresh
+            lines[ins:ins] = block
             return True
 
         # 每次 insert 都重新掃描 header，故處理順序不影響索引正確性

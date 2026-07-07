@@ -2809,21 +2809,39 @@ class EditWindow(QMainWindow):
         if self._extracted_provider is None:
             self._set_status("⚠️ 無法取得提取結果，無法判定誤抓／漏抓", "#ffc107")
             return
-        # 提取結果每行為「ID|原文」；去掉流水號前綴後併成一坨供子字串比對
+        # 提取結果每行為「ID|原文」；去掉流水號前綴、去所有空白後留存供比對。
+        # （AA 對齊用的半／全形空白會讓字面比對失準，故一律移除空白再比。）
         extracted_raw = self._extracted_provider() or ""
-        contents = []
-        for ln in extracted_raw.split('\n'):
-            idx = ln.find('|')
-            contents.append(ln[idx + 1:] if idx >= 0 else ln)
-        extracted_blob = '\n'.join(contents)
-        if not extracted_blob.strip():
+        ext_entries = []
+        for row in extracted_raw.split('\n'):
+            idx = row.find('|')
+            txt = row[idx + 1:] if idx >= 0 else row
+            norm = ''.join(txt.split())
+            if norm:
+                ext_entries.append(norm)
+        if not ext_entries:
             self._set_status(
                 "⚠️ 提取結果為空，無法判定誤抓／漏抓（請先完成提取）", "#ffc107")
             return
+
+        def _in_extraction(s: str) -> bool:
+            """選取內容是否已被提取（去空白、雙向比對）。
+
+            AA 圖行常是「圖形＋空白＋對話」，使用者難以剛好只選到對話，多半連整行
+            選起來。故除了「選取 ⊆ 某提取項」（只選對話子字串），也要判「某提取項
+            ⊆ 選取」（連 AA 一起選）——後者正是誤抓被誤判成漏抓的主因。
+            """
+            n = ''.join(s.split())
+            if not n:
+                return False
+            if any(n in e for e in ext_entries):
+                return True
+            return any(len(e) >= 3 and e in n for e in ext_entries)
+
         wrong = []  # 誤抓：在提取結果中
         miss = []   # 漏抓：不在提取結果中
         for ln in sel_lines:
-            (wrong if ln in extracted_blob else miss).append(ln)
+            (wrong if _in_extraction(ln) else miss).append(ln)
         # 以編輯器全文指紋查來源網址（供之後修 G/H 等需整篇脈絡的問題時重抓全文）；
         # 查不到不阻擋寫入，只在 toast 標示。
         url = ''

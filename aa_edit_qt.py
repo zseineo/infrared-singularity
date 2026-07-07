@@ -1083,8 +1083,9 @@ class EditWindow(QMainWindow):
         pairs = expand_glossary_entry(orig_raw, trans_raw)
         # WYSIWYG 模式：先把編輯結果序列化回 editor，再以 editor 為基準執行替換，
         # 套用後重建 preview，確保彩色標記不會在 preview/editor 之間漂移。
+        synced = False
         if self._preview_active:
-            self._sync_preview_to_editor()
+            synced = self._sync_preview_to_editor()
         new_text = self.editor.toPlainText()
         total = 0
         for orig, trans in pairs:
@@ -1095,7 +1096,7 @@ class EditWindow(QMainWindow):
         if total == 0:
             self._set_status(f"🔍 找不到「{orig_raw}」", "#ffc107")
             return
-        self._replace_document(new_text)
+        self._replace_document(new_text, merge=synced)
         self._wysiwyg_rerender_after_editor_change()
 
         # 若勾選「存入術語」，通知主程式（存入原始字串，含 \X 標記）
@@ -1165,8 +1166,9 @@ class EditWindow(QMainWindow):
             self._set_status("⚠️ 術語表格式不正確", "#ffc107")
             return
         # WYSIWYG：先 sync 再運行，套完重建 preview
+        synced = False
         if self._preview_active:
-            self._sync_preview_to_editor()
+            synced = self._sync_preview_to_editor()
         current_text = self.editor.toPlainText()
         avoid_aa, srs = self._glossary_avoid_aa_settings()
         sym = None
@@ -1183,16 +1185,29 @@ class EditWindow(QMainWindow):
         # 保留捲動位置
         scroll_bar = self.editor.verticalScrollBar()
         scroll_val = scroll_bar.value()
-        self._replace_document(new_text)
+        # merge=synced：sync 若已產生一筆 undo entry，併入同一筆，
+        # 避免使用者這一次點擊要按兩次 Ctrl+Z 才能復原。
+        self._replace_document(new_text, merge=synced)
         scroll_bar.setValue(scroll_val)
         self._wysiwyg_rerender_after_editor_change()
         self._set_status(
             f"✅ 已套用術語表（{len(glossary)} 條）", "#0f0")
 
-    def _replace_document(self, new_text: str) -> None:
-        """以新內容取代整份文件，保留 undo history 與 line-height。"""
+    def _replace_document(self, new_text: str, *, merge: bool = False) -> None:
+        """以新內容取代整份文件，保留 undo history 與 line-height。
+
+        merge=True 時併入「前一個 edit block」而非另開新的一筆：用於同一個
+        使用者動作內第二次呼叫本方法（例如 WYSIWYG 下先 sync 回 editor、
+        緊接著工具本身又整份取代一次），避免同一次點擊被拆成兩筆 undo entry，
+        使用者要按兩次 Ctrl+Z 才能復原。呼叫端須確認前一個 edit block確實
+        是這次動作自己造成的（例如 sync 真的有替換內容），否則會誤併到
+        不相干的舊 undo entry。
+        """
         cursor = self.editor.textCursor()
-        cursor.beginEditBlock()
+        if merge:
+            cursor.joinPreviousEditBlock()
+        else:
+            cursor.beginEditBlock()
         cursor.select(QTextCursor.SelectionType.Document)
         cursor.insertText(new_text)
         cursor.endEditBlock()
@@ -1572,8 +1587,9 @@ class EditWindow(QMainWindow):
         # WYSIWYG：先 sync 把 markup 還原回 editor，運算後再重建 preview。
         # 對話框邏輯本身仍然以 editor 的字面 markup-laden 文字為輸入；
         # `<span>` 標記不會干擾 bubble_alignment 的偵測（裡面只看 ￣/＿/| 等字元）。
+        synced = False
         if self._preview_active:
-            self._sync_preview_to_editor()
+            synced = self._sync_preview_to_editor()
         text = self.editor.toPlainText()
         new_text, count = _adjust_all_bubbles(text, self._measurer)
         if count == 0:
@@ -1583,7 +1599,7 @@ class EditWindow(QMainWindow):
         scroll_bar = self.editor.verticalScrollBar()
         scroll_val = scroll_bar.value()
         cursor_pos = self.editor.textCursor().position()
-        self._replace_document(new_text)
+        self._replace_document(new_text, merge=synced)
         cursor = self.editor.textCursor()
         cursor.setPosition(min(cursor_pos,
                                self.editor.document().characterCount() - 1))
@@ -1715,24 +1731,35 @@ class EditWindow(QMainWindow):
 
     def _render_preview_doc(self) -> None:
         """直接操作 QTextDocument 以 (文字, 顏色) runs 建構預覽，
-        避免 setHtml 對 <pre> 的塊邊界渲染（每行出現橫線）。"""
+        避免 setHtml 對 <pre> 的塊邊界渲染（每行出現橫線）。
+
+        用「全選＋insertText」取代整份內容，不用 doc.clear()：clear() 會
+        直接清空 QTextDocument 的 undo/redo 歷史（即使包在 beginEditBlock
+        裡也一樣），導致每次重繪都讓使用者在 WYSIWYG 中之前的操作變成
+        「復原不到」；全部包在同一個 edit block 內，讓一次重繪對應恰好
+        一筆 undo entry，Ctrl+Z 一次就能完整復原回上一次重繪前的畫面。
+        """
         text = self.editor.toPlainText()
         self.preview_view.setFont(self.editor.font())
         doc = self.preview_view.document()
-        doc.clear()
         cursor = QTextCursor(doc)
+        cursor.beginEditBlock()
+        cursor.select(QTextCursor.SelectionType.Document)
         default_fmt = QTextCharFormat()
         default_fmt.setForeground(QColor("#000000"))
         pos = 0
+        first_insert = True
         for m in self._COLOR_SPAN_RUN_RE.finditer(text):
-            if m.start() > pos:
+            if m.start() > pos or first_insert:
                 cursor.insertText(text[pos:m.start()], default_fmt)
+                first_insert = False
             colored_fmt = QTextCharFormat()
             colored_fmt.setForeground(_css_color_to_qcolor(m.group(1)))
             cursor.insertText(m.group(2), colored_fmt)
             pos = m.end()
-        if pos < len(text):
+        if pos < len(text) or first_insert:
             cursor.insertText(text[pos:], default_fmt)
+        cursor.endEditBlock()
         # 套用與編輯器相同的 FixedHeight 行高，使捲動位置能對齊
         self._apply_line_height_to(self.preview_view)
         # 沿用編輯器底色與字型樣式
@@ -1780,6 +1807,9 @@ class EditWindow(QMainWindow):
             # 進入 WYSIWYG 不算「使用者編輯」，先把 flag 拉起阻擋 dirty 標記。
             self._preview_suppress_dirty = True
             self._render_preview_doc()
+            # 清除「進入 WYSIWYG 當下的重繪」這條 undo entry，避免使用者
+            # 一進 WYSIWYG 按 Ctrl+Z 就把預覽清空（比照開檔時對 editor 的處理）。
+            self.preview_view.document().clearUndoRedoStacks()
             self.preview_view.setReadOnly(False)
             self.stack.setCurrentIndex(2)
             # 順序：先 setTextCursor（會自動捲動）→ 再 setValue 覆蓋為原捲軸值，
@@ -1890,19 +1920,26 @@ class EditWindow(QMainWindow):
             block = block.next()
         return ''.join(parts)
 
-    def _sync_preview_to_editor(self) -> None:
+    def _sync_preview_to_editor(self) -> bool:
         """把 WYSIWYG 編輯成果序列化回 editor 的字面 markup。
 
         若內容未變動則不動 editor（避免無意義 _replace_document 重建文件）。
         呼叫端負責切換 stack / readonly；本方法只搬資料。
+
+        回傳是否實際執行了 _replace_document——呼叫端若接著自己又要整份
+        取代一次（例如工具本身的替換結果），可用這個回傳值決定要不要把
+        兩次取代 merge 成同一筆 undo entry（見 `_replace_document` 的
+        `merge` 參數說明）。
         """
         if not self._preview_active:
-            return
+            return False
         new_text = self._serialize_preview_to_markup()
         if new_text != self.editor.toPlainText():
             scroll_val = self.editor.verticalScrollBar().value()
             self._replace_document(new_text)
             self.editor.verticalScrollBar().setValue(scroll_val)
+            return True
+        return False
 
     # ════════════════════════════════════════════════════════════
     #  右側翻譯面板（Alt+4）：局部重套用提取/翻譯
@@ -2496,8 +2533,9 @@ class EditWindow(QMainWindow):
         if not self._original_text:
             self._set_status("⚠️ 無原文可供重跑替換", "#ffc107")
             return
+        synced = False
         if self._preview_active:
-            self._sync_preview_to_editor()
+            synced = self._sync_preview_to_editor()
 
         self._save_side_edits_to_full()
         new_extracted = self._side_extracted_full
@@ -2578,7 +2616,7 @@ class EditWindow(QMainWindow):
 
         # 保留捲動位置
         scroll_val = self.editor.verticalScrollBar().value()
-        self._replace_document(merged_text)
+        self._replace_document(merged_text, merge=synced)
         self.editor.verticalScrollBar().setValue(scroll_val)
         self._wysiwyg_rerender_after_editor_change()
 

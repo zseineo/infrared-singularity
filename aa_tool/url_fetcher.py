@@ -2,7 +2,7 @@
 
 支援的網域：
   - 預設格式（article div + relate_dl）
-  - himanatokiniyaruo.com（dt[id] / dd 結構 + related-entries）
+  - himanatokiniyaruo.com（dt / dd 結構 + related-entries；舊 <dt id="N"> 與新 <dt><span>N</span> 兩種模板）
   - blog.fc2.com（ently_text / entry_text div + relate_dl，含 web.archive.org 封存版、res_h/res_b 變體）
   - blog105.fc2.com（textar-aa div + relate_dl，FC2 舊版模板，含不帶引號 font color）
   - blog136.fc2.com（entryblock / AA div + relate_dl，FC2 舊版模板）
@@ -541,7 +541,8 @@ def _parse_default(page_html: str, base_url: str, *, author_name: str = "", auth
 def _parse_himanatokiniyaruo(page_html: str, base_url: str, *, author_name: str = "", author_only: bool = False) -> tuple[str | None, list[dict], str]:
     """解析 himanatokiniyaruo.com 格式。
 
-    內文：<dt id="N"> ... </dt><dd> ... </dd> 結構
+    內文：<dt ...> ... </dt><dd> ... </dd> 結構
+          （舊模板 <dt id="N">；新模板 <dt><span>N</span> ： 作者 ： …）
     標題：<h2><a class="kjax" ...>TITLE</a></h2>
     關聯：<div class="related-entries"> ... </div>
     """
@@ -557,8 +558,10 @@ def _parse_himanatokiniyaruo(page_html: str, base_url: str, *, author_name: str 
         t_m = re.search(r'<title>([^<]+)</title>', page_html)
         page_title = html.unescape(t_m.group(1)).strip() if t_m else ""
 
-    # ── 內文：找第一個 <dt id="數字"> 的所在區段 ──
-    first_dt = re.search(r'<dt\s+id="\d+"', page_html)
+    # ── 內文：找第一個 <dt ...> 的所在區段 ──
+    # 舊模板用 <dt id="數字">，新模板改為 <dt><span>N</span> ： … 結構，
+    # 兩者都以泛用 <dt> 錨定（頁面僅單一 <dl>，無留言區 dt/dd 干擾）。
+    first_dt = re.search(r'<dt(?:\s[^>]*)?>', page_html)
     if not first_dt:
         return None, [], page_title
 

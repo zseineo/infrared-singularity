@@ -119,6 +119,7 @@ class AutoResult:
     """一次自動翻譯批次的總結。"""
     done: list = field(default_factory=list)        # [輸出檔路徑, ...]
     failed: list = field(default_factory=list)      # [(url, 原因), ...]
+    skipped: list = field(default_factory=list)     # [(url, 檔名), ...] 已存在同名檔而跳過
     quota_paused: bool = False                      # 是否因額度上限暫停
     pending_url: str = ""                           # 暫停／停止時未完成的話網址
     next_url: str = ""                              # 自然跑滿話數後的下一話續接網址
@@ -300,8 +301,7 @@ def _unique_path(out_dir: str, name_base: str) -> str:
         i += 1
 
 
-def compute_chapter_filename(
-    out_dir: str,
+def compute_chapter_name_base(
     *,
     doc_title: str,
     fetch_auto_fill_title: bool,
@@ -309,15 +309,16 @@ def compute_chapter_filename(
     page_title: str,
     fallback_index: int,
 ) -> str:
-    """每話檔名計算，與主畫面 ``_prepare_translation`` 的命名規則一致。
+    """算這一話的檔名主體（不含 ``.html`` 副檔名、也不含同名衝突序號）。
 
+    命名規則與主畫面 ``_prepare_translation`` 一致：
     - ``fetch_auto_fill_title=True``（自動填入模式）：title 由 ``extract_work_title``
       從每話的 ``page_title`` 萃取；話數欄位被視為空，檔名只用 title。
     - ``fetch_auto_fill_title=False``（手動模式）：title 用使用者填的 ``doc_title``；
-      話數由 ``check_chapter_number`` 從每話原文偵測（找不到時不附加），檔名為
-      ``{title}_{num}.html`` 或 ``{title}.html``。
+      話數由 ``check_chapter_number`` 從每話原文偵測（找不到時不附加），主體為
+      ``{title}_{num}`` 或 ``{title}``。
 
-    同名衝突一律加序號 ``_2``、``_3`` 等。
+    「跳過已存在同名檔」的判定與實際存檔的檔名計算共用此主體，避免兩處命名規則走鐘。
     """
     if fetch_auto_fill_title:
         auto_title = (text_extraction.extract_work_title(page_title)
@@ -330,7 +331,25 @@ def compute_chapter_filename(
         num = str(detected) if detected is not None else ""
     safe_title = _sanitize(title) or f"chapter_{fallback_index}"
     safe_num = _sanitize(num)
-    name_base = f"{safe_title}_{safe_num}" if safe_num else safe_title
+    return f"{safe_title}_{safe_num}" if safe_num else safe_title
+
+
+def compute_chapter_filename(
+    out_dir: str,
+    *,
+    doc_title: str,
+    fetch_auto_fill_title: bool,
+    source: str,
+    page_title: str,
+    fallback_index: int,
+) -> str:
+    """每話實際落地檔名（含碰撞序號），命名主體見 ``compute_chapter_name_base``。
+
+    同名衝突一律加序號 ``-2``、``-3`` 等（見 ``_unique_path``）。
+    """
+    name_base = compute_chapter_name_base(
+        doc_title=doc_title, fetch_auto_fill_title=fetch_auto_fill_title,
+        source=source, page_title=page_title, fallback_index=fallback_index)
     return _unique_path(out_dir, name_base)
 
 
@@ -436,6 +455,7 @@ def run_auto_translate(
     doc_title: str = "",
     fetch_auto_fill_title: bool | None = None,
     until_last: bool = False,
+    skip_existing: bool = False,
     stop_event=None,
     progress: Callable[[str], None] | None = None,
     print_summary: bool = True,
@@ -445,6 +465,8 @@ def run_auto_translate(
     count：要翻譯的「話數」（一話 ＝ 作品的一篇／一回，對應 HTML 一個檔案）。
         翻譯一話內部可能因內容過長而分多次送給 Gemini，但仍只算一話。
     until_last：為 True 時忽略 count，一路翻到沒有下一話為止。
+    skip_existing：為 True 時，翻譯前先算好這一話的檔名，若輸出資料夾已有同名檔
+        （不計碰撞序號）就跳過該話、直接抓下一話——適合批次中斷後重跑略過已完成的話。
     stop_event：threading.Event；設定後會在話與話之間（及分段之間）中止。
     progress：進度回呼（單一字串參數）；None 時印到 stdout。
     print_summary：是否在結束時透過 `log` 印出 `_print_summary` 總結；
@@ -542,6 +564,21 @@ def run_auto_translate(
             _record_url_history(sm, url, page_title, nav_links, source, log)
             next_url = _next_chapter_url(nav_links)
 
+            # 1.5) 若已有同名檔則跳過（重跑批次時略過已完成的話、省 API 額度）。
+            #      檢查用「不含碰撞序號」的檔名主體，因此判定的是「這一話本身」是否
+            #      已產出過，而非湊巧撞名的其他話。
+            if skip_existing:
+                name_base = compute_chapter_name_base(
+                    doc_title=doc_title,
+                    fetch_auto_fill_title=fetch_auto_fill_title,
+                    source=source, page_title=page_title, fallback_index=i)
+                existing = os.path.join(out_dir, f"{name_base}.html")
+                if os.path.exists(existing):
+                    result.skipped.append((url, f"{name_base}.html"))
+                    log(f"  ⏭️ 已存在同名檔「{name_base}.html」→ 跳過此話，續下一話。")
+                    url = next_url
+                    continue
+
             # 2) 提取 → 翻譯 → 替換 → 存檔
             try:
                 extracted = _extract(source, display_title, cfg)
@@ -629,7 +666,7 @@ def run_auto_translate(
     finally:
         session.close()
 
-    processed = len(result.done) + len(result.failed)
+    processed = len(result.done) + len(result.failed) + len(result.skipped)
     result.remaining = 0 if until_last else max(0, total - processed)
     if print_summary:
         _print_summary(result, log)
@@ -645,6 +682,10 @@ def _print_summary(result: AutoResult, log: Callable[[str], None]) -> None:
         log(f"失敗：{len(result.failed)} 話")
         for u, reason in result.failed:
             log(f"  ❌ {u} — {reason}")
+    if result.skipped:
+        log(f"跳過（已存在同名檔）：{len(result.skipped)} 話")
+        for u, fn in result.skipped:
+            log(f"  ⏭️ {u} — {fn}")
     if result.quota_paused:
         log("⏸️ 因 Gemini 額度上限暫停。")
         log(f"   待額度恢復後，用此網址當 --url 接續：{result.pending_url}")
@@ -670,6 +711,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="要連續翻譯的話數（一話 ＝ 作品一篇）")
     parser.add_argument("--until-last", action="store_true",
                         help="忽略 --count，一路翻到沒有下一話為止")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="輸出資料夾已有同名檔時跳過該話（重跑批次略過已完成的話）")
     parser.add_argument("--out", required=True, help="輸出 HTML 的資料夾")
     parser.add_argument("--gem-url", default=None,
                         help="Gemini Gem 網址（預設讀設定 gemini_gem_url）")
@@ -696,6 +739,7 @@ def main(argv: list[str] | None = None) -> int:
             backend=args.backend,
             gem_url=args.gem_url, profile_dir=args.profile_dir,
             headless=args.headless, until_last=args.until_last,
+            skip_existing=args.skip_existing,
             max_per_session=args.max_per_session,
             required_model=args.required_model,
             doc_title=args.doc_title,

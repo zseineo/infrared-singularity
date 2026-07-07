@@ -175,6 +175,13 @@ class AutoTranslatePanel(QWidget):
         out_hl.addWidget(btn_browse)
         form.addRow("輸出資料夾：", out_row)
 
+        self.skip_existing_cb = QCheckBox("已存在同名檔則跳過（重跑時略過已完成的話）")
+        self.skip_existing_cb.setToolTip(
+            "翻譯前先算好這一話的檔名，若輸出資料夾已有同名檔（不計 -2／-3 序號）\n"
+            "就跳過該話、直接翻下一話。適合批次中斷後重跑、略過已翻好的話並省 API 額度。\n"
+            "關閉時維持原行為：同名一律加 -2／-3 序號另存新檔。")
+        form.addRow("", self.skip_existing_cb)
+
         # 翻譯方式（瀏覽器／API）——兩顆切換鈕，被選中的以顏色提示；常用切換放主頁
         self._backend = "browser"
         self._backend_btns: dict[str, QPushButton] = {}
@@ -420,6 +427,8 @@ class AutoTranslatePanel(QWidget):
         self._set_backend(backend)
         self.out_edit.setText(getattr(m, "_auto_translate_out_dir", "")
                               or getattr(m, "_last_dir", "") or "")
+        self.skip_existing_cb.setChecked(bool(
+            getattr(m, "_auto_translate_skip_existing", False)))
         # 作品名稱：與首頁同步——優先用首頁 doc_title，沒有就空
         try:
             home_title = m._translate_panel.get_doc_title().strip()
@@ -516,6 +525,7 @@ class AutoTranslatePanel(QWidget):
             "max_per_session": self.max_session_spin.value(),
             "doc_title": self.doc_title_edit.text().strip(),
             "out_dir": out_dir,
+            "skip_existing": self.skip_existing_cb.isChecked(),
         }
 
     def _update_filename_preview(self) -> None:
@@ -606,7 +616,7 @@ class AutoTranslatePanel(QWidget):
         # 執行中鎖住設定欄位，避免使用者中途改值造成混亂
         for w in (self.url_edit, self.count_spin, self.until_last,
                   self.gem_edit, self.model_combo, self.max_session_spin,
-                  self.doc_title_edit, self.out_edit,
+                  self.doc_title_edit, self.out_edit, self.skip_existing_cb,
                   *self._backend_btns.values()):
             w.setEnabled(not running)
         # until_last 勾選時保持 count 灰

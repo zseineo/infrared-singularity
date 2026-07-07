@@ -65,7 +65,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.98"
+APP_VERSION = "1.99"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -709,6 +709,7 @@ class MainWindow(QMainWindow):
         self._auto_translate_out_dir: str = ""
         self._auto_translate_count: int = 5
         self._auto_translate_until_last: bool = False
+        self._auto_translate_skip_existing: bool = False
         # 翻譯後端與 API 設定（金鑰另存於加密檔，不在 cache）
         self._translate_backend: str = "browser"
         self._gemini_api_model: str = "gemini-2.5-pro"
@@ -1726,6 +1727,7 @@ class MainWindow(QMainWindow):
         self._auto_translate_out_dir = params["out_dir"]
         self._auto_translate_count = params["count"]
         self._auto_translate_until_last = params["until_last"]
+        self._auto_translate_skip_existing = params.get("skip_existing", False)
         self._gemini_max_per_session = params["max_per_session"]
         self._gemini_required_model = params["required_model"] or "pro"
         # 手動模式下也把使用者填的作品名稱同步回首頁（保持兩邊一致）
@@ -1739,14 +1741,16 @@ class MainWindow(QMainWindow):
             params["start_url"], params["count"], params["out_dir"],
             params["gem_url"], params["until_last"],
             params["max_per_session"], params["required_model"],
-            params.get("doc_title", ""))
+            params.get("doc_title", ""),
+            params.get("skip_existing", False))
 
     def _start_auto_translate(self, start_url: str, count: int,
                                out_dir: str, gem_url: str,
                                until_last: bool,
                                max_per_session: int,
                                required_model: str = "",
-                               doc_title: str = "") -> None:
+                               doc_title: str = "",
+                               skip_existing: bool = False) -> None:
         """在背景執行緒跑自動翻譯，進度同步至橫幅、狀態列與面板 Log。"""
         self._auto_translate_running = True
         self._auto_stop_event = threading.Event()
@@ -1762,6 +1766,7 @@ class MainWindow(QMainWindow):
             self._auto_window.set_running(True)
             self._auto_window.append_log(
                 f"=== 啟動自動翻譯：count={count} until_last={until_last} "
+                f"skip_existing={skip_existing} "
                 f"max_per_session={max_per_session} ===")
         self.show_status("⏳ 自動翻譯啟動中…", "#17a2b8")
 
@@ -1794,6 +1799,7 @@ class MainWindow(QMainWindow):
                     doc_title=doc_title,
                     fetch_auto_fill_title=self._fetch_auto_fill_title,
                     until_last=until_last,
+                    skip_existing=skip_existing,
                     stop_event=stop_event,
                     progress=_progress,
                     print_summary=False)  # GUI 端自己印更完整的總結
@@ -1840,6 +1846,10 @@ class MainWindow(QMainWindow):
         if result.failed:
             lines.append(f"失敗／跳過 {len(result.failed)} 話：")
             lines += [f"  ❌ {u} — {why}" for u, why in result.failed]
+        skipped = getattr(result, "skipped", [])
+        if skipped:
+            lines.append(f"跳過（已存在同名檔）{len(skipped)} 話：")
+            lines += [f"  ⏭️ {u} — {fn}" for u, fn in skipped]
         if result.reached_end:
             lines.append("")
             lines.append("🏁 已翻到最後一話。")
@@ -2244,6 +2254,7 @@ class MainWindow(QMainWindow):
             auto_translate_out_dir=self._auto_translate_out_dir,
             auto_translate_count=self._auto_translate_count,
             auto_translate_until_last=self._auto_translate_until_last,
+            auto_translate_skip_existing=self._auto_translate_skip_existing,
             translate_backend=self._translate_backend,
             gemini_api_model=self._gemini_api_model,
             gemini_api_only_prompt=self._gemini_api_only_prompt,
@@ -2334,6 +2345,8 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             self._auto_translate_count = 5
         self._auto_translate_until_last = bool(cache.auto_translate_until_last)
+        self._auto_translate_skip_existing = bool(
+            cache.auto_translate_skip_existing)
         self._translate_backend = str(cache.translate_backend or "browser")
         self._gemini_api_model = str(
             cache.gemini_api_model or "gemini-2.5-pro")

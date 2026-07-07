@@ -182,6 +182,9 @@ class AppCache:
     auto_translate_out_dir: str = ""
     auto_translate_count: int = 5
     auto_translate_until_last: bool = False
+    # auto_translate_skip_existing：翻譯前若輸出資料夾已有同名檔則跳過該話
+    # （重跑批次時略過已完成的話、省 API 額度）。預設關閉。
+    auto_translate_skip_existing: bool = False
     # 翻譯後端：'browser'（操控網頁版 Gemini）或 'api'（Google Gemini API）。
     translate_backend: str = "browser"
     # API 模式用的模型 id（見 aa_tool.gemini_api.API_MODELS）。
@@ -416,6 +419,9 @@ class SettingsManager:
                 pass
             cache.auto_translate_until_last = bool(data.get(
                 'auto_translate_until_last', cache.auto_translate_until_last))
+            cache.auto_translate_skip_existing = bool(data.get(
+                'auto_translate_skip_existing',
+                cache.auto_translate_skip_existing))
             cache.gemini_required_model = str(data.get(
                 'gemini_required_model', cache.gemini_required_model) or "pro")
             cache.translate_backend = str(data.get(
@@ -523,6 +529,7 @@ class SettingsManager:
                 'auto_translate_out_dir': cache.auto_translate_out_dir,
                 'auto_translate_count': cache.auto_translate_count,
                 'auto_translate_until_last': cache.auto_translate_until_last,
+                'auto_translate_skip_existing': cache.auto_translate_skip_existing,
                 'gemini_required_model': cache.gemini_required_model,
                 'translate_backend': cache.translate_backend,
                 'gemini_api_model': cache.gemini_api_model,

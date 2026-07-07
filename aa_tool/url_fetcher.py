@@ -3,7 +3,8 @@
 支援的網域：
   - 預設格式（article div + relate_dl）
   - himanatokiniyaruo.com（dt / dd 結構 + related-entries；舊 <dt id="N"> 與新 <dt><span>N</span> 兩種模板）
-  - blog.fc2.com（ently_text / entry_text div + relate_dl，含 web.archive.org 封存版、res_h/res_b 變體）
+  - blog.fc2.com（ently_text / entry_text div + relate_dl，含 web.archive.org 封存版、res_h/res_b 變體、
+    yarucha 類 <a name/num> + <dd> 無容器模板）
   - blog105.fc2.com（textar-aa div + relate_dl，FC2 舊版模板，含不帶引號 font color）
   - blog136.fc2.com（entryblock / AA div + relate_dl，FC2 舊版模板）
   - yaruobook.jp（author-res-dt / author-res 結構 + relatedPostsWrap）
@@ -642,6 +643,76 @@ def _parse_himanatokiniyaruo(page_html: str, base_url: str, *, author_name: str 
 #  解析器：FC2 Blog
 # ════════════════════════════════════════════════════════════════
 
+def _extract_fc2_relate_nav(page_html: str, base_url: str) -> list[dict]:
+    """抽取 FC2 `<dl class="relate_dl">` 關聯記事清單。
+
+    僅匹配 class 恰為 `relate_dl`（可帶空白分隔的額外字樣），排除
+    `relate_dl2`（部分站點如 yaranaioblog 的「前後エントリー」區塊，
+    內文之前、僅含上下一話），改取真正的「関連記事」清單。
+    """
+    nav_links: list[dict] = []
+    relate_m = re.search(r'<dl\s+class="relate_dl(?:\s[^"]*)?">(.*?)</dl>', page_html, re.DOTALL)
+    if relate_m:
+        relate_html = relate_m.group(1)
+        for li in re.finditer(
+            r'<li\s+class="(relate_li(?:_nolink)?)"[^>]*>(.*?)</li>',
+            relate_html, re.DOTALL,
+        ):
+            li_class = li.group(1)
+            li_inner = li.group(2)
+            # 移除縮圖／視覺連結 span（如 yaranaioblog 的 `<span class="vislin">`
+            # 內含一個只寫著「v」的 <a>），避免後面誤取它而非真正的標題連結。
+            li_inner = re.sub(
+                r'<span\s+class="vislin">.*?</span>', '', li_inner, flags=re.DOTALL)
+            if li_class == 'relate_li':
+                a_m = re.search(r'<a\s+href="([^"]+)"[^>]*>(.*?)</a>', li_inner, re.DOTALL)
+                if a_m:
+                    href = urljoin(base_url, a_m.group(1))
+                    title = html.unescape(re.sub(r'<[^>]+>', '', a_m.group(2))).strip()
+                    nav_links.append({'title': title, 'url': href, 'is_current': False})
+            else:
+                title = html.unescape(re.sub(r'<[^>]+>', '', li_inner)).strip()
+                nav_links.append({'title': title, 'url': None, 'is_current': True})
+        # FC2 各站的 relate_dl 排序不一致：多數為「新 → 舊」需 reverse 取得時間順序，
+        # 但部分站點（例：yaruosippu.blog.fc2.com）原始 HTML 已是「舊 → 新」時間順序，
+        # 此時 reverse 反而會讓「下一話」按鈕變成上一集。
+        # 偵測方式：從標題尾端 `(YYYY/MM/DD)` 抽日期，多數相鄰配對為遞增 → 不 reverse；
+        # 無日期或日期皆同 → 退回既有「reverse」慣例。
+        if not _is_nav_ascending_by_date(nav_links):
+            nav_links.reverse()
+    return nav_links
+
+
+def _extract_fc2_num_dd_posts(
+    page_html: str, *, author_name: str = "", author_only: bool = False,
+) -> str | None:
+    """抽取 yarucha.blog.fc2.com 類 FC2 模板的貼文內文。
+
+    此模板無 ently_text/entry_text 等容器；內文置於 `<div class="article">`
+    內的 `<span class="aa">`，每則貼文結構為：
+        <div><a name="N" class="num">N</a> ： <span class="name"><b>作者</b></span>
+             [mail] YYYY/MM/DD(曜) HH:MM:SS.SS ID:XXX<dd>…內文（<br> 分行）…</dd></div>
+    合成標準 `<dt>N 標頭</dt><dd>內文</dd>` 後複用 ``_extract_dt_dd_posts``，
+    以共用作者過濾／顏色保留邏輯。標頭格式（`N : NAME [] 日期 ID`）由
+    ``_POSTER_NAME_RE_ALT`` 涵蓋。
+    """
+    # 內文邊界：relate_dl（関連記事）之前 —— 其後的 <div class="article"> 為留言區。
+    rel = re.search(r'<dl\s+class="relate_dl', page_html)
+    region = page_html[:rel.start()] if rel else page_html
+    frag = ''.join(
+        '<dt>{}{}</dt><dd>{}</dd>'.format(m.group(1), m.group(2), m.group(3))
+        for m in re.finditer(
+            r'<div><a name="\d+"\s+class="num">(\d+)</a>(.*?)<dd>(.*?)</dd>\s*</div>',
+            region, re.DOTALL,
+        )
+    )
+    if not frag:
+        return None
+    lines_out = _extract_dt_dd_posts(
+        '<dl>' + frag + '</dl>', author_name=author_name, author_only=author_only)
+    return '\n\n'.join(lines_out) if lines_out else None
+
+
 def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", author_only: bool = False) -> tuple[str | None, list[dict], str]:
     """解析 FC2 Blog 格式（含 web.archive.org 封存版）。
 
@@ -708,7 +779,11 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
     containers = list(re.finditer(
         r'<div\s+class="(?:ently_text|entry_text|entry_body|eBody|entryblock|textar-aa)"[^>]*>', page_html))
     if not containers:
-        return None, [], page_title
+        # yarucha.blog.fc2.com 類模板無上述容器，內文改用
+        # <div class="article"><span class="aa"> 內的 <a name/num> + <dd> 結構。
+        text_content = _extract_fc2_num_dd_posts(
+            page_html, author_name=author_name, author_only=author_only)
+        return text_content, _extract_fc2_relate_nav(page_html, base_url), page_title
 
     # 兩步策略：
     # Step 1. 以「下一個容器起點」為上限 bounded 掃描，找出第一個含貼文標頭的容器
@@ -764,39 +839,7 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
     text_content = '\n'.join(lines) if lines else None
 
     # ── 關聯連結 ──
-    # 僅匹配 class 恰為 `relate_dl`（可帶空白分隔的額外字樣）的 <dl>，
-    # 排除 `relate_dl2`（部分 FC2 站點如 yaranaioblog 的「前後エントリー」
-    # 區塊，內文之前、僅含上下一話），改取真正的「関連記事」清單。
-    nav_links: list[dict] = []
-    relate_m = re.search(r'<dl\s+class="relate_dl(?:\s[^"]*)?">(.*?)</dl>', page_html, re.DOTALL)
-    if relate_m:
-        relate_html = relate_m.group(1)
-        for li in re.finditer(
-            r'<li\s+class="(relate_li(?:_nolink)?)"[^>]*>(.*?)</li>',
-            relate_html, re.DOTALL,
-        ):
-            li_class = li.group(1)
-            li_inner = li.group(2)
-            # 移除縮圖／視覺連結 span（如 yaranaioblog 的 `<span class="vislin">`
-            # 內含一個只寫著「v」的 <a>），避免後面誤取它而非真正的標題連結。
-            li_inner = re.sub(
-                r'<span\s+class="vislin">.*?</span>', '', li_inner, flags=re.DOTALL)
-            if li_class == 'relate_li':
-                a_m = re.search(r'<a\s+href="([^"]+)"[^>]*>(.*?)</a>', li_inner, re.DOTALL)
-                if a_m:
-                    href = urljoin(base_url, a_m.group(1))
-                    title = html.unescape(re.sub(r'<[^>]+>', '', a_m.group(2))).strip()
-                    nav_links.append({'title': title, 'url': href, 'is_current': False})
-            else:
-                title = html.unescape(re.sub(r'<[^>]+>', '', li_inner)).strip()
-                nav_links.append({'title': title, 'url': None, 'is_current': True})
-        # FC2 各站的 relate_dl 排序不一致：多數為「新 → 舊」需 reverse 取得時間順序，
-        # 但部分站點（例：yaruosippu.blog.fc2.com）原始 HTML 已是「舊 → 新」時間順序，
-        # 此時 reverse 反而會讓「下一話」按鈕變成上一集。
-        # 偵測方式：從標題尾端 `(YYYY/MM/DD)` 抽日期，多數相鄰配對為遞增 → 不 reverse；
-        # 無日期或日期皆同 → 退回既有「reverse」慣例。
-        if not _is_nav_ascending_by_date(nav_links):
-            nav_links.reverse()
+    nav_links = _extract_fc2_relate_nav(page_html, base_url)
 
     return text_content or None, nav_links, page_title
 
@@ -1337,9 +1380,9 @@ def parse_page_html(
     domain = _resolve_domain(base_url)
 
     # 網域匹配到的解析器優先嘗試；若取不到內文（子站模板不同等），
-    # 再 fallback 到其他解析器。實例：`yarucha.blog.fc2.com` 命中
-    # `blog.fc2.com` 但該站實際使用 `<div class="article">` 結構，
-    # 需退回 `_parse_default` 才能取到。
+    # 再 fallback 到其他解析器。多數 FC2 子站的模板差異已在 `_parse_fc2blog`
+    # 內部涵蓋（例：`yarucha.blog.fc2.com` 用 `<a name/num>` + `<dd>` 結構，
+    # 由該解析器的無容器分支處理），仍取不到內文時才走 fallback。
     primary_parser = None
     for key, parser in _DOMAIN_PARSERS.items():
         if key in domain:

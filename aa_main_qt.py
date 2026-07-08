@@ -65,7 +65,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "1.99"
+APP_VERSION = "2.00"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -294,6 +294,8 @@ class TranslatePanel(QWidget):
         btn_debug.clicked.connect(self._main.analyze_extraction)
         row.addWidget(btn_debug)
 
+        # 供設定浮層定位用：讓浮層自工具列（⚙ 鈕所在）底下展開，不蓋住 ⚙ 鈕。
+        self._toolbar = w
         return w
 
     def _build_source_area(self) -> QWidget:
@@ -2446,15 +2448,24 @@ class MainWindow(QMainWindow):
         self._settings_content = content
 
     def _position_settings_panel(self) -> None:
-        """把設定浮層放在內容區左上角；寬度上限、高度依內容收緊。"""
+        """把設定浮層放在 ⚙ 鈕所在工具列的正下方（比照自動翻譯「連線設定」浮層在導覽列下方）。
+
+        以工具列底緣為基準，避免蓋住 ⚙ 鈕，讓使用者可再按一次 ⚙ 關閉浮層。
+        """
         central = self.centralWidget()
         w, h = central.width(), central.height()
         if w <= 0 or h <= 0:
             return
         pw = min(560, max(360, w - 16))
         content_h = self._settings_content.sizeHint().height() + 16
-        ph = min(max(300, content_h), h - 16)
-        self._settings_panel.setGeometry(8, 8, pw, ph)
+        # 工具列在 TranslatePanel（stack index 0）內；映射其底緣至 central 座標作為 y 基準。
+        toolbar = getattr(self._translate_panel, "_toolbar", None)
+        if toolbar is not None and toolbar.isVisible():
+            top_y = toolbar.mapTo(central, QPoint(0, toolbar.height())).y()
+        else:
+            top_y = 8
+        ph = min(max(300, content_h), h - top_y - 8)
+        self._settings_panel.setGeometry(8, top_y, pw, ph)
 
     # ════════════════════════════════════════════════════════════
     #  📂 檔案列表浮層

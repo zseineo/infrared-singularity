@@ -169,6 +169,8 @@ class AutoTranslatePanel(QWidget):
         out_hl.setContentsMargins(0, 0, 0, 0)
         self.out_edit = QLineEdit()
         self.out_edit.setPlaceholderText("輸出 HTML 的資料夾")
+        # 輸出資料夾即時持久化：手動輸入完成（失焦／Enter）也記住，不必等按「開始」。
+        self.out_edit.editingFinished.connect(self._persist_out_dir)
         btn_browse = QPushButton("瀏覽…")
         btn_browse.clicked.connect(self._browse_out_dir)
         out_hl.addWidget(self.out_edit, 1)
@@ -589,6 +591,16 @@ class AutoTranslatePanel(QWidget):
         d = QFileDialog.getExistingDirectory(self, "選擇輸出資料夾", cur)
         if d:
             self.out_edit.setText(d)
+            self._persist_out_dir()
+
+    def _persist_out_dir(self) -> None:
+        """把目前輸出資料夾即時寫回主視窗並存檔，讓選擇不必按「開始」也能持久化。"""
+        out_dir = self.out_edit.text().strip()
+        m = self._main
+        if getattr(m, "_auto_translate_out_dir", "") == out_dir:
+            return
+        m._auto_translate_out_dir = out_dir
+        m.save_cache()
 
     def _on_start(self) -> None:
         params = self.collect_params()

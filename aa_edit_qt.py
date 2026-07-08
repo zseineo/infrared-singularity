@@ -2809,39 +2809,67 @@ class EditWindow(QMainWindow):
         if self._extracted_provider is None:
             self._set_status("⚠️ 無法取得提取結果，無法判定誤抓／漏抓", "#ffc107")
             return
-        # 提取結果每行為「ID|原文」；去掉流水號前綴、去所有空白後留存供比對。
-        # （AA 對齊用的半／全形空白會讓字面比對失準，故一律移除空白再比。）
+        # 提取結果與填入翻譯每行皆為「ID|文字」。編輯器內容可能已被翻譯取代
+        # （AA 行顯示的是中文譯文而非日文原文），故比對來源需**同時涵蓋兩者**：
+        # 選到日文原文時對上提取結果、選到中文譯文時對上翻譯。判為誤抓要記進
+        # failcase 的必須是**日文原文**（供 extract_text 驗證），因此翻譯項以共同
+        # ID 對回提取結果的日文；對不到才退回原字串。
+        def _rows(raw):
+            for row in (raw or "").split('\n'):
+                i = row.find('|')
+                if i >= 0:
+                    yield row[:i].strip(), row[i + 1:]
+                elif row.strip():
+                    yield '', row
+
         extracted_raw = self._extracted_provider() or ""
-        ext_entries = []
-        for row in extracted_raw.split('\n'):
-            idx = row.find('|')
-            txt = row[idx + 1:] if idx >= 0 else row
+        translation_raw = ""
+        if self._translation_provider is not None:
+            try:
+                translation_raw = self._translation_provider() or ""
+            except Exception:
+                translation_raw = ""
+
+        ext_by_id = {rid: txt for rid, txt in _rows(extracted_raw) if rid}
+        # 可比對項：(去空白比對形, 命中時應記錄的日文原文)
+        entries = []
+        for rid, txt in _rows(extracted_raw):
             norm = ''.join(txt.split())
             if norm:
-                ext_entries.append(norm)
-        if not ext_entries:
+                entries.append((norm, txt))
+        for rid, txt in _rows(translation_raw):
+            norm = ''.join(txt.split())
+            if norm:
+                entries.append((norm, ext_by_id.get(rid, txt)))
+        if not entries:
             self._set_status(
-                "⚠️ 提取結果為空，無法判定誤抓／漏抓（請先完成提取）", "#ffc107")
+                "⚠️ 提取結果與翻譯皆為空，無法判定誤抓／漏抓（請先完成提取）",
+                "#ffc107")
             return
 
-        def _in_extraction(s: str) -> bool:
-            """選取內容是否已被提取（去空白、雙向比對）。
+        def _match_jp(s: str):
+            """選取是否已被提取/翻譯；命中回傳應記錄的日文原文，否則 None。
 
             AA 圖行常是「圖形＋空白＋對話」，使用者難以剛好只選到對話，多半連整行
-            選起來。故除了「選取 ⊆ 某提取項」（只選對話子字串），也要判「某提取項
+            選起來。故除了「選取 ⊆ 某項」（只選文字子字串），也要判「某項(長度≥3)
             ⊆ 選取」（連 AA 一起選）——後者正是誤抓被誤判成漏抓的主因。
             """
             n = ''.join(s.split())
             if not n:
-                return False
-            if any(n in e for e in ext_entries):
-                return True
-            return any(len(e) >= 3 and e in n for e in ext_entries)
+                return None
+            for form, jp in entries:
+                if n in form or (len(form) >= 3 and form in n):
+                    return jp
+            return None
 
-        wrong = []  # 誤抓：在提取結果中
-        miss = []   # 漏抓：不在提取結果中
+        wrong = []  # 誤抓：記錄對應日文原文
+        miss = []   # 漏抓：記錄選取原文
         for ln in sel_lines:
-            (wrong if _in_extraction(ln) else miss).append(ln)
+            jp = _match_jp(ln)
+            if jp is not None:
+                wrong.append(jp.strip())
+            else:
+                miss.append(ln)
         # 以編輯器全文指紋查來源網址（供之後修 G/H 等需整篇脈絡的問題時重抓全文）；
         # 查不到不阻擋寫入，只在 toast 標示。
         url = ''

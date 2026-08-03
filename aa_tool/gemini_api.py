@@ -40,15 +40,17 @@ API_MODELS = [
     "gemini-3.1-pro",
     "gemini-3-flash",
     "gemini-3.5-flash",
+    "gemini-3.6-flash",
     "gemini-3.1-flash-lite",
 ]
 DEFAULT_API_MODEL = API_MODELS[0]
 
 # 特定模型的預設 thinking level。對應官方 SDK 的
 # ThinkingConfig(thinking_level=...)；REST 對映 generationConfig.thinkingConfig.thinkingLevel。
-# 3.5 Flash 預設 high（key 一律小寫比對）。
+# 3.5 / 3.6 Flash 預設 high（key 一律小寫比對）。
 _DEFAULT_THINKING_LEVEL = {
     "gemini-3.5-flash": "high",
+    "gemini-3.6-flash": "high",
 }
 
 _ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/"

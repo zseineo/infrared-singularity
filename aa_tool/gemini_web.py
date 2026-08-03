@@ -165,6 +165,42 @@ _QUOTA_RESET_PHRASES = [
     "quota will reset", "available again", "resets ",
 ]
 
+# 啟動瀏覽器的候選，依序嘗試第一個能啟動的：
+#   None    → Playwright 自帶的 Chromium（原本唯一的行為，已可用者不受影響）
+#   chrome  → 系統安裝的 Google Chrome
+#   msedge  → 系統安裝的 Microsoft Edge（Windows 必有）
+# 打包版（PyInstaller）不含 Chromium 本體（約 400MB），故一定會退到後兩者。
+_BROWSER_CHANNELS: list[str | None] = [None, "chrome", "msedge"]
+_CHANNEL_LABELS = {
+    None: "Playwright 內建 Chromium",
+    "chrome": "系統 Google Chrome",
+    "msedge": "系統 Microsoft Edge",
+}
+
+
+def _use_system_browsers_path(log: Callable[[str], None]) -> None:
+    """讓打包版也能用使用者自行 ``playwright install`` 裝的瀏覽器。
+
+    playwright 的 ``_impl/_transport.py`` 在偵測到 ``sys.frozen``（PyInstaller
+    打包）時會強制 ``PLAYWRIGHT_BROWSERS_PATH=0``，只找 exe 內
+    ``_internal/playwright/driver/package/.local-browsers``；本工具沒有把
+    Chromium 打包進去，於是連使用者自己裝在 ``%LOCALAPPDATA%\\ms-playwright``
+    的瀏覽器也一併看不到。這裡在該目錄存在時明確指過去（明確值會蓋過
+    playwright 內部的 ``setdefault``）。
+
+    未打包執行時這個值本來就是預設值，設了等於沒設；使用者已自行指定
+    ``PLAYWRIGHT_BROWSERS_PATH`` 時一律尊重，不覆寫。
+    """
+    if os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+        return
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        return
+    path = os.path.join(local_app_data, "ms-playwright")
+    if os.path.isdir(path):
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = path
+        log(f"瀏覽器路徑指向系統安裝位置：{path}")
+
 
 class GeminiWebSession:
     """管理一個持久化瀏覽器，操控 Gemini Gem 進行翻譯。
@@ -228,12 +264,13 @@ class GeminiWebSession:
                 "並接著 playwright install chromium") from e
         if self.profile_dir:
             os.makedirs(self.profile_dir, exist_ok=True)
+        _use_system_browsers_path(self._log)
         self._pw = sync_playwright().start()
-        self._context = self._pw.chromium.launch_persistent_context(
-            self.profile_dir,
-            headless=self.headless,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        try:
+            self._context = self._launch_context()
+        except Exception:
+            self.close()   # 啟動失敗也要收掉已 start 的 playwright，否則留下孤兒 node 程序
+            raise
         try:
             self._context.grant_permissions(["clipboard-read", "clipboard-write"])
         except Exception:
@@ -243,6 +280,37 @@ class GeminiWebSession:
         self._open_new_chat()
         self._ensure_logged_in(login_timeout)
         self._ensure_model()
+
+    def _launch_context(self):
+        """依 ``_BROWSER_CHANNELS`` 順序啟動，回傳第一個成功的 persistent context。
+
+        內建 Chromium 排第一，因此原本就能跑的環境行為完全不變；只有在
+        Chromium 不存在（最常見：打包版）時才會退到系統的 Chrome／Edge。
+        """
+        failures: list[str] = []
+        for channel in _BROWSER_CHANNELS:
+            kwargs = {
+                "headless": self.headless,
+                "args": ["--disable-blink-features=AutomationControlled"],
+            }
+            if channel:
+                kwargs["channel"] = channel
+            try:
+                context = self._pw.chromium.launch_persistent_context(
+                    self.profile_dir, **kwargs)
+            except Exception as e:
+                first_line = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+                failures.append(f"{_CHANNEL_LABELS[channel]}：{first_line}")
+                continue
+            if channel:
+                self._log(f"未找到內建 Chromium，改用{_CHANNEL_LABELS[channel]}啟動")
+            return context
+        raise GeminiWebError(
+            "無法啟動瀏覽器：找不到 Playwright 內建 Chromium，系統也沒有可用的 "
+            "Google Chrome 或 Microsoft Edge。\n"
+            "解法擇一：(1) 安裝 Google Chrome 或 Microsoft Edge；"
+            "(2) 執行 pip install playwright 後再執行 playwright install chromium。\n"
+            "嘗試紀錄：\n  - " + "\n  - ".join(failures))
 
     def close(self) -> None:
         """關閉瀏覽器與 Playwright。"""
@@ -500,7 +568,7 @@ class GeminiWebSession:
             # 模型字串通常很短（如 "2.5 Pro"、"Gemini 2.5 Pro"），過長視為命中錯元素。
             if 1 <= len(text) <= 60 and any(
                 kw in text.lower() for kw in
-                ("pro", "flash", "ultra", "gemini", "2.5", "3.0", "3.1")
+                ("pro", "flash", "ultra", "gemini", "2.5", "3.0", "3.1", "3.5", "3.6")
             ):
                 return text
         return ""

@@ -66,6 +66,26 @@ def _postprocess_text(text: str, korean_mode: bool = False,
 # 提取前一律整份移除，不影響可見文字。
 _BIDI_CONTROL_RE = re.compile('[‎‏‪-‮⁦-⁩]')
 
+# 上色標記：工具內部用來保存原文顏色的字面標籤，不是可翻譯內容。
+_COLOR_MARKUP_RE = re.compile(r'<span\s+style="color:[^"]*">|</span>')
+
+
+def _mask_color_markup(text: str) -> str:
+    """把上色標記換成等長半形空白，避免標籤被當成可翻譯文字提取。
+
+    網址讀取結果會把顏色以字面 `<span style="color:...">…</span>` 留在原文中。
+    若不遮蔽，標籤本身會被提取成候選（如 `color`、`ff0000"`、`(255,`），更糟的
+    是候選邊界會把結尾的 `</span>` 一起吃進去（`…廃業</span>`）——替換譯文時
+    整段連同結束標籤被覆寫，該顏色就從此處一路蔓延到後文，直到下一個
+    `</span>` 為止。
+
+    以「等長空白」而非直接刪除取代：行數與欄位偏移都不變，實驗管線回頭用
+    `cand_s/_e` 索引原行時才不會錯位；空白同時是天然的候選邊界，可讓標籤
+    前後的文字各自成段。
+    """
+    return _COLOR_MARKUP_RE.sub(lambda m: ' ' * (m.end() - m.start()), text)
+
+
 # 2ch/5ch 發文者行：形如「4402 ： ◆GESU1/dEaE ： 2021/05/06(木) 23:19:36 ID:nGcM5Umt」
 # 特徵：含 ID:xxxxxx（trip code），這組標記對發文者行幾乎是唯一判別
 _POSTER_LINE_RE = re.compile(r'ID:[A-Za-z0-9+/.]{6,}')
@@ -292,11 +312,13 @@ _AA_LATIN_PREFIX_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9]*[぀-ヿ一-鿿]')
 # AA 圖則常借小字片假名作裝飾起頭（如「ィｆ芥ぅ」「ィ7从V」）。
 _AA_SMALL_KATA_PREFIX_RE = re.compile(r'^[ァィゥェォャュョッヮヶ]')
 
-# AA 風格 latin 尾綴：CJK 字元後接孤立的 1-2 個半形字母（大小寫皆可）、
-# 可再接一個尾標點（如「行灯な心マi」結尾的 `マi`、「怎うぅx,」結尾的 `ぅx,`）。
-# 真實日文句子罕見以 CJK 後直接接半形 latin 結尾；AA 圖則常用此模式（單字母
-# 當視覺裝飾）。對命中此模式的候選 -3 分。
-_AA_LATIN_SUFFIX_RE = re.compile(r'[぀-ヿ一-鿿][a-zA-Z]{1,2}[、,，.．]?$')
+# AA 風格 latin 尾綴：CJK 字元後接孤立的 1-2 個半形字母（大小寫皆可）、可再接一個
+# 全形字母、可再接一個尾標點（如「行灯な心マi」結尾的 `マi`、「怎うぅx,」結尾的
+# `ぅx,`、「灯うぅxｘ」結尾的 `ぅxｘ`——半形 `x` 後接全形 `ｘ`）。真實日文句子罕見
+# 以 CJK 後直接接 latin 字母結尾；AA 圖則常用此模式（單字母當視覺裝飾）。對命中此
+# 模式的候選 -3 分。尾綴**必含至少一個半形字母**——AA 雜湊常混用半／全形 latin
+# （`xｘ`），但單獨的全形字母（如「死ｎ」把 `ん` 寫成全形 `ｎ` 的合法對話）不算。
+_AA_LATIN_SUFFIX_RE = re.compile(r'[぀-ヿ一-鿿][a-zA-Z]{1,2}[Ａ-Ｚａ-ｚ]?[、,，.．]?$')
 
 # 連續 ≥3 個相同平假名 — AA 圖裝飾特徵（如「んんんんんん」「あああ」）。
 # 真實日文擬聲詞如「あはは」「ふふふ」3 同字至多 3 個；若 ≥4 個連續，幾乎肯定是
@@ -984,7 +1006,8 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     #   而 AA 牆/框線碎片幾乎都無平假名。
     #   豁免：右端對話／名牌／成對術語括號／全形 ！？（喊叫，AA 借用的是半形
     #   !?）／骰子・選項格式（「【1D100:13】」無假名但是合法內容）。
-    if block in ('text', 'struct'):
+    if block in ('text', 'struct') and not (
+            len(set(text)) == 1 and len(text) >= 3 and not is_right_edge):
         s += w('block_text')
     elif block == 'aa' and not (any_hira
                                 or is_right_edge or has_name_tag
@@ -1453,6 +1476,8 @@ def extract_text(
 
     # 移除 Unicode 雙向控制/隱形格式字元（不影響可見文字、不改變行數）
     source = _BIDI_CONTROL_RE.sub('', source)
+    # 遮蔽上色標記，避免標籤本身被當成可翻譯文字提取（見 _mask_color_markup）
+    source = _mask_color_markup(source)
     lines = source.split('\n')
     extracted: list[tuple[str, int]] = []
 

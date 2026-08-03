@@ -267,6 +267,14 @@ def _replace_with_padding(
 
 # 全形＋半形片假名（含長音 ー）；用於 glossary_avoid_aa 的「緊鄰片假名」判定。
 _KATAKANA_RE = re.compile(r'[ァ-ヺ・ー゠ｦ-ﾟ]')
+# 片假名分隔符（中黑點 U+30FB、雙連字號 U+30A0）。判定「緊鄰片假名碎片」時，相鄰字
+# 若是分隔符須看其「外側」那個字：
+#   * 外側也是片假名 → 分隔符是**複合名連接符**（如 `ジオン・ズム・ダイクン`），命中段
+#     是長片假名複合名的碎片 → 算碎片證據、保留原文不替換。
+#   * 外側非片假名／行首行尾 → 分隔符是**項目符號**（如 `・オーガス`），後面是完整詞
+#     → 不算碎片、應正常替換。
+# 長音 `ー` 屬詞內字元、不列入分隔符（前/後接 `ー` 一律算碎片證據）。
+_KATAKANA_SEPARATORS = frozenset('・゠')
 # 片假名形式的敬稱 — 名字後接這些時不算「誤切更長片假名詞」，不應排除套用。
 _KATAKANA_HONORIFICS = ('サン', 'チャン', 'クン', 'サマ', 'タン', 'ニキ', 'ネキ')
 # glossary_avoid_aa：命中位置左右視窗 AA 噪聲密度 >= 此值 → 視為落在 AA 圖上。
@@ -325,26 +333,49 @@ def _is_katakana_fragment_hit(
     `key` 本身含片假名（`_KATAKANA_RE`）、且命中後緊鄰（前一字或後一字）
     仍是片假名 → True（如 AI 譯文保留的 `レオリオ` 中的 `リオ`，左鄰 `オ`）。
     但後方緊接片假名敬稱（`サン` 等）時排除（屬正常的「名字＋敬稱」）。
+    相鄰字若是分隔符 `・゠`（`_KATAKANA_SEPARATORS`）須看其外側那個字：外側也是
+    片假名才算碎片（複合名連接符，如 `ジオン・ズム・ダイクン` 保留不替換）；外側非
+    片假名／行首行尾則是項目符號（如 `・オーガス`），後面是完整詞、應正常替換。
 
     `covered`：本行所有術語命中範圍的字元位置集合（由呼叫端預先算好）。
-    若相鄰的片假名字元也在 `covered` 裡，代表它同樣是本輪被替換的術語，
-    兩術語合起來完整覆蓋整段片假名詞（如 `ハクタイ`＋`ジム`），不視為碎片。
+    若相鄰（分隔符時為其外側）的片假名字元也在 `covered` 裡，代表它同樣是本輪
+    被替換的術語，兩術語合起來完整覆蓋整段片假名詞（如 `ハクタイ`＋`ジム`），
+    不視為碎片。
     """
     if not _KATAKANA_RE.search(key):
         return False
-    before_pos = start - 1
-    after_pos = end
-    before = line[before_pos] if before_pos >= 0 else ''
-    after = line[after_pos] if after_pos < len(line) else ''
-    if before and _KATAKANA_RE.match(before):
-        if covered is None or before_pos not in covered:
-            return True
-    if after and _KATAKANA_RE.match(after):
-        tail = line[end:end + 4]
-        if not any(tail.startswith(h) for h in _KATAKANA_HONORIFICS):
-            if covered is None or after_pos not in covered:
-                return True
+    if _katakana_flank_is_fragment(line, start - 1, -1, covered):
+        return True
+    # 後方緊接片假名敬稱（`タロウサン` 等）屬「名字＋敬稱」，不算硬切碎片。
+    tail = line[end:end + 4]
+    if any(tail.startswith(h) for h in _KATAKANA_HONORIFICS):
+        return False
+    if _katakana_flank_is_fragment(line, end, +1, covered):
+        return True
     return False
+
+
+def _katakana_flank_is_fragment(
+        line: str, pos: int, step: int,
+        covered: 'frozenset[int] | None') -> bool:
+    """命中某一側緊鄰字（位於 `pos`，往 `step`＝-1 左／+1 右方向）是否構成
+    「片假名碎片」證據。分隔符 `・゠` 須看再往外一格（`pos + step`）是否仍為
+    片假名（複合名連接符才算碎片；項目符號的行首行尾外側則不算）。
+    """
+    if pos < 0 or pos >= len(line):
+        return False
+    ch = line[pos]
+    if not _KATAKANA_RE.match(ch):
+        return False
+    if ch in _KATAKANA_SEPARATORS:
+        outer_pos = pos + step
+        if outer_pos < 0 or outer_pos >= len(line):
+            return False
+        outer = line[outer_pos]
+        if not _KATAKANA_RE.match(outer) or outer in _KATAKANA_SEPARATORS:
+            return False
+        return covered is None or outer_pos not in covered
+    return covered is None or pos not in covered
 
 
 def _glossary_hit_on_aa(line: str, start: int, end: int, key: str,

@@ -9,9 +9,14 @@
   - blog136.fc2.com（entryblock / AA div + relate_dl，FC2 舊版模板）
   - yaruobook.jp（author-res-dt / author-res 結構 + relatedPostsWrap）
   - yaruohiroba.com（dt/dd 結構 + related-list 關聯清單）
+  - yaruobook.net / yaruobook.com（entry-content div + dt/dd + relatedPostsWrap，早期文章含 HTML 數字字元引用）
   - yaruo-matome.com（entry-content div + nexe-prev-post ul）
   - blog.livedoor.jp（textar-aa / span.aa，無關聯記事、尾端嵌入下一話連結）
   - asitayaruo.com（entry-content + dt/dd；本身無 prev/next，關聯記事改由分類頁 ?cat=N&paged=K 取得）
+
+顏色標籤一律輸出為 `<span style="color:#rrggbb">`；來源的 `rgb(R, G, B)` 形式
+（yaruobook.com / .jp、himanatokiniyaruo.com 等）會正規化為 `#rrggbb`，
+標籤內不留空白與逗號（見 `_canon_color_value`）。
 """
 from __future__ import annotations
 
@@ -111,18 +116,45 @@ def fetch_url(url: str, *, timeout: int = 20) -> str:
 #  共用輔助
 # ════════════════════════════════════════════════════════════════
 
+# `rgb(R, G, B)` / `rgba(R, G, B, A)` 形式的顏色值（大小寫不拘、容許空白）
+_RGB_FUNC_RE = re.compile(
+    r'rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*'
+    r'(?:,\s*[\d.]+\s*)?\)',
+    re.IGNORECASE,
+)
+
+
+def _canon_color_value(value: str) -> str:
+    """把 `rgb()/rgba()` 形式的顏色值正規化為 `#rrggbb`。
+
+    部分站台（例：yaruobook.com）的 inline style 用 `color: rgb(255, 0, 0)`。
+    這種寫法夾帶空白與逗號，與工具其他地方一律使用的 `#rrggbb` 不一致，會讓
+    下游把標籤內的 `color`、`(255,` 等片段誤認成可翻譯文字。統一成 `#rrggbb`
+    後標籤內不再有空白與逗號。非 rgb 形式（`#ff0000`、`red` 等）原樣回傳。
+    """
+    value = value.strip()
+    m = _RGB_FUNC_RE.fullmatch(value)
+    if not m:
+        return value
+    r, g, b = (min(255, int(x)) for x in m.groups())
+    return f'#{r:02x}{g:02x}{b:02x}'
+
+
 def _normalize_color_tags(text: str) -> str:
     """將各種顏色標籤統一為 <span style="color:VALUE"> 格式。
 
     支援：
     - <span style="...color:VALUE..."> （含混合屬性）
     - <font color="VALUE"> / </font>
+
+    顏色值一律經 `_canon_color_value` 正規化（`rgb()` → `#rrggbb`）。
     """
     # <font color="VALUE"> / <font color=VALUE> → <span style="color:VALUE">
     # 支援帶引號與不帶引號兩種格式（舊式 FC2 模板如 blog105.fc2.com 使用不帶引號）
     text = re.sub(
         r'<font\s+color=(?:"([^"]+)"|([^"\s>]+))[^>]*>',
-        lambda m: f'<span style="color:{m.group(1) or m.group(2)}">',
+        lambda m: (f'<span style="color:'
+                   f'{_canon_color_value(m.group(1) or m.group(2))}">'),
         text,
     )
     text = text.replace('</font>', '</span>')
@@ -132,7 +164,7 @@ def _normalize_color_tags(text: str) -> str:
         style = m.group(1)
         cm = re.search(r'color\s*:\s*([^;"]+)', style)
         if cm:
-            return f'<span style="color:{cm.group(1).strip()}">'
+            return f'<span style="color:{_canon_color_value(cm.group(1))}">'
         return ''
     text = re.sub(r'<span\s+style="([^"]*color[^"]*)">', _repl, text)
 
@@ -1335,6 +1367,7 @@ _DOMAIN_PARSERS: dict[str, callable] = {
     'yaruobook.jp': _parse_yaruobook,
     'yaruohiroba.com': _parse_yaruobook,
     'yaruobook.net': _parse_yaruobook_net,
+    'yaruobook.com': _parse_yaruobook_net,
     'yaruo-matome.com': _parse_yaruo_matome,
     'asitayaruo.com': _parse_asitayaruo,
 }

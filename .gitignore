@@ -2,6 +2,7 @@
 *.json
 *.lock
 *.log
+*.bak
 
 # API 金鑰（DPAPI 加密；雙重保險也不進 git）
 aa_api_keys.dat

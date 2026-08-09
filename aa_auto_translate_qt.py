@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from aa_tool.gemini_api import API_MODELS
+from aa_tool.openai_api import API_PROVIDERS
 from aa_tool import secure_store
 
 # 翻譯後端選項：(顯示文字, 內部值)
@@ -33,6 +34,18 @@ _BACKEND_OPTIONS: list[tuple[str, str]] = [
     ("瀏覽器", "browser"),
     ("API", "api"),
 ]
+
+# API 供應商選項：(顯示文字, 內部值)；順序沿用 API_PROVIDERS 宣告順序。
+_PROVIDER_OPTIONS: list[tuple[str, str]] = [
+    (meta["label"], pid) for pid, meta in API_PROVIDERS.items()
+]
+
+
+def _provider_models(provider: str) -> list[str]:
+    """回傳供應商的模型建議清單；gemini 用 gemini_api.API_MODELS。"""
+    if provider == "gemini":
+        return list(API_MODELS)
+    return list(API_PROVIDERS.get(provider, {}).get("models", []))
 
 # 翻譯方式切換鈕樣式：選中（藍底）／未選中（灰底）
 _BACKEND_BTN_SEL = (
@@ -317,13 +330,37 @@ class AutoTranslatePanel(QWidget):
         sep.setStyleSheet("color:#adb5bd;")
         form.addRow(sep)
 
+        self._conn_form = form  # 供切換供應商時隱藏「自定義端點」列
+        # 每供應商在本次面板開啟期間的暫存（切供應商即互換，儲存時一併寫入）
+        self._provider_keys: dict[str, list[str]] = {}
+        self._provider_models: dict[str, str] = {}
+        self._cur_provider = "gemini"
+
+        self.api_provider_combo = QComboBox()
+        for label, value in _PROVIDER_OPTIONS:
+            self.api_provider_combo.addItem(label, value)
+        self.api_provider_combo.setToolTip(
+            "選擇 API 供應商。各供應商的金鑰、模型分開記住，切換不互相覆蓋。\n"
+            "OpenAI／DeepSeek／自定義走 OpenAI 相容端點；Claude 走 Anthropic 端點。")
+        self.api_provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+        form.addRow("API 供應商：", self.api_provider_combo)
+
         self.api_model_combo = QComboBox()
-        self.api_model_combo.addItems(API_MODELS)
+        self.api_model_combo.setEditable(True)  # 允許自行輸入其他 model id
+        self.api_model_combo.setToolTip(
+            "下拉為常見建議值，亦可直接輸入其他 model id（如新推出的型號）。")
         form.addRow("API 模型：", self.api_model_combo)
+
+        self.api_base_url_edit = QLineEdit()
+        self.api_base_url_edit.setPlaceholderText(
+            "自定義 OpenAI 相容端點，例：https://openrouter.ai/api/v1")
+        self.api_base_url_edit.setToolTip(
+            "僅「自定義」供應商需填；需為 OpenAI 相容端點（會呼叫 {base_url}/chat/completions）。")
+        form.addRow("自定義端點：", self.api_base_url_edit)
 
         self.api_keys_edit = QPlainTextEdit()
         self.api_keys_edit.setPlaceholderText(
-            "每行一把 Google API 金鑰；多把會輪流送出請求")
+            "每行一把 API 金鑰；多把會輪流送出請求（各供應商分開記住）")
         self.api_keys_edit.setFixedHeight(90)
         # 金鑰加密與儲存說明改放此欄位的浮動提示（滑過顯示）
         self.api_keys_edit.setToolTip(
@@ -402,11 +439,56 @@ class AutoTranslatePanel(QWidget):
         self._on_backend_changed()
 
     def _on_backend_changed(self) -> None:
-        """API 模型／金鑰只在 API 模式啟用；翻譯 Prompt 兩模式都可編輯。"""
+        """API 供應商／模型／金鑰只在 API 模式啟用；翻譯 Prompt 兩模式都可編輯。"""
         is_api = self._backend == "api"
-        for w in (self.api_model_combo, self.api_keys_edit):
+        for w in (self.api_provider_combo, self.api_model_combo,
+                  self.api_base_url_edit, self.api_keys_edit):
             w.setEnabled(is_api)
         self.api_prompt_edit.setEnabled(True)
+
+    # ── API 供應商切換 ──
+
+    def _set_base_url_visible(self, visible: bool) -> None:
+        """自定義端點列僅在「自定義」供應商顯示（不支援 setRowVisible 時退回啟用切換）。"""
+        form = self._conn_form
+        if hasattr(form, "setRowVisible"):
+            try:
+                form.setRowVisible(self.api_base_url_edit, visible)
+                return
+            except Exception:
+                pass
+        self.api_base_url_edit.setEnabled(visible and self._backend == "api")
+
+    def _apply_provider_to_fields(self, provider: str) -> None:
+        """把指定供應商的暫存模型／金鑰填入欄位，並依供應商切換模型建議與端點列。"""
+        suggestions = _provider_models(provider)
+        default_model = suggestions[0] if suggestions else ""
+        model = self._provider_models.get(provider) or default_model
+        self.api_model_combo.blockSignals(True)
+        self.api_model_combo.clear()
+        self.api_model_combo.addItems(suggestions)
+        self.api_model_combo.setEditText(model)
+        self.api_model_combo.blockSignals(False)
+        keys = self._provider_keys.get(provider, [])
+        self.api_keys_edit.blockSignals(True)
+        self.api_keys_edit.setPlainText("\n".join(keys))
+        self.api_keys_edit.blockSignals(False)
+        self._set_base_url_visible(provider == "custom")
+
+    def _flush_current_provider(self) -> None:
+        """把目前欄位的模型／金鑰暫存回目前供應商（切換或儲存前呼叫）。"""
+        p = self._cur_provider
+        self._provider_models[p] = self.api_model_combo.currentText().strip()
+        self._provider_keys[p] = [
+            l.strip() for l in self.api_keys_edit.toPlainText().splitlines()
+            if l.strip()]
+
+    def _on_provider_changed(self) -> None:
+        """供應商下拉改變：先暫存舊供應商欄位，再載入新供應商欄位。"""
+        self._flush_current_provider()
+        provider = self.api_provider_combo.currentData() or "gemini"
+        self._cur_provider = provider
+        self._apply_provider_to_fields(provider)
 
     # ── 與 MainWindow 同步狀態 ──
 
@@ -465,41 +547,61 @@ class AutoTranslatePanel(QWidget):
         """把主視窗的連線設定載入浮層欄位（翻譯方式在主頁，見 _load_from_main）。"""
         m = self._main
         self.use_gem_cb.setChecked(bool(getattr(m, "_browser_use_gem", True)))
-        model = getattr(m, "_gemini_api_model", "") or API_MODELS[0]
-        midx = self.api_model_combo.findText(model)
-        self.api_model_combo.setCurrentIndex(midx if midx >= 0 else 0)
         self.api_only_prompt_edit.setPlainText(
             getattr(m, "_gemini_api_only_prompt", "") or "")
         self.api_prompt_edit.setPlainText(
             getattr(m, "_gemini_api_system_prompt", "") or "")
+        self.api_base_url_edit.setText(getattr(m, "_api_custom_base_url", "") or "")
+        # 各供應商金鑰／模型載入暫存 dict（切換供應商時互換，儲存時一併寫入）
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        keys = secure_store.load_keys(base_dir)
-        self.api_keys_edit.setPlainText("\n".join(keys))
+        self._provider_keys = {
+            p: list(ks) for p, ks in secure_store.load_all_keys(base_dir).items()}
+        models = dict(getattr(m, "_api_models", {}) or {})
+        models.setdefault("gemini",
+                          getattr(m, "_gemini_api_model", "") or API_MODELS[0])
+        self._provider_models = models
+        provider = (getattr(m, "_api_provider", "gemini") or "gemini")
+        self._cur_provider = provider
+        self.api_provider_combo.blockSignals(True)
+        pidx = next((i for i, (_, v) in enumerate(_PROVIDER_OPTIONS)
+                     if v == provider), 0)
+        self.api_provider_combo.setCurrentIndex(pidx)
+        self.api_provider_combo.blockSignals(False)
+        self._apply_provider_to_fields(provider)
         self._on_backend_changed()
 
     def _save_conn_settings(self) -> None:
-        keys = [l.strip() for l in
-                self.api_keys_edit.toPlainText().splitlines() if l.strip()]
+        self._flush_current_provider()  # 存回目前顯示中的供應商欄位
+        provider = self._cur_provider
+        provider_keys = {p: ks for p, ks in self._provider_keys.items() if ks}
+        # gemini 的模型存回舊欄位（維持配額邏輯不變）；其餘進 api_models
+        gemini_model = self._provider_models.get("gemini") or API_MODELS[0]
+        api_models = {p: mdl for p, mdl in self._provider_models.items()
+                      if p != "gemini" and mdl}
         params = {
             "backend": self._backend,
             "browser_use_gem": self.use_gem_cb.isChecked(),
-            "api_model": self.api_model_combo.currentText(),
+            "api_provider": provider,
+            "api_model": gemini_model,
+            "api_models": api_models,
+            "api_custom_base_url": self.api_base_url_edit.text().strip(),
             "api_only_prompt": self.api_only_prompt_edit.toPlainText(),
             "api_system_prompt": self.api_prompt_edit.toPlainText(),
-            "api_keys": keys,
+            "provider_keys": provider_keys,
             # 隨連線設定一併持久化的瀏覽器後端參數（已從主頁移入本浮層）
             "gem_url": self.gem_edit.text().strip(),
             "required_model": self.model_combo.currentData(),
             "max_per_session": self.max_session_spin.value(),
         }
         self._main.save_connection_settings(params)
-        kn = len(keys)
+        kn = len(provider_keys.get(provider, []))
+        label = {v: l for l, v in _PROVIDER_OPTIONS}.get(provider, provider)
         if params["backend"] == "api" and kn == 0:
             self._main.show_status(
-                "⚠️ 已儲存，但 API 模式尚未輸入任何金鑰", "#f39c12")
+                f"⚠️ 已儲存，但「{label}」尚未輸入任何金鑰", "#f39c12")
         else:
             self._main.show_status(
-                f"✅ 連線設定已儲存（{kn} 把金鑰）", "#28a745")
+                f"✅ 連線設定已儲存（{label}：{kn} 把金鑰）", "#28a745")
 
     def collect_params(self) -> dict | None:
         """收集表單參數；任一必填欄位空缺則彈 toast 並回 None。"""

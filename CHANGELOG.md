@@ -3,6 +3,13 @@
 以版號為單位彙整每次更新的摘要。最新版本置於最上方。
 逐筆技術細節請見 git commit 歷史；本檔僅記人類可讀的更新重點。
 
+## v2.03
+
+- 自動翻譯 **API 模式新增多家供應商**：除原本的 Gemini 外，加入 **OpenAI (GPT)**、**Claude (Anthropic)**、**DeepSeek**，以及 **自定義（OpenAI 相容端點）**。連線設定新增「API 供應商」下拉，選 Claude 走 Anthropic 端點、其餘走 OpenAI 相容端點；自定義只需填 base_url（例：OpenRouter／Ollama／LM Studio／vLLM／本地模型）。
+- **各供應商的金鑰與模型分開記住**：切換供應商時彼此不覆蓋，金鑰仍以 Windows DPAPI 加密存於 `aa_api_keys.dat`（格式升級為多供應商；原本單一池的舊金鑰自動歸入 Gemini）。
+- **API 模型欄位改為可自行輸入**：下拉提供各家常見型號建議值，也能直接鍵入其他 model id（避免型號更新後選不到）。
+- 多金鑰輪換、429 速率冷卻、5xx 重試、停止鈕即時中止等機制，新供應商與 Gemini 一致（Gemini 專屬的每日配額 RPD 邏輯維持不變）。
+
 ## v2.02
 
 - 修正**打包版自動翻譯（瀏覽器模式）跳「Executable doesn't exist」無法啟動**：打包版只帶了 Playwright 的驅動、沒有帶 Chromium 本體（約 400MB），而 Playwright 一偵測到是打包執行就只認 exe 內的瀏覽器，連使用者自己裝的也看不到。現在改為：(1) 若使用者裝過 `playwright install` 的瀏覽器，自動指向系統安裝位置；(2) 找不到內建 Chromium 時，**自動改用系統已安裝的 Google Chrome 或 Microsoft Edge**（Windows 必有 Edge），Log 會註明用了哪一個；(3) 三者都沒有時改顯示看得懂的中文錯誤與解法，不再是英文原始訊息。原本就能啟動的環境行為完全不變（仍優先用內建 Chromium）。

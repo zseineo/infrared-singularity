@@ -15,6 +15,12 @@
 退回 base64 混淆（**非真正加密**，僅避免肉眼直接讀到，並在檔頭標記）。
 
 金鑰實際存於 ``aa_api_keys.dat``（已列入 .gitignore），不會進 git。
+
+**多供應商格式**：檔內以 ``{"providers": {供應商: [金鑰...]}}`` 分別記住各家
+（gemini／openai／claude／deepseek／custom）的金鑰，切換供應商時彼此不覆蓋。
+舊版單一池格式 ``{"keys": [...]}`` 於載入時自動視為屬於 ``gemini``（API 模式先前僅
+支援 Gemini），下次寫入即升級為新格式。``load_keys``／``save_keys`` 的 ``provider``
+預設 ``gemini``，維持既有呼叫端相容。
 """
 from __future__ import annotations
 
@@ -61,18 +67,63 @@ def _keys_path(base_dir: str) -> str:
     return os.path.join(base_dir, KEYS_FILENAME)
 
 
-def save_keys(base_dir: str, keys: list[str]) -> None:
-    """把金鑰清單加密寫入 ``aa_api_keys.dat``。空清單則刪檔。"""
-    keys = [k.strip() for k in (keys or []) if k.strip()]
+DEFAULT_PROVIDER = "gemini"
+
+
+def _clean(v) -> list[str]:
+    """把任意值正規化成「去空白後非空」的字串清單。"""
+    if not isinstance(v, list):
+        return []
+    return [str(k).strip() for k in v if str(k).strip()]
+
+
+def _load_all(base_dir: str) -> dict[str, list[str]]:
+    """讀回 {供應商: [金鑰...]}；檔案不存在、損毀或解密失敗都回 {}（不丟例外）。
+
+    相容舊版單一池格式 ``{"keys": [...]}``——視為 ``gemini`` 供應商的金鑰。
+    """
     path = _keys_path(base_dir)
-    if not keys:
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "rb") as f:
+            blob = f.read()
+    except OSError:
+        return {}
+    try:
+        if blob.startswith(_MAGIC_DPAPI):
+            payload = _dpapi(blob[len(_MAGIC_DPAPI):], encrypt=False)
+        elif blob.startswith(_MAGIC_B64):
+            payload = base64.b64decode(blob[len(_MAGIC_B64):])
+        else:
+            return {}
+        data = json.loads(payload.decode("utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    prov = data.get("providers")
+    if isinstance(prov, dict):
+        return {str(p): _clean(v) for p, v in prov.items() if _clean(v)}
+    # 舊格式（單一池）→ 視為 gemini
+    keys = _clean(data.get("keys"))
+    return {DEFAULT_PROVIDER: keys} if keys else {}
+
+
+def _save_all(base_dir: str, providers: dict[str, list[str]]) -> None:
+    """把 {供應商: [金鑰...]} 加密寫入。全空則刪檔。"""
+    providers = {str(p): _clean(v) for p, v in (providers or {}).items()
+                 if _clean(v)}
+    path = _keys_path(base_dir)
+    if not providers:
         try:
             if os.path.exists(path):
                 os.remove(path)
         except OSError:
             pass
         return
-    payload = json.dumps({"keys": keys}, ensure_ascii=False).encode("utf-8")
+    payload = json.dumps({"providers": providers},
+                         ensure_ascii=False).encode("utf-8")
     if _IS_WIN:
         try:
             blob = _MAGIC_DPAPI + _dpapi(payload, encrypt=True)
@@ -86,28 +137,31 @@ def save_keys(base_dir: str, keys: list[str]) -> None:
     os.replace(tmp, path)
 
 
-def load_keys(base_dir: str) -> list[str]:
-    """讀回金鑰清單；檔案不存在、損毀或解密失敗都回 []（不丟例外）。"""
-    path = _keys_path(base_dir)
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, "rb") as f:
-            blob = f.read()
-    except OSError:
-        return []
-    try:
-        if blob.startswith(_MAGIC_DPAPI):
-            payload = _dpapi(blob[len(_MAGIC_DPAPI):], encrypt=False)
-        elif blob.startswith(_MAGIC_B64):
-            payload = base64.b64decode(blob[len(_MAGIC_B64):])
-        else:
-            return []
-        data = json.loads(payload.decode("utf-8"))
-        keys = data.get("keys", [])
-        return [str(k).strip() for k in keys if str(k).strip()]
-    except (OSError, ValueError, json.JSONDecodeError):
-        return []
+def save_keys(base_dir: str, keys: list[str],
+              provider: str = DEFAULT_PROVIDER) -> None:
+    """更新單一供應商的金鑰清單（其餘供應商保留）。空清單則移除該供應商。"""
+    allp = _load_all(base_dir)
+    keys = _clean(keys)
+    if keys:
+        allp[provider] = keys
+    else:
+        allp.pop(provider, None)
+    _save_all(base_dir, allp)
+
+
+def load_keys(base_dir: str, provider: str = DEFAULT_PROVIDER) -> list[str]:
+    """讀回指定供應商的金鑰清單；無則回 []。"""
+    return _load_all(base_dir).get(provider, [])
+
+
+def load_all_keys(base_dir: str) -> dict[str, list[str]]:
+    """一次讀回所有供應商的金鑰（供 UI 開啟時載入各家欄位）。"""
+    return _load_all(base_dir)
+
+
+def save_all_keys(base_dir: str, providers: dict[str, list[str]]) -> None:
+    """一次覆寫所有供應商的金鑰（供 UI 儲存時一併寫入）。"""
+    _save_all(base_dir, providers)
 
 
 def is_real_encryption() -> bool:

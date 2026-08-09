@@ -65,7 +65,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.02"
+APP_VERSION = "2.03"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -714,7 +714,10 @@ class MainWindow(QMainWindow):
         self._auto_translate_skip_existing: bool = False
         # 翻譯後端與 API 設定（金鑰另存於加密檔，不在 cache）
         self._translate_backend: str = "browser"
+        self._api_provider: str = "gemini"  # API 供應商（gemini/openai/claude/deepseek/custom）
         self._gemini_api_model: str = "gemini-2.5-pro"
+        self._api_models: dict = {}  # 非 gemini 供應商各自的模型 id：{供應商: model}
+        self._api_custom_base_url: str = ""  # 自定義供應商的 OpenAI 相容端點
         self._gemini_api_only_prompt: str = ""  # 僅 API 送出（瀏覽器模式不送）
         self._gemini_api_system_prompt: str = ""  # API 送；瀏覽器模式於 !use_gem 才送
         self._browser_use_gem: bool = True
@@ -1694,8 +1697,15 @@ class MainWindow(QMainWindow):
         金鑰存進 DPAPI 加密檔（aa_api_keys.dat），其餘存進一般 cache。
         """
         self._translate_backend = params.get("backend", "browser") or "browser"
+        self._api_provider = params.get("api_provider", "gemini") or "gemini"
         self._gemini_api_model = (
             params.get("api_model") or "gemini-2.5-pro")
+        if "api_models" in params:
+            am = params.get("api_models") or {}
+            self._api_models = {str(k): str(v) for k, v in am.items()} \
+                if isinstance(am, dict) else {}
+        if "api_custom_base_url" in params:
+            self._api_custom_base_url = params.get("api_custom_base_url", "") or ""
         self._gemini_api_only_prompt = params.get("api_only_prompt", "")
         self._gemini_api_system_prompt = params.get("api_system_prompt", "")
         self._browser_use_gem = bool(params.get("browser_use_gem", True))
@@ -1710,9 +1720,13 @@ class MainWindow(QMainWindow):
         self.save_cache()
         try:
             from aa_tool import secure_store
-            secure_store.save_keys(
-                os.path.dirname(os.path.abspath(__file__)),
-                params.get("api_keys", []))
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            # 各供應商金鑰一併覆寫（空供應商自動移除）
+            if "provider_keys" in params:
+                secure_store.save_all_keys(
+                    base_dir, params.get("provider_keys") or {})
+            elif "api_keys" in params:  # 相容舊呼叫形式
+                secure_store.save_keys(base_dir, params.get("api_keys", []))
         except Exception as e:  # noqa: BLE001 — 金鑰寫入失敗回報但不崩潰
             self.show_status(f"⚠️ 金鑰儲存失敗：{e}", "#dc3545")
 
@@ -2258,7 +2272,10 @@ class MainWindow(QMainWindow):
             auto_translate_until_last=self._auto_translate_until_last,
             auto_translate_skip_existing=self._auto_translate_skip_existing,
             translate_backend=self._translate_backend,
+            api_provider=self._api_provider,
             gemini_api_model=self._gemini_api_model,
+            api_models=self._api_models,
+            api_custom_base_url=self._api_custom_base_url,
             gemini_api_only_prompt=self._gemini_api_only_prompt,
             gemini_api_system_prompt=self._gemini_api_system_prompt,
             browser_use_gem=self._browser_use_gem,
@@ -2350,8 +2367,14 @@ class MainWindow(QMainWindow):
         self._auto_translate_skip_existing = bool(
             cache.auto_translate_skip_existing)
         self._translate_backend = str(cache.translate_backend or "browser")
+        self._api_provider = str(getattr(cache, "api_provider", "gemini") or "gemini")
         self._gemini_api_model = str(
             cache.gemini_api_model or "gemini-2.5-pro")
+        am = getattr(cache, "api_models", {})
+        self._api_models = {str(k): str(v) for k, v in am.items()} \
+            if isinstance(am, dict) else {}
+        self._api_custom_base_url = str(
+            getattr(cache, "api_custom_base_url", "") or "")
         self._gemini_api_only_prompt = str(
             getattr(cache, "gemini_api_only_prompt", "") or "")
         self._gemini_api_system_prompt = str(

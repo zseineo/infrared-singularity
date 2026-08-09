@@ -185,10 +185,19 @@ class AppCache:
     # auto_translate_skip_existing：翻譯前若輸出資料夾已有同名檔則跳過該話
     # （重跑批次時略過已完成的話、省 API 額度）。預設關閉。
     auto_translate_skip_existing: bool = False
-    # 翻譯後端：'browser'（操控網頁版 Gemini）或 'api'（Google Gemini API）。
+    # 翻譯後端：'browser'（操控網頁版 Gemini）或 'api'（呼叫供應商 API）。
     translate_backend: str = "browser"
-    # API 模式用的模型 id（見 aa_tool.gemini_api.API_MODELS）。
+    # API 供應商：gemini / openai / claude / deepseek / custom（見
+    # aa_tool.openai_api.API_PROVIDERS）。gemini 走 GeminiApiSession，其餘走
+    # ChatApiSession（OpenAI／Anthropic 相容）。
+    api_provider: str = "gemini"
+    # API 模式用的 Gemini 模型 id（見 aa_tool.gemini_api.API_MODELS）。
+    # 保留原欄位：gemini 供應商仍讀此欄，維持既有配額邏輯不變。
     gemini_api_model: str = "gemini-2.5-pro"
+    # 非 Gemini 供應商各自選定的模型 id：{供應商: model_id}。
+    api_models: dict = field(default_factory=dict)
+    # 自定義（custom）供應商的 OpenAI 相容端點 base_url（含 /v1）。
+    api_custom_base_url: str = ""
     # API 模式的系統指令（翻譯人設／要求）；金鑰另存於加密檔 aa_api_keys.dat。
     # 兩段 prompt 的差異（v1.69）：
     #   gemini_api_only_prompt   → 僅 API 模式送出（瀏覽器模式一律不送）
@@ -426,9 +435,16 @@ class SettingsManager:
                 'gemini_required_model', cache.gemini_required_model) or "pro")
             cache.translate_backend = str(data.get(
                 'translate_backend', cache.translate_backend) or "browser")
+            cache.api_provider = str(data.get(
+                'api_provider', cache.api_provider) or "gemini")
             cache.gemini_api_model = str(data.get(
                 'gemini_api_model', cache.gemini_api_model)
                 or "gemini-2.5-pro")
+            am = data.get('api_models', cache.api_models)
+            cache.api_models = {str(k): str(v) for k, v in am.items()} \
+                if isinstance(am, dict) else {}
+            cache.api_custom_base_url = str(data.get(
+                'api_custom_base_url', cache.api_custom_base_url) or "")
             cache.gemini_api_only_prompt = str(data.get(
                 'gemini_api_only_prompt', cache.gemini_api_only_prompt))
             cache.gemini_api_system_prompt = str(data.get(
@@ -532,7 +548,10 @@ class SettingsManager:
                 'auto_translate_skip_existing': cache.auto_translate_skip_existing,
                 'gemini_required_model': cache.gemini_required_model,
                 'translate_backend': cache.translate_backend,
+                'api_provider': cache.api_provider,
                 'gemini_api_model': cache.gemini_api_model,
+                'api_models': cache.api_models,
+                'api_custom_base_url': cache.api_custom_base_url,
                 'gemini_api_only_prompt': cache.gemini_api_only_prompt,
                 'gemini_api_system_prompt': cache.gemini_api_system_prompt,
                 'browser_use_gem': cache.browser_use_gem,

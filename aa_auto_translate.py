@@ -494,19 +494,33 @@ def run_auto_translate(
 
     # ── 依後端建立翻譯 session（兩者皆提供 open / translate / close） ──
     if backend == "api":
-        from aa_tool import gemini_api, secure_store
-        keys = secure_store.load_keys(base_dir)
+        from aa_tool import gemini_api, openai_api, secure_store
+        provider = (getattr(cache, "api_provider", "gemini") or "gemini").lower()
+        keys = secure_store.load_keys(base_dir, provider)
         if not keys:
-            raise ValueError("API 模式但未設定任何 API 金鑰（請到「連線設定」輸入）")
-        # API 模式：兩段 prompt 都送出（合併為 systemInstruction，空段自動略過）
+            raise ValueError(
+                f"API 模式（{provider}）但未設定任何 API 金鑰（請到「連線設定」輸入）")
+        # API 模式：兩段 prompt 都送出（合併為系統指令，空段自動略過）
         api_prompts = [getattr(cache, "gemini_api_only_prompt", "") or "",
                        cache.gemini_api_system_prompt or ""]
         api_system_prompt = "\n\n".join(p.strip() for p in api_prompts if p.strip())
-        session = gemini_api.GeminiApiSession(
-            keys, cache.gemini_api_model,
-            system_prompt=api_system_prompt, log=log,
-            stop_event=stop_event, base_dir=base_dir)
-        open_log = f"使用 Google API（模型 {cache.gemini_api_model}）…"
+        if provider == "gemini":
+            session = gemini_api.GeminiApiSession(
+                keys, cache.gemini_api_model,
+                system_prompt=api_system_prompt, log=log,
+                stop_event=stop_event, base_dir=base_dir)
+            open_log = f"使用 Gemini API（模型 {cache.gemini_api_model}）…"
+        else:
+            meta = openai_api.API_PROVIDERS.get(provider, {})
+            model = ((getattr(cache, "api_models", {}) or {}).get(provider)
+                     or openai_api.default_model(provider))
+            base_url = (getattr(cache, "api_custom_base_url", "") if provider == "custom"
+                        else meta.get("base_url", ""))
+            session = openai_api.ChatApiSession(
+                keys, model,
+                scheme=meta.get("scheme", "openai"), base_url=base_url,
+                system_prompt=api_system_prompt, log=log, stop_event=stop_event)
+            open_log = f"使用 {meta.get('label', provider)} API（模型 {model}）…"
     else:
         gem_url = gem_url or cache.gemini_gem_url
         if not gem_url:

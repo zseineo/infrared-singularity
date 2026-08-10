@@ -65,7 +65,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.04"
+APP_VERSION = "2.05"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -684,6 +684,9 @@ class MainWindow(QMainWindow):
             _base_dir = os.path.dirname(sys.executable)
         else:
             _base_dir = os.path.dirname(os.path.abspath(__file__))
+        # 設定／金鑰／cache 的統一基準目錄（凍結時為 exe 旁）。自動翻譯的金鑰存取與
+        # run_auto_translate 都必須用它，否則打包版會從 _internal/ 讀不到而回退預設。
+        self._settings_base_dir = _base_dir
         self.settings_mgr = SettingsManager(_base_dir)
         self.current_base_regex = DEFAULT_BASE_REGEX
         self.current_invalid_regex = DEFAULT_INVALID_REGEX
@@ -1720,7 +1723,7 @@ class MainWindow(QMainWindow):
         self.save_cache()
         try:
             from aa_tool import secure_store
-            base_dir = os.path.dirname(os.path.abspath(__file__))
+            base_dir = self._settings_base_dir
             # 各供應商金鑰一併覆寫（空供應商自動移除）
             if "provider_keys" in params:
                 secure_store.save_all_keys(
@@ -1806,7 +1809,7 @@ class MainWindow(QMainWindow):
             try:
                 result = run_auto_translate(
                     start_url, count, out_dir,
-                    base_dir=os.path.dirname(os.path.abspath(__file__)),
+                    base_dir=self._settings_base_dir,
                     backend=self._translate_backend,
                     gem_url=gem_url,
                     profile_dir=self._gemini_profile_dir or None,

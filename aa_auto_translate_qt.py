@@ -552,8 +552,10 @@ class AutoTranslatePanel(QWidget):
         self.api_prompt_edit.setPlainText(
             getattr(m, "_gemini_api_system_prompt", "") or "")
         self.api_base_url_edit.setText(getattr(m, "_api_custom_base_url", "") or "")
-        # 各供應商金鑰／模型載入暫存 dict（切換供應商時互換，儲存時一併寫入）
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        # 各供應商金鑰／模型載入暫存 dict（切換供應商時互換，儲存時一併寫入）。
+        # base_dir 必須與主程式一致（凍結時為 exe 旁），否則打包版讀不到已存金鑰。
+        base_dir = getattr(m, "_settings_base_dir", None) \
+            or os.path.dirname(os.path.abspath(__file__))
         self._provider_keys = {
             p: list(ks) for p, ks in secure_store.load_all_keys(base_dir).items()}
         models = dict(getattr(m, "_api_models", {}) or {})
@@ -659,7 +661,9 @@ class AutoTranslatePanel(QWidget):
         out_dir = self.out_edit.text().strip()
         doc_title = self.doc_title_edit.text().strip()
         auto_fill = bool(getattr(self._main, "_fetch_auto_fill_title", False))
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        # 與主程式一致（凍結時 exe 旁），讓打包版的檔名試算讀到正確設定
+        base_dir = getattr(self._main, "_settings_base_dir", None) \
+            or os.path.dirname(os.path.abspath(__file__))
         if allow_network:
             self.filename_preview.setText("⏳ 試算中（讀取網址）…")
 

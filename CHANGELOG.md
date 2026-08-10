@@ -3,6 +3,12 @@
 以版號為單位彙整每次更新的摘要。最新版本置於最上方。
 逐筆技術細節請見 git commit 歷史；本檔僅記人類可讀的更新重點。
 
+## v2.04
+
+- 連線設定的 **API 供應商／模型／金鑰／Prompt 欄位不再被「翻譯方式」鎖住**：先前需先把翻譯方式切成 API 才能改，現在不論選瀏覽器或 API 都能預先設定好，之後再切換使用。
+- 更新各供應商**預設模型建議值**：OpenAI 改為 GPT‑5.6 家族（`gpt-5.6-terra`／`gpt-5.6-sol`／`gpt-5.6-luna`）；DeepSeek 改為 `deepseek-v4-flash`／`deepseek-v4-pro`。（仍可自行輸入其他 model id。）
+- Claude 輸出上限 `max_tokens` 由 8192 調高為 **32000**，避免長章節被截斷。
+
 ## v2.03
 
 - 自動翻譯 **API 模式新增多家供應商**：除原本的 Gemini 外，加入 **OpenAI (GPT)**、**Claude (Anthropic)**、**DeepSeek**，以及 **自定義（OpenAI 相容端點）**。連線設定新增「API 供應商」下拉，選 Claude 走 Anthropic 端點、其餘走 OpenAI 相容端點；自定義只需填 base_url（例：OpenRouter／Ollama／LM Studio／vLLM／本地模型）。

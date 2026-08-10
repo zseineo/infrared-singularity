@@ -439,12 +439,12 @@ class AutoTranslatePanel(QWidget):
         self._on_backend_changed()
 
     def _on_backend_changed(self) -> None:
-        """API 供應商／模型／金鑰只在 API 模式啟用；翻譯 Prompt 兩模式都可編輯。"""
-        is_api = self._backend == "api"
+        """連線設定的 API 欄位不受翻譯方式影響——兩種方式下皆可先行編輯供應商／模型／
+        金鑰／Prompt（之後再切換使用）。自定義端點列的顯示由 `_set_base_url_visible` 依
+        供應商決定，此處不干涉。"""
         for w in (self.api_provider_combo, self.api_model_combo,
-                  self.api_base_url_edit, self.api_keys_edit):
-            w.setEnabled(is_api)
-        self.api_prompt_edit.setEnabled(True)
+                  self.api_keys_edit, self.api_prompt_edit):
+            w.setEnabled(True)
 
     # ── API 供應商切換 ──
 
@@ -457,7 +457,7 @@ class AutoTranslatePanel(QWidget):
                 return
             except Exception:
                 pass
-        self.api_base_url_edit.setEnabled(visible and self._backend == "api")
+        self.api_base_url_edit.setEnabled(visible)
 
     def _apply_provider_to_fields(self, provider: str) -> None:
         """把指定供應商的暫存模型／金鑰填入欄位，並依供應商切換模型建議與端點列。"""

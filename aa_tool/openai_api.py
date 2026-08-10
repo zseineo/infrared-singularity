@@ -48,7 +48,8 @@ API_PROVIDERS: dict[str, dict] = {
         "label": "OpenAI (GPT)",
         "scheme": "openai",
         "base_url": "https://api.openai.com/v1",
-        "models": ["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini", "o4-mini"],
+        # GPT-5.6 家族：terra（智慧/成本平衡，翻譯量大預設）、sol（旗艦）、luna（省成本）
+        "models": ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"],
     },
     "claude": {
         "label": "Claude (Anthropic)",
@@ -60,7 +61,7 @@ API_PROVIDERS: dict[str, dict] = {
         "label": "DeepSeek",
         "scheme": "openai",
         "base_url": "https://api.deepseek.com/v1",
-        "models": ["deepseek-chat", "deepseek-reasoner"],
+        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
     },
     "custom": {
         "label": "自定義 (OpenAI 相容)",
@@ -72,7 +73,7 @@ API_PROVIDERS: dict[str, dict] = {
 
 _TIMEOUT = 300
 _ANTHROPIC_VERSION = "2023-06-01"
-_ANTHROPIC_MAX_TOKENS = 8192  # Anthropic 必填的輸出上限；取各模型皆支援的安全值
+_ANTHROPIC_MAX_TOKENS = 32000  # Anthropic 必填的輸出上限（避免長章節被截斷）
 
 # 額度冷卻參數（與 gemini_api 對齊語意，但無 RPD 每日重置）
 _RPM_COOLDOWN = 60.0

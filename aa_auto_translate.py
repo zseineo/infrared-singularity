@@ -456,6 +456,7 @@ def run_auto_translate(
     fetch_auto_fill_title: bool | None = None,
     until_last: bool = False,
     skip_existing: bool = False,
+    append_mode: bool | None = None,
     stop_event=None,
     progress: Callable[[str], None] | None = None,
     print_summary: bool = True,
@@ -467,6 +468,8 @@ def run_auto_translate(
     until_last：為 True 時忽略 count，一路翻到沒有下一話為止。
     skip_existing：為 True 時，翻譯前先算好這一話的檔名，若輸出資料夾已有同名檔
         （不計碰撞序號）就跳過該話、直接抓下一話——適合批次中斷後重跑略過已完成的話。
+    append_mode：對應主畫面「加入翻譯」（True，保留原文、翻譯附在原文之後）／「替換
+        翻譯」（False）。None 時讀 cache 的 auto_translate_append_mode（預設 False）。
     stop_event：threading.Event；設定後會在話與話之間（及分段之間）中止。
     progress：進度回呼（單一字串參數）；None 時印到 stdout。
     print_summary：是否在結束時透過 `log` 印出 `_print_summary` 總結；
@@ -481,6 +484,8 @@ def run_auto_translate(
     backend = (backend or cache.translate_backend or "browser").lower()
     if fetch_auto_fill_title is None:
         fetch_auto_fill_title = cache.fetch_auto_fill_title
+    if append_mode is None:
+        append_mode = getattr(cache, "auto_translate_append_mode", False)
     os.makedirs(out_dir, exist_ok=True)
 
     total = _UNTIL_LAST_CAP if until_last else max(1, count)
@@ -612,9 +617,10 @@ def run_auto_translate(
                     translated = _translate(session, extracted, log, stop_event)
                     if _looks_untranslated(extracted, translated):
                         raise UntranslatedResponse("重試（已換新對話）後仍與原文幾乎一致")
-                log("  替換翻譯中…")
+                log("  加入翻譯中…" if append_mode else "  替換翻譯中…")
                 result_text = translation_engine.apply_translation(
                     source, extracted, translated, cfg.glossary,
+                    append_mode=append_mode,
                     pad_right_aa=cfg.pad_right_aa,
                     symbol_regex_str=cfg.symbol_regex,
                     glossary_avoid_aa=cfg.glossary_avoid_aa)
@@ -727,6 +733,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="忽略 --count，一路翻到沒有下一話為止")
     parser.add_argument("--skip-existing", action="store_true",
                         help="輸出資料夾已有同名檔時跳過該話（重跑批次略過已完成的話）")
+    parser.add_argument("--append", action="store_true",
+                        help="加入翻譯模式（保留原文、翻譯附在原文之後）；預設為替換翻譯")
     parser.add_argument("--out", required=True, help="輸出 HTML 的資料夾")
     parser.add_argument("--gem-url", default=None,
                         help="Gemini Gem 網址（預設讀設定 gemini_gem_url）")
@@ -754,6 +762,7 @@ def main(argv: list[str] | None = None) -> int:
             gem_url=args.gem_url, profile_dir=args.profile_dir,
             headless=args.headless, until_last=args.until_last,
             skip_existing=args.skip_existing,
+            append_mode=(True if args.append else None),
             max_per_session=args.max_per_session,
             required_model=args.required_model,
             doc_title=args.doc_title,

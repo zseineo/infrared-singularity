@@ -65,7 +65,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.05"
+APP_VERSION = "2.06"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -715,6 +715,8 @@ class MainWindow(QMainWindow):
         self._auto_translate_count: int = 5
         self._auto_translate_until_last: bool = False
         self._auto_translate_skip_existing: bool = False
+        # 自動翻譯：加入翻譯（True，保留原文）／替換翻譯（False）。預設替換。
+        self._auto_translate_append_mode: bool = False
         # 翻譯後端與 API 設定（金鑰另存於加密檔，不在 cache）
         self._translate_backend: str = "browser"
         self._api_provider: str = "gemini"  # API 供應商（gemini/openai/claude/deepseek/custom）
@@ -1747,6 +1749,7 @@ class MainWindow(QMainWindow):
         self._auto_translate_count = params["count"]
         self._auto_translate_until_last = params["until_last"]
         self._auto_translate_skip_existing = params.get("skip_existing", False)
+        self._auto_translate_append_mode = params.get("append_mode", False)
         self._gemini_max_per_session = params["max_per_session"]
         self._gemini_required_model = params["required_model"] or "pro"
         # 手動模式下也把使用者填的作品名稱同步回首頁（保持兩邊一致）
@@ -1811,6 +1814,7 @@ class MainWindow(QMainWindow):
                     start_url, count, out_dir,
                     base_dir=self._settings_base_dir,
                     backend=self._translate_backend,
+                    append_mode=self._auto_translate_append_mode,
                     gem_url=gem_url,
                     profile_dir=self._gemini_profile_dir or None,
                     max_per_session=max_per_session,
@@ -2274,6 +2278,7 @@ class MainWindow(QMainWindow):
             auto_translate_count=self._auto_translate_count,
             auto_translate_until_last=self._auto_translate_until_last,
             auto_translate_skip_existing=self._auto_translate_skip_existing,
+            auto_translate_append_mode=self._auto_translate_append_mode,
             translate_backend=self._translate_backend,
             api_provider=self._api_provider,
             gemini_api_model=self._gemini_api_model,
@@ -2369,6 +2374,8 @@ class MainWindow(QMainWindow):
         self._auto_translate_until_last = bool(cache.auto_translate_until_last)
         self._auto_translate_skip_existing = bool(
             cache.auto_translate_skip_existing)
+        self._auto_translate_append_mode = bool(
+            getattr(cache, "auto_translate_append_mode", False))
         self._translate_backend = str(cache.translate_backend or "browser")
         self._api_provider = str(getattr(cache, "api_provider", "gemini") or "gemini")
         self._gemini_api_model = str(

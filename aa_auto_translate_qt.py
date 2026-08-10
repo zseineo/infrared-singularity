@@ -197,6 +197,15 @@ class AutoTranslatePanel(QWidget):
             "關閉時維持原行為：同名一律加 -2／-3 序號另存新檔。")
         form.addRow("", self.skip_existing_cb)
 
+        # 加入翻譯 ↔ 替換翻譯：對應主畫面兩顆按鈕（自動翻譯一律直接存檔、不進編輯器）
+        self.append_mode_cb = QCheckBox("加入翻譯（保留原文，翻譯附在原文之後）")
+        self.append_mode_cb.setToolTip(
+            "對應主畫面兩顆按鈕：\n"
+            "  勾選 → 「加入翻譯」：保留原文，翻譯附加在原文之後。\n"
+            "  取消 → 「替換翻譯」：以翻譯取代原文（預設，維持原行為）。\n"
+            "兩種都直接存檔、不進編輯器。")
+        form.addRow("", self.append_mode_cb)
+
         # 翻譯方式（瀏覽器／API）——兩顆切換鈕，被選中的以顏色提示；常用切換放主頁
         self._backend = "browser"
         self._backend_btns: dict[str, QPushButton] = {}
@@ -513,6 +522,8 @@ class AutoTranslatePanel(QWidget):
                               or getattr(m, "_last_dir", "") or "")
         self.skip_existing_cb.setChecked(bool(
             getattr(m, "_auto_translate_skip_existing", False)))
+        self.append_mode_cb.setChecked(bool(
+            getattr(m, "_auto_translate_append_mode", False)))
         # 作品名稱：與首頁同步——優先用首頁 doc_title，沒有就空
         try:
             home_title = m._translate_panel.get_doc_title().strip()
@@ -632,6 +643,7 @@ class AutoTranslatePanel(QWidget):
             "doc_title": self.doc_title_edit.text().strip(),
             "out_dir": out_dir,
             "skip_existing": self.skip_existing_cb.isChecked(),
+            "append_mode": self.append_mode_cb.isChecked(),
         }
 
     def _update_filename_preview(self) -> None:

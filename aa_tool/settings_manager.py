@@ -169,6 +169,9 @@ class AppCache:
     pad_space_count: int = 2
     # 網址讀取成功且有正確辨識標題時，自動把標題填入作品名稱框。
     fetch_auto_fill_title: bool = False
+    # 主畫面「填入翻譯」旁的核取框：讀取新的一話（上一話／下一話／網址讀取）
+    # 成功後自動清空「填入翻譯」欄，避免舊譯文殘留被誤用。預設關閉。
+    fetch_clear_ai_text: bool = False
     # ── 自動翻譯（aa_auto_translate.py / gemini_web.py）──
     # gemini_gem_url：使用者固定用來翻譯 AA 的 Gemini Gem 網址。
     # gemini_profile_dir：Playwright 持久化瀏覽器 profile 目錄（空 = 用 %TEMP% 預設）。
@@ -412,6 +415,8 @@ class SettingsManager:
                 'glossary_auto_persist', cache.glossary_auto_persist))
             cache.fetch_auto_fill_title = bool(data.get(
                 'fetch_auto_fill_title', cache.fetch_auto_fill_title))
+            cache.fetch_clear_ai_text = bool(data.get(
+                'fetch_clear_ai_text', cache.fetch_clear_ai_text))
             cache.gemini_gem_url = str(data.get(
                 'gemini_gem_url', cache.gemini_gem_url))
             cache.gemini_profile_dir = str(data.get(
@@ -545,6 +550,7 @@ class SettingsManager:
                 'glossary_auto_persist': cache.glossary_auto_persist,
                 'pad_space_count': cache.pad_space_count,
                 'fetch_auto_fill_title': cache.fetch_auto_fill_title,
+                'fetch_clear_ai_text': cache.fetch_clear_ai_text,
                 'gemini_gem_url': cache.gemini_gem_url,
                 'gemini_profile_dir': cache.gemini_profile_dir,
                 'gemini_max_per_session': cache.gemini_max_per_session,

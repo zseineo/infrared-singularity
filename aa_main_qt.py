@@ -27,7 +27,8 @@ import time
 from PyQt6.QtCore import Qt, QEvent, QPoint, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QPalette, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QCheckBox, QFileDialog, QHBoxLayout, QInputDialog,
+    QLabel, QLineEdit,
     QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QSplitter, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
@@ -65,7 +66,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.06"
+APP_VERSION = "2.07"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -495,6 +496,13 @@ class TranslatePanel(QWidget):
             btn.clicked.connect(lambda checked=False, h=half: self._main.copy_split(h))
             top.addWidget(btn)
 
+        btn_range = _make_btn("複製指定範圍", "#495057", "#3d4449",
+                              font=_ui_font(10), width=90)
+        btn_range.setFixedHeight(24)
+        btn_range.setToolTip("依原文行號範圍複製提取結果（例：1~3000）")
+        btn_range.clicked.connect(self._main.copy_range)
+        top.addWidget(btn_range)
+
         add_filter_btn = _make_btn("加入自訂過濾", "#6f42c1", "#5a34a0",
                                    font=_ui_font(10), width=110)
         add_filter_btn.setFixedHeight(24)
@@ -520,6 +528,17 @@ class TranslatePanel(QWidget):
         lbl = QLabel("填入翻譯:")
         lbl.setFont(_ui_font(13, bold=True))
         top.addWidget(lbl)
+
+        # 讀取新的一話（上一話／下一話／網址讀取）成功後自動清空本欄，
+        # 避免上一話的譯文殘留下來被誤套用。狀態存進 cache。
+        self.clear_ai_cb = QCheckBox("讀取後清空")
+        self.clear_ai_cb.setFont(_ui_font(11))
+        self.clear_ai_cb.setStyleSheet("color:#ddd;")
+        self.clear_ai_cb.setToolTip(
+            "勾選後，按「上一話／下一話」或用「🌐 網址讀取」讀取成功時，"
+            "自動清空「填入翻譯」欄位。")
+        self.clear_ai_cb.toggled.connect(self._main._on_clear_ai_toggled)
+        top.addWidget(self.clear_ai_cb)
 
         self._ai_warn_label = QLabel("")
         self._ai_warn_label.setFont(_ui_font(11))
@@ -700,6 +719,9 @@ class MainWindow(QMainWindow):
         self._glossary_auto_persist: bool = False
         self._glossary_translation_only: bool = False
         self._fetch_auto_fill_title: bool = False
+        self._fetch_clear_ai_text: bool = False
+        # 「複製指定範圍」上次輸入的範圍字串（僅本次執行期間記住）
+        self._copy_range_last: str = ""
 
         # ── 應用狀態 ──
         self.url_history: list[dict] = []
@@ -1299,6 +1321,43 @@ class MainWindow(QMainWindow):
         QApplication.clipboard().setText(text)
         copied = len(text.split('\n')) if text else 0
         self.show_status(f"✅ 已複製{label}（{copied} 行）到剪貼簿", "#0f0")
+
+    def copy_range(self) -> None:
+        """依原文行號範圍複製提取結果。
+
+        提取結果每行為 `行號-序號|文字`（見 text_extraction.format_extraction_output），
+        取 `-` 前的行號判斷是否落在使用者輸入的 `起~迄` 範圍內（含頭尾）。
+        """
+        ext_text = self._translate_panel.get_extracted_text().strip()
+        if not ext_text:
+            self.show_status("⚠️ 目前沒有可複製的提取結果", "#f39c12")
+            return
+        text_in, ok = QInputDialog.getText(
+            self, "複製指定範圍", "輸入原文行號範圍（例：1~3000）：",
+            text=self._copy_range_last)
+        if not ok:
+            return
+        raw = text_in.strip().replace('～', '~').replace('－', '-')
+        m = _re_mod.match(r'^(\d+)\s*[~\-]\s*(\d+)$', raw)
+        if not m:
+            self.show_status("⚠️ 範圍格式錯誤，請輸入如 1~3000", "#f39c12")
+            return
+        start, end = int(m.group(1)), int(m.group(2))
+        if start > end:
+            start, end = end, start
+        self._copy_range_last = raw
+        id_re = _re_mod.compile(r'^\s*(\d+)-\d+\|')
+        picked: list[str] = []
+        for line in ext_text.split('\n'):
+            mm = id_re.match(line)
+            if mm and start <= int(mm.group(1)) <= end:
+                picked.append(line)
+        if not picked:
+            self.show_status(f"⚠️ {start}~{end} 範圍內沒有提取結果", "#f39c12")
+            return
+        QApplication.clipboard().setText('\n'.join(picked))
+        self.show_status(
+            f"✅ 已複製 {start}~{end} 行範圍（{len(picked)} 行）到剪貼簿", "#0f0")
 
     def add_selection_to_filter(self) -> None:
         p = self._translate_panel
@@ -2053,6 +2112,8 @@ class MainWindow(QMainWindow):
                 full_text = (display_title + "\n\n" + text_content
                              if display_title else text_content)
                 self._translate_panel.source_text.setPlainText(full_text)
+                if self._fetch_clear_ai_text:
+                    self._translate_panel.ai_text.clear()
                 if self._fetch_auto_fill_title:
                     self._translate_panel.doc_num.clear()
                 else:
@@ -2165,6 +2226,8 @@ class MainWindow(QMainWindow):
                     full_text = (display_title + "\n\n" + text_content
                                  if display_title else text_content)
                     self._translate_panel.source_text.setPlainText(full_text)
+                    if self._fetch_clear_ai_text:
+                        self._translate_panel.ai_text.clear()
                     if self._fetch_auto_fill_title:
                         self._translate_panel.doc_num.clear()
                     else:
@@ -2269,6 +2332,7 @@ class MainWindow(QMainWindow):
             glossary_translation_only=self._glossary_translation_only,
             pad_space_count=self._pad_space_count,
             fetch_auto_fill_title=self._fetch_auto_fill_title,
+            fetch_clear_ai_text=self._fetch_clear_ai_text,
             gemini_gem_url=self._gemini_gem_url,
             gemini_profile_dir=self._gemini_profile_dir,
             gemini_max_per_session=self._gemini_max_per_session,
@@ -2358,6 +2422,13 @@ class MainWindow(QMainWindow):
         self._glossary_auto_persist = bool(cache.glossary_auto_persist)
         self._glossary_translation_only = bool(cache.glossary_translation_only)
         self._fetch_auto_fill_title = bool(cache.fetch_auto_fill_title)
+        self._fetch_clear_ai_text = bool(
+            getattr(cache, "fetch_clear_ai_text", False))
+        cb = getattr(p, "clear_ai_cb", None)
+        if cb is not None:
+            cb.blockSignals(True)
+            cb.setChecked(self._fetch_clear_ai_text)
+            cb.blockSignals(False)
         self._gemini_gem_url = str(cache.gemini_gem_url or "")
         self._gemini_profile_dir = str(cache.gemini_profile_dir or "")
         self._gemini_max_per_session = max(1, int(
@@ -2764,6 +2835,11 @@ class MainWindow(QMainWindow):
             self.work_history = self.work_history[:self._work_history_limit]
         self.save_cache()
         self.show_status("✅ 設定已套用", "#0f0")
+
+    def _on_clear_ai_toggled(self, checked: bool) -> None:
+        """「填入翻譯」旁核取框：讀取新一話後是否自動清空填入翻譯。"""
+        self._fetch_clear_ai_text = bool(checked)
+        self.schedule_save()
 
     def _apply_doc_num_state(self) -> None:
         """依 _fetch_auto_fill_title 設定切換話數欄位的啟用狀態。"""

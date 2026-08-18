@@ -141,9 +141,13 @@ class BatchSearchWindow(QMainWindow):
 
         self.search_entry = QLineEdit()
         self.search_entry.setFont(self.ui_small_font)
-        self.search_entry.setFixedWidth(250)
+        # 寬度足夠時維持原本的 250，窄視窗時可縮到 120：搜尋列若整列壓不下去，
+        # 會把整個面板（連帶主視窗）的最小寬度撐大，在高 DPI 小邏輯寬度的螢幕
+        # 上導致視窗比畫面寬、右側元件跑出螢幕（見 SPEC §4.14）。
+        self.search_entry.setMinimumWidth(120)
+        self.search_entry.setMaximumWidth(250)
         self.search_entry.returnPressed.connect(self._do_search)
-        search_row.addWidget(self.search_entry)
+        search_row.addWidget(self.search_entry, 1)
 
         self.regex_switch = QCheckBox("正則")
         self.regex_switch.setFont(self.ui_small_font)
@@ -155,8 +159,9 @@ class BatchSearchWindow(QMainWindow):
 
         self.replace_entry = QLineEdit()
         self.replace_entry.setFont(self.ui_small_font)
-        self.replace_entry.setFixedWidth(250)
-        search_row.addWidget(self.replace_entry)
+        self.replace_entry.setMinimumWidth(120)
+        self.replace_entry.setMaximumWidth(250)
+        search_row.addWidget(self.replace_entry, 1)
 
         self.search_btn = make_button("搜尋", color="#007bff", hover="#0069d9",
                                       font=self.ui_font, width=90)

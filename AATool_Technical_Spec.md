@@ -350,6 +350,7 @@
     *   主程式→Qt（`reverse_cmd_file`）：`restore`（恢復視窗顯示）
 *   **ESC 返回首頁**: `BatchSearchWindow.__init__` 接受 `on_back` callback；`MainWindow.show_batch_panel()` 傳入 `on_back=self.show_translate_panel`。面板建立後以 `QShortcut(Key_Escape, self, WidgetWithChildrenShortcut)` 連接 `on_back`，按 ESC 直接返回首頁（翻譯面板）。
 *   **搜尋**: 在指定資料夾所有 HTML 的 `<pre>` 內容中搜尋，支援字串或正則，最多 500 筆結果。背景執行緒搜尋 + 分批渲染。
+*   **搜尋列寬度**: 搜尋／替換 `QLineEdit` 為可縮短寬度（min 120 / max 250 + stretch），非固定寬。理由與量測見 §4.14。
 *   **單筆替換 / 全部替換 / 復原**: 與舊版邏輯相同，另支援檔案層級的復原（`_undo_backups`）。
 *   **全部復原（`_undo_all_batch`）**: 按下「全部替換」後，其右側會顯示「全部復原」按鈕，點擊可將本次批次替換涉及的所有檔案一次還原至替換前狀態。採用 `_batch_undo` 快照（含 `backups`、`items`、`new_backup_files`），新搜尋或單筆復原動到同檔案時會使快照失效並隱藏按鈕。單筆「復原」按鈕則僅還原單一檔案。
 *   **排除功能（✕ 按鈕）**: 可將特定搜尋結果從替換範圍中移除（不會被「全部替換」影響），並可隨時恢復。
@@ -420,7 +421,8 @@
 *   **套用處**：`TranslatePanel._build_toolbar()`。左區塊＝標題＋⚙＋批次搜尋／編輯模式／自動翻譯，右區塊＝📂 檔案列表／📖 Wiki 對照／📥 讀取設定／📤 儲存設定／🔧提取Debug。實測行為：寬 ≥1292 → 標題顯示、單行（與改版前**像素一致**）；1092~1291 → 標題自動隱藏、仍單行；<約 1050 → 右區塊換第二行。工具列最小寬由 **1280 降為 700**，主視窗最小寬由 **1292 降為 979**。
 *   **預設視窗尺寸夾在螢幕可用區內**：`MainWindow.__init__` 以 `QGuiApplication.primaryScreen().availableGeometry()` 夾住 `resize()`（原本硬寫 `resize(1400, 900)`），避免高 DPI 下還原視窗時右側／底部超出畫面。啟動仍為 `showMaximized()`。
 *   **`check_ui_layout.py` 回歸檢查**：`QT_QPA_PLATFORM=offscreen` 建立主視窗，輸出各面板最小寬度，並在 1920/1706/1536/1366/1280/1092 等邏輯尺寸 × 各面板（翻譯主畫面／批次搜尋／自動翻譯／網址讀取）下檢查有無元件被裁切或超出視窗，超過 `MAX_MIN_WIDTH`(1024) 或發現裁切則 exit code 1。**注意兩個量測陷阱**：(1) 捲動區內的元件超出視野是正常的，`_in_scroll_area()` 會略過；(2) 部分面板（網址讀取的歷史清單）需數輪 layout 才收斂，故每個尺寸重複 resize 4 次再量。**目視驗證**不需要真的 2K/4K 螢幕，用縮放倍率跑主程式即可：`QT_SCALE_FACTOR=1.5 py -3.12 aa_main_qt.py`（等同邏輯 1280）。
-*   **已知未修**：`BatchSearchWindow`（`aa_batch_search_qt.py`）最小寬 **1130**，且因 `QStackedWidget` 的最小尺寸取各頁最大值，只要批次搜尋面板被建立過，整個主視窗最小寬就變成 1130。1280 邏輯寬度不受影響；1092（1366x768 @125%）仍會超出 38px。修法同上：把該面板的按鈕列改用 `WrapRow`。
+*   **批次搜尋面板（`aa_batch_search_qt.py`）**：原最小寬 **1130**（因 `QStackedWidget` 的最小尺寸取各頁最大值，只要開過批次搜尋，整個主視窗最小寬就變成 1130），元凶是搜尋列的兩個 `QLineEdit` 用 `setFixedWidth(250)`——固定寬度會直接計入該列最小寬。改為 `setMinimumWidth(120)` + `setMaximumWidth(250)` 並在 `addWidget(..., 1)` 給 stretch：寬度足夠時仍是 250（**外觀不變，1280 寬度以上實測仍為 250**），窄視窗才縮短（1092 → 201、979 → 159）。面板最小寬 **1130 → 870**，不再撐大主視窗。**通則：橫列裡不要用 `setFixedWidth`**，改用 min/max + stretch，否則該寬度會變成整個視窗的最小寬度下限。
+*   **目前的最小寬度由誰決定**：翻譯主畫面的中央 splitter（967）→ 主視窗 979。979 已涵蓋所有常見邏輯寬度（最窄的常見值為 1092）；若未來要再往下，得處理 splitter 兩側 `QTextEdit` 的最小寬。
 
 ### 4.8 UI 通知系統
 *   **`show_toast(message, color, duration)`**: 在主視窗右上角顯示浮動提示，`duration` ms 後自動關閉。PyQt6 主視窗的 `MainWindow.show_status()` 已改以此函式呈現（原本位於左下角的「就緒」狀態列已移除），會將常見的 `#0f0` 亮綠自動映射為 toast 風格的 `#28a745`。**防重疊**：以 `parent._active_toasts` 追蹤仍在顯示中的 Toast，新 Toast 出現時會先 `deleteLater()` 清掉舊的再顯示新的；自動消失的 Toast 也會從清單移除。

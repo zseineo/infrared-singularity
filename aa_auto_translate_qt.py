@@ -377,6 +377,17 @@ class AutoTranslatePanel(QWidget):
             else "⚠️ 非 Windows：金鑰僅 base64 混淆儲存，安全性較低")
         form.addRow("API 金鑰：", self.api_keys_edit)
 
+        self.api_timeout_spin = QSpinBox()
+        self.api_timeout_spin.setRange(30, 3600)
+        self.api_timeout_spin.setSingleStep(30)
+        self.api_timeout_spin.setSuffix(" 秒")
+        self.api_timeout_spin.setToolTip(
+            "單次 API 請求最多等多久才判定失敗（預設 600 秒）。\n"
+            "Log 出現「API 回應逾時」或「The read operation timed out」\n"
+            "→ 代表模型還在跑就被判定失敗、整話被跳過，請把此值調高。\n"
+            "慢速／長輸出的模型翻長篇 AA 時可能需要 1200 秒以上。")
+        form.addRow("API 逾時：", self.api_timeout_spin)
+
         # 翻譯 Prompt（兩段）——區塊 1：僅 API 送出；區塊 2：API 送，瀏覽器於未勾選
         # 「使用 Gem」時也送（即「不送出 Prompt」的核取框為未勾選時）。
         self.api_only_prompt_edit = QPlainTextEdit()
@@ -563,6 +574,8 @@ class AutoTranslatePanel(QWidget):
         self.api_prompt_edit.setPlainText(
             getattr(m, "_gemini_api_system_prompt", "") or "")
         self.api_base_url_edit.setText(getattr(m, "_api_custom_base_url", "") or "")
+        self.api_timeout_spin.setValue(
+            max(30, int(getattr(m, "_api_timeout", 600) or 600)))
         # 各供應商金鑰／模型載入暫存 dict（切換供應商時互換，儲存時一併寫入）。
         # base_dir 必須與主程式一致（凍結時為 exe 旁），否則打包版讀不到已存金鑰。
         base_dir = getattr(m, "_settings_base_dir", None) \
@@ -598,6 +611,7 @@ class AutoTranslatePanel(QWidget):
             "api_model": gemini_model,
             "api_models": api_models,
             "api_custom_base_url": self.api_base_url_edit.text().strip(),
+            "api_timeout": self.api_timeout_spin.value(),
             "api_only_prompt": self.api_only_prompt_edit.toPlainText(),
             "api_system_prompt": self.api_prompt_edit.toPlainText(),
             "provider_keys": provider_keys,

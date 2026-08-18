@@ -509,11 +509,13 @@ def run_auto_translate(
         api_prompts = [getattr(cache, "gemini_api_only_prompt", "") or "",
                        cache.gemini_api_system_prompt or ""]
         api_system_prompt = "\n\n".join(p.strip() for p in api_prompts if p.strip())
+        api_timeout = int(getattr(cache, "api_timeout", 0) or 0)
         if provider == "gemini":
             session = gemini_api.GeminiApiSession(
                 keys, cache.gemini_api_model,
                 system_prompt=api_system_prompt, log=log,
-                stop_event=stop_event, base_dir=base_dir)
+                stop_event=stop_event, base_dir=base_dir,
+                timeout=api_timeout)
             open_log = f"使用 Gemini API（模型 {cache.gemini_api_model}）…"
         else:
             meta = openai_api.API_PROVIDERS.get(provider, {})
@@ -524,7 +526,8 @@ def run_auto_translate(
             session = openai_api.ChatApiSession(
                 keys, model,
                 scheme=meta.get("scheme", "openai"), base_url=base_url,
-                system_prompt=api_system_prompt, log=log, stop_event=stop_event)
+                system_prompt=api_system_prompt, log=log, stop_event=stop_event,
+                timeout=api_timeout)
             open_log = f"使用 {meta.get('label', provider)} API（模型 {model}）…"
     else:
         gem_url = gem_url or cache.gemini_gem_url

@@ -71,7 +71,10 @@ API_PROVIDERS: dict[str, dict] = {
     },
 }
 
-_TIMEOUT = 300
+# 單次 API 請求的讀取逾時（秒）。此為未設定時的預設值；使用者可在「連線設定」
+# 調整（cache.api_timeout），慢速／長輸出的模型（如 LongCat 這類大型模型跑
+# 數百行 AA 翻譯）常需要更長時間，逾時會讓整話被跳過。
+_TIMEOUT = 600
 _ANTHROPIC_VERSION = "2023-06-01"
 _ANTHROPIC_MAX_TOKENS = 32000  # Anthropic 必填的輸出上限（避免長章節被截斷）
 
@@ -114,9 +117,11 @@ class ChatApiSession:
         system_prompt: str = "",
         log: Callable[[str], None] | None = None,
         stop_event=None,
+        timeout: int = 0,
     ) -> None:
         self._keys = [k.strip() for k in (api_keys or []) if k.strip()]
         self._model = (model or "").strip()
+        self._timeout = int(timeout) if timeout and int(timeout) > 0 else _TIMEOUT
         self._scheme = scheme if scheme in ("openai", "anthropic") else "openai"
         self._base_url = (base_url or "").strip().rstrip("/")
         self._system_prompt = system_prompt or ""
@@ -135,7 +140,8 @@ class ChatApiSession:
         if not self._model:
             raise GeminiWebError("未設定 API 模型")
         self._log(f"API 後端就緒：{self._scheme} @ {self._base_url}，"
-                  f"模型 {self._model}，共 {len(self._keys)} 把金鑰輪換")
+                  f"模型 {self._model}，共 {len(self._keys)} 把金鑰輪換，"
+                  f"逾時 {self._timeout}s")
 
     def close(self) -> None:
         pass
@@ -219,8 +225,14 @@ class ChatApiSession:
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
+        except TimeoutError as e:
+            # socket 讀取逾時（"The read operation timed out"）。原訊息看不出可調整，
+            # 這裡明說目前值與調整位置，避免使用者以為是模型壞掉。
+            raise GeminiWebError(
+                f"API 回應逾時（超過 {self._timeout} 秒未收到完整回覆）。"
+                f"模型較慢或這一話很長時可到「連線設定 → API 逾時」調高") from e
         except urllib.error.HTTPError as e:
             err_body = ""
             try:

@@ -55,7 +55,9 @@ _DEFAULT_THINKING_LEVEL = {
 
 _ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/"
              "models/{model}:generateContent")
-_TIMEOUT = 300
+# 單次 API 請求的讀取逾時（秒）；未設定時的預設值，使用者可於「連線設定」調整
+# （cache.api_timeout）。與 openai_api 共用同一個設定欄位。
+_TIMEOUT = 600
 
 # 額度冷卻參數
 _RPM_COOLDOWN = 60.0          # 每分鐘速率上限的預設冷卻（無伺服器建議時）
@@ -108,9 +110,11 @@ class GeminiApiSession:
         log: Callable[[str], None] | None = None,
         stop_event=None,
         base_dir: str | None = None,
+        timeout: int = 0,
     ) -> None:
         self._keys = [k.strip() for k in (api_keys or []) if k.strip()]
         self._model = (model or DEFAULT_API_MODEL).strip()
+        self._timeout = int(timeout) if timeout and int(timeout) > 0 else _TIMEOUT
         self._system_prompt = system_prompt or ""
         self._log = log or (lambda m: print(f"[gemini_api] {m}"))
         self._stop_event = stop_event
@@ -129,7 +133,7 @@ class GeminiApiSession:
             raise GeminiWebError("API 模式但未設定任何 API 金鑰")
         self._load_quota_state()  # 載入上次未過重置時間的 RPD 冷卻；過期者自動清除
         self._log(f"API 後端就緒：模型 {self._model}，"
-                  f"共 {len(self._keys)} 把金鑰輪換")
+                  f"共 {len(self._keys)} 把金鑰輪換，逾時 {self._timeout}s")
 
     def close(self) -> None:
         pass
@@ -238,8 +242,12 @@ class GeminiApiSession:
         req = urllib.request.Request(
             url, data=data, headers={"Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
+        except TimeoutError as e:
+            raise GeminiWebError(
+                f"API 回應逾時（超過 {self._timeout} 秒未收到完整回覆）。"
+                f"模型較慢或這一話很長時可到「連線設定 → API 逾時」調高") from e
         except urllib.error.HTTPError as e:
             body = ""
             try:

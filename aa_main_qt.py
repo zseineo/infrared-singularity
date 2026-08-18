@@ -68,7 +68,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.09"
+APP_VERSION = "2.10"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -769,6 +769,7 @@ class MainWindow(QMainWindow):
         self._gemini_api_model: str = "gemini-2.5-pro"
         self._api_models: dict = {}  # 非 gemini 供應商各自的模型 id：{供應商: model}
         self._api_custom_base_url: str = ""  # 自定義供應商的 OpenAI 相容端點
+        self._api_timeout: int = 600  # 單次 API 請求逾時（秒），連線設定可調
         self._gemini_api_only_prompt: str = ""  # 僅 API 送出（瀏覽器模式不送）
         self._gemini_api_system_prompt: str = ""  # API 送；瀏覽器模式於 !use_gem 才送
         self._browser_use_gem: bool = True
@@ -1794,6 +1795,11 @@ class MainWindow(QMainWindow):
                 if isinstance(am, dict) else {}
         if "api_custom_base_url" in params:
             self._api_custom_base_url = params.get("api_custom_base_url", "") or ""
+        if "api_timeout" in params:
+            try:
+                self._api_timeout = max(30, int(params.get("api_timeout") or 600))
+            except (TypeError, ValueError):
+                self._api_timeout = 600
         self._gemini_api_only_prompt = params.get("api_only_prompt", "")
         self._gemini_api_system_prompt = params.get("api_system_prompt", "")
         self._browser_use_gem = bool(params.get("browser_use_gem", True))
@@ -2372,6 +2378,7 @@ class MainWindow(QMainWindow):
             gemini_api_model=self._gemini_api_model,
             api_models=self._api_models,
             api_custom_base_url=self._api_custom_base_url,
+            api_timeout=self._api_timeout,
             gemini_api_only_prompt=self._gemini_api_only_prompt,
             gemini_api_system_prompt=self._gemini_api_system_prompt,
             browser_use_gem=self._browser_use_gem,
@@ -2480,6 +2487,10 @@ class MainWindow(QMainWindow):
             if isinstance(am, dict) else {}
         self._api_custom_base_url = str(
             getattr(cache, "api_custom_base_url", "") or "")
+        try:
+            self._api_timeout = max(30, int(getattr(cache, "api_timeout", 600) or 600))
+        except (TypeError, ValueError):
+            self._api_timeout = 600
         self._gemini_api_only_prompt = str(
             getattr(cache, "gemini_api_only_prompt", "") or "")
         self._gemini_api_system_prompt = str(

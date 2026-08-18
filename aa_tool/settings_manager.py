@@ -198,6 +198,10 @@ class AppCache:
     # aa_tool.openai_api.API_PROVIDERS）。gemini 走 GeminiApiSession，其餘走
     # ChatApiSession（OpenAI／Anthropic 相容）。
     api_provider: str = "gemini"
+    # 單次 API 請求的讀取逾時（秒）。慢速／長輸出的模型（大型模型翻數百行 AA）
+    # 常會超過預設值而被判定失敗、整話跳過；由「連線設定 → API 逾時」調整。
+    # 0 或缺值時各後端沿用自己的預設（openai_api/gemini_api 的 _TIMEOUT）。
+    api_timeout: int = 600
     # API 模式用的 Gemini 模型 id（見 aa_tool.gemini_api.API_MODELS）。
     # 保留原欄位：gemini 供應商仍讀此欄，維持既有配額邏輯不變。
     gemini_api_model: str = "gemini-2.5-pro"
@@ -417,6 +421,11 @@ class SettingsManager:
                 'fetch_auto_fill_title', cache.fetch_auto_fill_title))
             cache.fetch_clear_ai_text = bool(data.get(
                 'fetch_clear_ai_text', cache.fetch_clear_ai_text))
+            try:
+                cache.api_timeout = max(0, int(data.get(
+                    'api_timeout', cache.api_timeout)))
+            except (TypeError, ValueError):
+                pass
             cache.gemini_gem_url = str(data.get(
                 'gemini_gem_url', cache.gemini_gem_url))
             cache.gemini_profile_dir = str(data.get(
@@ -551,6 +560,7 @@ class SettingsManager:
                 'pad_space_count': cache.pad_space_count,
                 'fetch_auto_fill_title': cache.fetch_auto_fill_title,
                 'fetch_clear_ai_text': cache.fetch_clear_ai_text,
+                'api_timeout': cache.api_timeout,
                 'gemini_gem_url': cache.gemini_gem_url,
                 'gemini_profile_dir': cache.gemini_profile_dir,
                 'gemini_max_per_session': cache.gemini_max_per_session,

@@ -8,6 +8,7 @@
     *   `aa_batch_search_qt.py` — PyQt6 批次搜尋視窗 (`BatchSearchWindow`)，嵌入主視窗的 `QStackedWidget`
     *   `aa_wiki_name_dialog_qt.py` — PyQt6 Wiki 角色日中對照抓取 Dialog (`WikiNameDialog`)，非 modal 獨立對話框
     *   `aa_qt_font_test.py` — PyQt6 字型引擎驗證小工具（獨立測試用）
+    *   `check_ui_layout.py` — UI 版面解析度適配檢查（離螢幕跑，見 §4.14）
     *   `aa_auto_translate.py` — 連續多話自動翻譯協調器（CLI 入口，亦由主視窗 GUI 呼叫）。詳見 §4.13
     *   `aa_auto_translate_qt.py` — 自動翻譯面板 `AutoTranslatePanel`（嵌入主視窗 QStackedWidget index 4）。詳見 §4.13
     *   `aa_tool/` — 純邏輯模組（無 UI 依賴）：`constants`、`font_measure`（Protocol）、`html_io`、`settings_manager`、`text_extraction`、`translation_engine`、`bubble_alignment`、`url_fetcher`、`wiki_name_fetcher`、`gemini_web`、`gemini_api`、`secure_store`、`original_cache`、`qt_helpers`、`dark_theme.qss`
@@ -411,6 +412,15 @@
     3. **策略 C — 泛用 `<span lang="ja">` 配對**：span 之前 400 字元範圍去 tag 後取尾端連續中文串為中文名。
 *   **過濾條件**: 日文必須含假名或漢字；中文不得含假名；兩者相等或任一為空則剔除。
 *   **輸出用途**: 使用者複製結果後手動貼入主視窗術語表（不自動寫入，因使用者通常需要手動編輯處理）。
+
+### 4.14 UI 解析度／高 DPI 適配（`WrapRow` — `aa_tool/qt_helpers.py`）
+*   **問題成因**：橫列用 `QHBoxLayout` 一字排開時，該列最小寬度＝所有按鈕文字寬度總和（`_make_btn` 只設 `setMinimumWidth`，按鈕壓不下去）。主視窗最小寬度會被最寬的那一列撐住；只要螢幕**邏輯寬度**（＝實際解析度 ÷ Windows 縮放比例）小於它，即使最大化，視窗仍比畫面寬，右側按鈕就落到螢幕外看不到。常見邏輯寬度：1080p @150%／2K @200%／4K @300% 皆為 **1280**；1366x768 @125% 為 **1092**；1080p @100% 為 1920（開發機看不到問題）。
+*   **`TwoGroupWrapLayout(QLayout)`**：兩個區塊的橫列版面。放得下 → 同一列（左靠左、右靠右，等同原本的 `addStretch()` 視覺）；放不下 → 右區塊換到第二行（仍靠右）。`minimumSize()` 取「較寬的單一區塊」而非兩者相加，這正是最小寬度得以下降的關鍵；高度隨換行變化故實作 `heightForWidth()`。
+*   **`WrapRow(QWidget)`**：承載上述版面的容器。`collapsible` 參數指定一個「窄視窗時可省略」的元件（工具列傳入標題 QLabel），在 `resizeEvent` 中依「標題顯示時的完整寬度」這個**固定門檻**決定顯示／隱藏，故不會來回跳動；切換後呼叫 `layout().invalidate()` + `updateGeometry()`，否則父版面沿用這次 resize 已算過的 `heightForWidth`，會留下多餘空白。
+*   **套用處**：`TranslatePanel._build_toolbar()`。左區塊＝標題＋⚙＋批次搜尋／編輯模式／自動翻譯，右區塊＝📂 檔案列表／📖 Wiki 對照／📥 讀取設定／📤 儲存設定／🔧提取Debug。實測行為：寬 ≥1292 → 標題顯示、單行（與改版前**像素一致**）；1092~1291 → 標題自動隱藏、仍單行；<約 1050 → 右區塊換第二行。工具列最小寬由 **1280 降為 700**，主視窗最小寬由 **1292 降為 979**。
+*   **預設視窗尺寸夾在螢幕可用區內**：`MainWindow.__init__` 以 `QGuiApplication.primaryScreen().availableGeometry()` 夾住 `resize()`（原本硬寫 `resize(1400, 900)`），避免高 DPI 下還原視窗時右側／底部超出畫面。啟動仍為 `showMaximized()`。
+*   **`check_ui_layout.py` 回歸檢查**：`QT_QPA_PLATFORM=offscreen` 建立主視窗，輸出各面板最小寬度，並在 1920/1706/1536/1366/1280/1092 等邏輯尺寸 × 各面板（翻譯主畫面／批次搜尋／自動翻譯／網址讀取）下檢查有無元件被裁切或超出視窗，超過 `MAX_MIN_WIDTH`(1024) 或發現裁切則 exit code 1。**注意兩個量測陷阱**：(1) 捲動區內的元件超出視野是正常的，`_in_scroll_area()` 會略過；(2) 部分面板（網址讀取的歷史清單）需數輪 layout 才收斂，故每個尺寸重複 resize 4 次再量。**目視驗證**不需要真的 2K/4K 螢幕，用縮放倍率跑主程式即可：`QT_SCALE_FACTOR=1.5 py -3.12 aa_main_qt.py`（等同邏輯 1280）。
+*   **已知未修**：`BatchSearchWindow`（`aa_batch_search_qt.py`）最小寬 **1130**，且因 `QStackedWidget` 的最小尺寸取各頁最大值，只要批次搜尋面板被建立過，整個主視窗最小寬就變成 1130。1280 邏輯寬度不受影響；1092（1366x768 @125%）仍會超出 38px。修法同上：把該面板的按鈕列改用 `WrapRow`。
 
 ### 4.8 UI 通知系統
 *   **`show_toast(message, color, duration)`**: 在主視窗右上角顯示浮動提示，`duration` ms 後自動關閉。PyQt6 主視窗的 `MainWindow.show_status()` 已改以此函式呈現（原本位於左下角的「就緒」狀態列已移除），會將常見的 `#0f0` 亮綠自動映射為 toast 風格的 `#28a745`。**防重疊**：以 `parent._active_toasts` 追蹤仍在顯示中的 Toast，新 Toast 出現時會先 `deleteLater()` 清掉舊的再顯示新的；自動消失的 Toast 也會從清單移除。

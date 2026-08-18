@@ -25,7 +25,9 @@ import threading
 import time
 
 from PyQt6.QtCore import Qt, QEvent, QPoint, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QKeySequence, QPalette, QShortcut
+from PyQt6.QtGui import (
+    QColor, QFont, QGuiApplication, QKeySequence, QPalette, QShortcut,
+)
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QHBoxLayout, QInputDialog,
     QLabel, QLineEdit,
@@ -41,7 +43,7 @@ from aa_tool.constants import (
 )
 from aa_tool.html_io import read_html_pre_content, write_html_file, read_html_bg_color
 from aa_tool import original_cache
-from aa_tool.qt_helpers import show_toast
+from aa_tool.qt_helpers import WrapRow, show_toast
 from aa_tool.settings_manager import (
     SettingsManager, AppSettings, AppCache,
     merge_glossary_diff, merge_filter_diff,
@@ -66,7 +68,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.07"
+APP_VERSION = "2.08"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -227,10 +229,13 @@ class TranslatePanel(QWidget):
         root.addWidget(vsplit, 1)
 
     def _build_toolbar(self) -> QWidget:
-        w = QWidget()
-        w.setStyleSheet("background:#343a40;")
-        row = QHBoxLayout(w)
-        row.setContentsMargins(10, 5, 10, 5)
+        # 左右兩個區塊各自一個 QHBoxLayout，外層用 WrapRow：視窗夠寬時維持
+        # 「左側導覽靠左、右側工具靠右」的原樣；不夠寬時右區塊自動換到第二行，
+        # 讓工具列的最小寬度不再是所有按鈕寬度總和（否則高 DPI 縮放的小邏輯
+        # 寬度螢幕會因視窗撐不下而把右側按鈕擠出畫面）。
+        left = QWidget()
+        row = QHBoxLayout(left)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(5)
 
         title_lbl = QLabel("AA 創作翻譯輔助工具")
@@ -264,7 +269,10 @@ class TranslatePanel(QWidget):
         btn_auto.clicked.connect(self._main.show_auto_translate_panel)
         row.addWidget(btn_auto)
 
-        row.addStretch()
+        right = QWidget()
+        row = QHBoxLayout(right)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(5)
 
         btn_file_list = _make_btn(
             "📂 檔案列表", "#0d6efd", "#0b5ed7", font=_ui_font(12))
@@ -294,6 +302,12 @@ class TranslatePanel(QWidget):
         btn_debug = _make_btn("🔧提取Debug", "#6c757d", "#5a6268", font=_ui_font(12))
         btn_debug.clicked.connect(self._main.analyze_extraction)
         row.addWidget(btn_debug)
+
+        # collapsible：排不進同一行時自動隱藏標題（視窗標題列已有同樣資訊），
+        # 省下的寬度讓 1280 邏輯寬度的螢幕仍能維持單行工具列。
+        w = WrapRow(left, right, margins=(10, 5, 10, 5), gap=8,
+                    collapsible=title_lbl)
+        w.setStyleSheet("background:#343a40;")
 
         # 供設定浮層定位用：讓浮層自工具列（⚙ 鈕所在）底下展開，不蓋住 ⚙ 鈕。
         self._toolbar = w
@@ -694,7 +708,17 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._invoke_on_main.connect(lambda fn: fn())
         self.setWindowTitle(APP_TITLE)
-        self.resize(1400, 900)
+        # 預設尺寸夾在螢幕可用區內：高 DPI 縮放下的「邏輯解析度」可能遠小於
+        # 1400x900（例：1080p @150% ＝ 1280x720），直接 resize(1400, 900) 會讓
+        # 還原視窗時右側／底部超出畫面，按鈕點不到也看不到。
+        avail = None
+        screen = QGuiApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+        if avail is not None and avail.width() > 0 and avail.height() > 0:
+            self.resize(min(1400, avail.width()), min(900, avail.height()))
+        else:
+            self.resize(1400, 900)
         self._dark_title_applied = False
 
         # ── 設定管理 ──

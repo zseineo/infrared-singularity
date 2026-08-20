@@ -13,6 +13,8 @@
   - yaruo-matome.com（entry-content div + nexe-prev-post ul）
   - blog.livedoor.jp（textar-aa / span.aa，無關聯記事、尾端嵌入下一話連結）
   - asitayaruo.com（entry-content + dt/dd；本身無 prev/next，關聯記事改由分類頁 ?cat=N&paged=K 取得）
+  - naitomeazirou.fc2.net（走預設 article div 解析；模板無 relate_dl，關聯記事改由全記事一覽
+    archives.html サイトマップ 依分類編號篩出同系列，見 `_fetch_fc2_sitemap_nav`）
 
 顏色標籤一律輸出為 `<span style="color:#rrggbb">`；來源的 `rgb(R, G, B)` 形式
 （yaruobook.com / .jp、himanatokiniyaruo.com 等）會正規化為 `#rrggbb`，
@@ -564,6 +566,11 @@ def _parse_default(page_html: str, base_url: str, *, author_name: str = "", auth
                 nav_links.append({'title': title, 'url': None, 'is_current': True})
         nav_links.reverse()
 
+    # 無 relate_dl（部分 FC2 模板未掛「関連記事」外掛）→ 改由全記事一覽
+    # （archives.html サイトマップ）取同分類文章清單當關聯記事。
+    if text_content and not nav_links:
+        nav_links = _fetch_fc2_sitemap_nav(page_html, base_url)
+
     return text_content or None, nav_links, page_title
 
 
@@ -674,6 +681,89 @@ def _parse_himanatokiniyaruo(page_html: str, base_url: str, *, author_name: str 
 # ════════════════════════════════════════════════════════════════
 #  解析器：FC2 Blog
 # ════════════════════════════════════════════════════════════════
+
+# 部分 FC2 站台的模板未掛「関連記事」外掛（頁面完全沒有 relate_dl），
+# 只在 <head> 留下 `<link rel="index" href=".../archives.html">` 的全記事一覽
+# （サイトマップ）。該頁以「新 → 舊」列出全站文章、每頁 1000 筆、`?p=N` 分頁，
+# 且每筆的 `<li name="CAT_ID" id="CAT_ID">` 帶分類編號 —— 可據此篩出同系列文章
+# 當作關聯記事（例：naitomeazirou.fc2.net）。
+_FC2_SITEMAP_LINK_RE = re.compile(
+    r'<link\s+rel="index"\s+href="([^"]*archives\.html)"', re.IGNORECASE)
+_FC2_SITEMAP_ITEM_RE = re.compile(
+    r'<li\s+name="(\d+)"\s+id="\d+"\s*>\s*<a\s+href="([^"]+)"[^>]*>(.*?)</a>',
+    re.DOTALL | re.IGNORECASE)
+_FC2_SITEMAP_MAX_PAGES = 30
+# 「目次」頁面（`目次`／`目次２`／`【安価】…　目次６` 等，標題結尾為「目次」＋
+# 可選編號）只是連結索引、頁面內沒有任何貼文，解析器抓不到內文；留在關聯記事
+# 清單裡會讓使用者（與「下一話」按鈕）停在空白頁 → 一律排除。
+# 注意只比對「結尾」且「目次」前為行首或空白，避免誤殺標題含該詞的正常話次。
+_FC2_SITEMAP_INDEX_TITLE_RE = re.compile(r'(?:^|[\s　])目次[0-9０-９]*$')
+
+
+def _fetch_fc2_sitemap_nav(page_html: str, base_url: str) -> list[dict]:
+    """（無 relate_dl 的 FC2 站台）改由全記事一覽 archives.html 組出關聯記事。
+
+    逐頁抓取サイトマップ（`archives.html`、`archives.html?p=N`），取出每筆
+    `<li name="CAT_ID">` 的分類編號、連結與標題；找出當前文章所屬分類後，
+    只保留同分類項目（並排除無內文的「目次」索引頁），並反轉為「舊 → 新」
+    時間順序（讓「下一話」可取 `current_idx + 1`）。當前文章
+    `is_current=True`、`url=None`。
+
+    找不到 `<link rel="index">`、跨網域、或清單中沒有當前文章時回傳空清單
+    （呼叫端維持原本「無關聯記事」的行為）。
+    """
+    if 'web.archive.org' in base_url:
+        return []
+    link_m = _FC2_SITEMAP_LINK_RE.search(page_html)
+    if not link_m:
+        return []
+    sitemap_url = urljoin(base_url, html.unescape(link_m.group(1)))
+    if urlparse(sitemap_url).netloc != urlparse(base_url).netloc:
+        return []
+
+    cur_norm = base_url.split('#')[0].rstrip('/')
+    items: list[tuple[str, str, str]] = []   # (分類編號, URL, 標題)
+    seen: set[str] = set()
+    cur_cat: str | None = None
+    for page_num in range(1, _FC2_SITEMAP_MAX_PAGES + 1):
+        page_url = sitemap_url if page_num == 1 else f"{sitemap_url}?p={page_num}"
+        try:
+            sm_html = fetch_url(page_url)
+        except Exception:
+            break
+        added = 0
+        for m in _FC2_SITEMAP_ITEM_RE.finditer(sm_html):
+            href = urljoin(sitemap_url, html.unescape(m.group(2)))
+            if href in seen:
+                continue
+            seen.add(href)
+            title = html.unescape(re.sub(r'<[^>]+>', '', m.group(3))).strip()
+            items.append((m.group(1), href, title))
+            if href.split('#')[0].rstrip('/') == cur_norm:
+                cur_cat = m.group(1)
+            added += 1
+        # 沒有新項目、或找不到下一頁連結 → 結束
+        if added == 0 or not re.search(
+                rf'archives\.html\?p={page_num + 1}(?![0-9])', sm_html):
+            break
+
+    if cur_cat is None:
+        return []
+
+    nav_links: list[dict] = []
+    for cat_id, href, title in items:
+        if cat_id != cur_cat or _FC2_SITEMAP_INDEX_TITLE_RE.search(title):
+            continue
+        is_current = href.split('#')[0].rstrip('/') == cur_norm
+        nav_links.append({
+            'title': title,
+            'url': None if is_current else href,
+            'is_current': is_current,
+        })
+    # 來源為「新 → 舊」→ 反轉成時間順序
+    nav_links.reverse()
+    return nav_links
+
 
 def _extract_fc2_relate_nav(page_html: str, base_url: str) -> list[dict]:
     """抽取 FC2 `<dl class="relate_dl">` 關聯記事清單。

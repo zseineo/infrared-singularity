@@ -185,6 +185,9 @@ class AppCache:
     auto_translate_out_dir: str = ""
     auto_translate_count: int = 5
     auto_translate_until_last: bool = False
+    # auto_translate_url_list：手動網址清單（原始文字，一行一個網址）。非空時自動
+    # 翻譯整批照清單順序跑、不依關聯記事找下一話——供關聯記事尚未支援的站台使用。
+    auto_translate_url_list: str = ""
     # auto_translate_skip_existing：翻譯前若輸出資料夾已有同名檔則跳過該話
     # （重跑批次時略過已完成的話、省 API 額度）。預設關閉。
     auto_translate_skip_existing: bool = False
@@ -439,6 +442,8 @@ class SettingsManager:
             cache.gemini_selectors = sel if isinstance(sel, dict) else {}
             cache.auto_translate_out_dir = str(data.get(
                 'auto_translate_out_dir', cache.auto_translate_out_dir))
+            cache.auto_translate_url_list = str(data.get(
+                'auto_translate_url_list', cache.auto_translate_url_list))
             try:
                 cache.auto_translate_count = max(1, int(data.get(
                     'auto_translate_count', cache.auto_translate_count)))
@@ -566,6 +571,7 @@ class SettingsManager:
                 'gemini_max_per_session': cache.gemini_max_per_session,
                 'gemini_selectors': cache.gemini_selectors,
                 'auto_translate_out_dir': cache.auto_translate_out_dir,
+                'auto_translate_url_list': cache.auto_translate_url_list,
                 'auto_translate_count': cache.auto_translate_count,
                 'auto_translate_until_last': cache.auto_translate_until_last,
                 'auto_translate_skip_existing': cache.auto_translate_skip_existing,

@@ -113,6 +113,11 @@ def main() -> int:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import aa_main_qt as M
 
+    # 本檢查只量版面，不該動到使用者的設定：先把存檔路徑停掉再建視窗
+    # （建立面板／切換面板會觸發 schedule_save → save_cache 寫入 cache JSON）。
+    M.MainWindow.save_cache = lambda self, *a, **k: None
+    M.MainWindow.schedule_save = lambda self, *a, **k: None
+
     app = QApplication([])
     win = M.MainWindow()
     win.show()

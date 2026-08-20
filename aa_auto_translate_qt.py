@@ -20,9 +20,9 @@ import threading
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
-    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
-    QSplitter, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+    QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
+    QScrollArea, QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 
 from aa_tool.gemini_api import API_MODELS
@@ -128,9 +128,23 @@ class AutoTranslatePanel(QWidget):
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(8)
 
+        url_row = QWidget()
+        url_hl = QHBoxLayout(url_row)
+        url_hl.setContentsMargins(0, 0, 0, 0)
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("起始話的網址")
-        form.addRow("起始網址：", self.url_edit)
+        url_hl.addWidget(self.url_edit, 1)
+        # 手動網址清單：關聯記事尚未支援的站台，可自行貼上整批網址（一行一個）。
+        # 清單非空時整批完全照清單跑，本欄位（起始網址）本次忽略。
+        self._url_list_text = ""
+        self.btn_url_list = QPushButton("📋 網址清單")
+        self.btn_url_list.setToolTip(
+            "手動指定每一話的網址（一行一個）。" + chr(10) +
+            "填了之後就不依關聯記事找下一話，改照清單順序跑，" + chr(10) +
+            "適合關聯記事尚未支援的站台。清空即恢復原本行為。")
+        self.btn_url_list.clicked.connect(self._open_url_list_dialog)
+        url_hl.addWidget(self.btn_url_list)
+        form.addRow("起始網址：", url_row)
 
         count_row = QWidget()
         count_hl = QHBoxLayout(count_row)
@@ -531,6 +545,9 @@ class AutoTranslatePanel(QWidget):
         self._set_backend(backend)
         self.out_edit.setText(getattr(m, "_auto_translate_out_dir", "")
                               or getattr(m, "_last_dir", "") or "")
+        self._url_list_text = str(
+            getattr(m, "_auto_translate_url_list", "") or "")
+        self._update_url_list_btn()
         self.skip_existing_cb.setChecked(bool(
             getattr(m, "_auto_translate_skip_existing", False)))
         self.append_mode_cb.setChecked(bool(
@@ -636,8 +653,11 @@ class AutoTranslatePanel(QWidget):
         gem = self.gem_edit.text().strip()
         out_dir = self.out_edit.text().strip()
         backend = self._backend
+        url_list = self._url_list_lines()
+        if url_list:
+            url = url_list[0]  # 清單模式：第一行即第一話（協調器亦同此規則）
         if not url:
-            self._main.show_status("⚠️ 請填入起始網址", "#f39c12")
+            self._main.show_status("⚠️ 請填入起始網址（或設定手動網址清單）", "#f39c12")
             return None
         # Gem 網址僅瀏覽器模式必填；API 模式不需要 Gem
         if backend == "browser" and not gem:
@@ -658,6 +678,7 @@ class AutoTranslatePanel(QWidget):
             "out_dir": out_dir,
             "skip_existing": self.skip_existing_cb.isChecked(),
             "append_mode": self.append_mode_cb.isChecked(),
+            "url_list": url_list,
         }
 
     def _update_filename_preview(self) -> None:
@@ -679,10 +700,12 @@ class AutoTranslatePanel(QWidget):
         `allow_network=False`：只吃本地快取，沒命中就維持靜態模板（不上網、不卡 UI）；
         面板開啟時用這個。按「🔄 試算」鈕則用 `allow_network=True` 真的上網抓。
         """
-        url = self.url_edit.text().strip()
+        lines = self._url_list_lines()
+        url = lines[0] if lines else self.url_edit.text().strip()
         if not url:
             if allow_network:
-                self._main.show_status("⚠️ 請先填入起始網址", "#f39c12")
+                self._main.show_status(
+                    "⚠️ 請先填入起始網址（或設定手動網址清單）", "#f39c12")
             return
         out_dir = self.out_edit.text().strip()
         doc_title = self.doc_title_edit.text().strip()
@@ -725,6 +748,74 @@ class AutoTranslatePanel(QWidget):
             self.out_edit.setText(d)
             self._persist_out_dir()
 
+    # ── 手動網址清單 ──
+
+    def _url_list_lines(self) -> list[str]:
+        """目前清單的有效網址（去空行、去頭尾空白）。"""
+        return [ln.strip() for ln in self._url_list_text.splitlines() if ln.strip()]
+
+    def _update_url_list_btn(self) -> None:
+        """按鈕文字帶出清單筆數，讓使用者一眼看出清單正在生效。"""
+        n = len(self._url_list_lines())
+        self.btn_url_list.setText(f"📋 網址清單 ({n})" if n else "📋 網址清單")
+        self.url_edit.setEnabled(n == 0)
+        self.url_edit.setPlaceholderText(
+            "（已改用網址清單，本欄位本次忽略）" if n else "起始話的網址")
+
+    def _open_url_list_dialog(self) -> None:
+        """開啟清單編輯對話框；確定後即時寫回主視窗並存檔。"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("手動網址清單")
+        dlg.resize(560, 420)
+        v = QVBoxLayout(dlg)
+        hint = QLabel(
+            "一行一個網址，自動翻譯會照這個順序逐話翻譯。" + chr(10) +
+            "・第一行就是第一話；上方「起始網址」欄位本次會被忽略" + chr(10) +
+            "・「連續話數」仍然有效（只跑前 N 個）；勾「翻譯到最後一話」則跑完整份清單" + chr(10) +
+            "・清空內容即恢復原本依關聯記事找下一話的行為")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+        edit = QPlainTextEdit()
+        edit.setPlaceholderText("https://example.com/?p=1" + chr(10) +
+                                "https://example.com/?p=2")
+        edit.setPlainText(self._url_list_text)
+        v.addWidget(edit, 1)
+        count_lbl = QLabel("")
+        v.addWidget(count_lbl)
+
+        def _update_count() -> None:
+            n = len([ln for ln in edit.toPlainText().splitlines() if ln.strip()])
+            count_lbl.setText(f"目前 {n} 個網址" if n
+                              else "目前沒有網址（＝停用清單，依關聯記事找下一話）")
+        edit.textChanged.connect(_update_count)
+        _update_count()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        clear_btn = buttons.addButton("清空", QDialogButtonBox.ButtonRole.ResetRole)
+        clear_btn.clicked.connect(edit.clear)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        v.addWidget(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._url_list_text = edit.toPlainText().strip()
+        self._update_url_list_btn()
+        self._persist_url_list()
+        n = len(self._url_list_lines())
+        self._main.show_status(
+            f"✅ 已設定 {n} 個網址的手動清單" if n else "✅ 已清空手動網址清單", "#0f0")
+
+    def _persist_url_list(self) -> None:
+        """把清單即時寫回主視窗並存檔（比照輸出資料夾，不必等按「開始」）。"""
+        m = self._main
+        if getattr(m, "_auto_translate_url_list", "") == self._url_list_text:
+            return
+        m._auto_translate_url_list = self._url_list_text
+        m.save_cache()
+
     def _persist_out_dir(self) -> None:
         """把目前輸出資料夾即時寫回主視窗並存檔，讓選擇不必按「開始」也能持久化。"""
         out_dir = self.out_edit.text().strip()
@@ -761,8 +852,11 @@ class AutoTranslatePanel(QWidget):
         for w in (self.url_edit, self.count_spin, self.until_last,
                   self.gem_edit, self.model_combo, self.max_session_spin,
                   self.doc_title_edit, self.out_edit, self.skip_existing_cb,
+                  self.btn_url_list,
                   *self._backend_btns.values()):
             w.setEnabled(not running)
         # until_last 勾選時保持 count 灰
         if not running:
             self.count_spin.setEnabled(not self.until_last.isChecked())
+            # 手動清單生效時，起始網址欄位仍要維持停用（本次不會被使用）
+            self._update_url_list_btn()

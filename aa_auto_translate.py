@@ -456,6 +456,7 @@ def run_auto_translate(
     fetch_auto_fill_title: bool | None = None,
     until_last: bool = False,
     skip_existing: bool = False,
+    url_list: list[str] | None = None,
     append_mode: bool | None = None,
     stop_event=None,
     progress: Callable[[str], None] | None = None,
@@ -470,6 +471,11 @@ def run_auto_translate(
         （不計碰撞序號）就跳過該話、直接抓下一話——適合批次中斷後重跑略過已完成的話。
     append_mode：對應主畫面「加入翻譯」（True，保留原文、翻譯附在原文之後）／「替換
         翻譯」（False）。None 時讀 cache 的 auto_translate_append_mode（預設 False）。
+    url_list：手動網址清單（一行一個）。非空時**整批完全照清單跑**——第一行即第一話，
+        `start_url` 參數本次忽略，下一話也不再從關聯記事推導。供「關聯記事尚未支援」
+        的站台臨時使用。話數仍受 count 限制（取 min(count, 清單長度)）；until_last
+        為 True 時跑完整份清單。清單模式下單話抓取失敗不會中斷整批（下一話網址已知），
+        改為跳過該話續下一話。
     stop_event：threading.Event；設定後會在話與話之間（及分段之間）中止。
     progress：進度回呼（單一字串參數）；None 時印到 stdout。
     print_summary：是否在結束時透過 `log` 印出 `_print_summary` 總結；
@@ -488,8 +494,18 @@ def run_auto_translate(
         append_mode = getattr(cache, "auto_translate_append_mode", False)
     os.makedirs(out_dir, exist_ok=True)
 
-    total = _UNTIL_LAST_CAP if until_last else max(1, count)
-    total_label = "最後一話" if until_last else str(total)
+    # 手動網址清單：非空時第一行即第一話，整批照清單順序跑（不看關聯記事）
+    urls = [u.strip() for u in (url_list or []) if u.strip()]
+    if urls:
+        start_url = urls[0]
+        total = len(urls) if until_last else min(max(1, count), len(urls))
+    else:
+        total = _UNTIL_LAST_CAP if until_last else max(1, count)
+    total_label = str(total) if urls else (
+        "最後一話" if until_last else str(total))
+    if urls:
+        log(f"📋 使用手動網址清單（共 {len(urls)} 個網址，本批跑 {total} 話）；"
+            f"「起始網址」欄位本次忽略，下一話不看關聯記事。")
 
     def _stopping() -> bool:
         return stop_event is not None and stop_event.is_set()
@@ -579,12 +595,21 @@ def run_auto_translate(
                     url, cfg)
             except ChapterError as e:
                 result.failed.append((url, str(e)))
+                if urls:
+                    # 清單模式：下一話網址已知（不靠這一話的關聯記事），可續跑
+                    log(f"  ❌ {e} → 跳過此話，繼續下一話。")
+                    url = urls[i] if i < len(urls) else ""
+                    continue
                 result.pending_url = url  # 這一話未完成 → 供 GUI 回填起始網址接續
                 log(f"  ❌ {e} → 無法取得下一話，中斷。")
                 break
             # 讀過的網址寫入讀取紀錄（與手動流程一致）
             _record_url_history(sm, url, page_title, nav_links, source, log)
-            next_url = _next_chapter_url(nav_links)
+            # 清單模式下一話直接取清單的下一筆（i 為 1-based，故下一筆是 urls[i]）
+            if urls:
+                next_url = urls[i] if i < len(urls) else ""
+            else:
+                next_url = _next_chapter_url(nav_links)
 
             # 1.5) 若已有同名檔則跳過（重跑批次時略過已完成的話、省 API 額度）。
             #      檢查用「不含碰撞序號」的檔名主體，因此判定的是「這一話本身」是否

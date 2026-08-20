@@ -68,7 +68,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.10"
+APP_VERSION = "2.11"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -758,6 +758,8 @@ class MainWindow(QMainWindow):
         self._gemini_required_model: str = "pro"
         self._gemini_selectors: dict = {}
         self._auto_translate_out_dir: str = ""
+        # 手動網址清單（原始文字，一行一個）；非空時自動翻譯照清單跑
+        self._auto_translate_url_list: str = ""
         self._auto_translate_count: int = 5
         self._auto_translate_until_last: bool = False
         self._auto_translate_skip_existing: bool = False
@@ -1838,6 +1840,9 @@ class MainWindow(QMainWindow):
         self._auto_translate_count = params["count"]
         self._auto_translate_until_last = params["until_last"]
         self._auto_translate_skip_existing = params.get("skip_existing", False)
+        if "url_list" in params:
+            self._auto_translate_url_list = '\n'.join(
+                params.get("url_list") or [])
         self._auto_translate_append_mode = params.get("append_mode", False)
         self._gemini_max_per_session = params["max_per_session"]
         self._gemini_required_model = params["required_model"] or "pro"
@@ -1853,7 +1858,8 @@ class MainWindow(QMainWindow):
             params["gem_url"], params["until_last"],
             params["max_per_session"], params["required_model"],
             params.get("doc_title", ""),
-            params.get("skip_existing", False))
+            params.get("skip_existing", False),
+            params.get("url_list") or [])
 
     def _start_auto_translate(self, start_url: str, count: int,
                                out_dir: str, gem_url: str,
@@ -1861,7 +1867,8 @@ class MainWindow(QMainWindow):
                                max_per_session: int,
                                required_model: str = "",
                                doc_title: str = "",
-                               skip_existing: bool = False) -> None:
+                               skip_existing: bool = False,
+                               url_list: list[str] | None = None) -> None:
         """在背景執行緒跑自動翻譯，進度同步至橫幅、狀態列與面板 Log。"""
         self._auto_translate_running = True
         self._auto_stop_event = threading.Event()
@@ -1878,6 +1885,7 @@ class MainWindow(QMainWindow):
             self._auto_window.append_log(
                 f"=== 啟動自動翻譯：count={count} until_last={until_last} "
                 f"skip_existing={skip_existing} "
+                f"url_list={len(url_list or [])} "
                 f"max_per_session={max_per_session} ===")
         self.show_status("⏳ 自動翻譯啟動中…", "#17a2b8")
 
@@ -1912,6 +1920,7 @@ class MainWindow(QMainWindow):
                     fetch_auto_fill_title=self._fetch_auto_fill_title,
                     until_last=until_last,
                     skip_existing=skip_existing,
+                    url_list=url_list,
                     stop_event=stop_event,
                     progress=_progress,
                     print_summary=False)  # GUI 端自己印更完整的總結
@@ -2369,6 +2378,7 @@ class MainWindow(QMainWindow):
             gemini_required_model=self._gemini_required_model,
             gemini_selectors=self._gemini_selectors,
             auto_translate_out_dir=self._auto_translate_out_dir,
+            auto_translate_url_list=self._auto_translate_url_list,
             auto_translate_count=self._auto_translate_count,
             auto_translate_until_last=self._auto_translate_until_last,
             auto_translate_skip_existing=self._auto_translate_skip_existing,
@@ -2468,6 +2478,8 @@ class MainWindow(QMainWindow):
             str(cache.gemini_required_model or "pro").lower() or "pro")
         self._gemini_selectors = dict(cache.gemini_selectors or {})
         self._auto_translate_out_dir = str(cache.auto_translate_out_dir or "")
+        self._auto_translate_url_list = str(
+            getattr(cache, "auto_translate_url_list", "") or "")
         try:
             self._auto_translate_count = max(1, int(
                 cache.auto_translate_count or 5))

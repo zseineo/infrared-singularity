@@ -8,6 +8,7 @@
     *   `aa_batch_search_qt.py` — PyQt6 批次搜尋視窗 (`BatchSearchWindow`)，嵌入主視窗的 `QStackedWidget`
     *   `aa_wiki_name_dialog_qt.py` — PyQt6 Wiki 角色日中對照抓取 Dialog (`WikiNameDialog`)，非 modal 獨立對話框
     *   `aa_qt_font_test.py` — PyQt6 字型引擎驗證小工具（獨立測試用）
+    *   `check_url_fetch.py` — 網址連線診斷（DNS／TCP／TLS／憑證簽發者／實際抓取，見 §4.5）
     *   `check_ui_layout.py` — UI 版面解析度適配檢查（離螢幕跑，見 §4.14）
     *   `aa_auto_translate.py` — 連續多話自動翻譯協調器（CLI 入口，亦由主視窗 GUI 呼叫）。詳見 §4.13
     *   `aa_auto_translate_qt.py` — 自動翻譯面板 `AutoTranslatePanel`（嵌入主視窗 QStackedWidget index 4）。詳見 §4.13
@@ -331,6 +332,14 @@
     **尾端標點容錯**：名稱比對先做 `==` 精確比較，失敗時再以 `_NAME_TRAIL_RE`（`[\s.．。・,，、]+$`）剝除兩邊尾端標點後再比一次。用於容許作者在連續貼文偶爾在名稱後多打 dot 等情況（例：`yaruobookshelf.jp` 上 `三流 ◆WiAEg3iQI` ↔ `三流 ◆WiAEg3iQI.`，trip 碼與 ID 相同確認為同一人；若不容錯，第 2 篇之後在 `author_only=True` 時會被全部過濾掉）。
 *   **編碼自動偵測**（`_decode_bytes()`）: 候選順序為 **HTTP header 宣告的 charset → HTML `<meta charset>` → `utf-8`／`cp932`／`euc_jis_2004`／`euc-jp`／`shift_jis`**。`euc_jis_2004` 為 `euc-jp` 的超集，涵蓋 JIS X 0213 機種依存文字（如 `Ⅵ`、`①`），置於 `euc-jp` 之前——標準 euc-jp 頁面以它解碼結果一致，但含機種依存文字的頁面（如部分 livedoor 文章）唯有它能嚴格解碼成功（否則 `Ⅵ` 會變 `��`）。先逐一**嚴格**解碼取第一個成功者；全部失敗時（頁面含少量非法位元組）改以**第一順位候選**（通常為 HTTP header 宣告編碼）寬鬆解碼（`errors='replace'`）。寬鬆階段**不採「U+FFFD 最少」啟發式**——`cp932` 等寬鬆 codec 會把錯誤位元組解成半形片假名而非 U+FFFD，反而騙過該啟發式，故一律信任宣告編碼。實例：`blog.livedoor.jp` 宣告 `euc-jp` 但夾雜壞位元組，嚴格解全失敗，須以宣告的 euc-jp 寬鬆解碼才不會退回 utf-8 亂碼。`_fetch_raw()` 回傳 `(位元組, HTTP header charset)` tuple 供 `_decode_bytes()` 使用。
 *   **Gzip 解壓縮**: 自動解壓縮伺服器回傳的 gzip 內容（共用 `_fetch_raw()`）。
+*   **連線層自動重試（`_FETCH_RETRIES`，v2.13）**: `_fetch_raw()` 對**連線層**錯誤（`URLError` / `SSLError` / `TimeoutError` / `ConnectionError`）重試 2 次（共 3 次嘗試），間隔 2s／5s，且逾時逐次放寬（`_FETCH_TIMEOUT_SCALE` = 1.0／1.5／2.25 倍，預設 timeout 20s → 20/30/45s）。**`HTTPError` 不重試**——伺服器已回應（403/404/5xx）代表連線本身沒問題。三次都失敗且訊息含 `handshake`／`timed out` 時，由 `_connection_error()` 換成中文訊息並附排查方向（防毒 HTTPS 掃描／Proxy／VPN／線路不穩），取代原本直接冒出的 `<urlopen error _ssl.c:983: The handshake operation timed out>`。**起因**：使用者回報同一網址「瀏覽器打得開、本程式握手逾時」——TCP 已連上但 TLS 握手未完成，典型是連線被中間盒（防毒 HTTPS 掃描、公司/學校透明 Proxy、VPN）接走；瀏覽器走 Windows Schannel、本程式走 Python OpenSSL，中間盒常只放行瀏覽器。**診斷不需要回報者動手**：見下一條。
+*   **連線失敗自動診斷（`diagnose_connection()`，v2.13）**: 三次嘗試都失敗後由 `_connection_error()` 自動執行，逐層探測並產生**可直接貼回的診斷**，附在例外的 `diagnosis` 屬性（`list[str]`，第一行為結論）。目的：回報者不必自己跑任何指令或步驟，失敗當下 Log 就寫明原因。
+    *   探測層次：**DNS**（解析與 IP）→ **TCP**（`_probe_tls` 量連線時間）→ **TLS**（握手時間、協定版本、**憑證簽發者**）→ **對照站台**（`_CONTROL_HOST` = `www.microsoft.com`）→ **系統 Proxy**（`urllib.request.getproxies()`）。
+    *   結論判定：(1) 憑證簽發者命中 `_MITM_ISSUER_HINTS`（ESET／Kaspersky／Avast／ZScaler／Fortinet…）→ **連線正被 TLS 攔截**，請關閉防毒的 HTTPS 掃描；(2) TCP 通但 TLS 不通、對照站台也不通 → 本機或整條網路的問題（防毒／Proxy／VPN）；(3) TCP 通但 TLS 不通、對照站台正常 → 僅該站路徑有問題；(4) TCP 不通但對照正常 → 該站掛掉或被擋；(5) 兩者皆不通 → 沒有網路；(6) 診斷當下全通 → 暫時性線路不穩。
+    *   **診斷結果以 host 為 key 快取 `_DIAG_TTL`（120 秒）**：整批自動翻譯每話都失敗時不會每話重測（最壞每次數十秒）。
+    *   呈現路徑：自動翻譯 → `_fetch_and_parse` 把診斷併進 `ChapterError` 訊息 → 面板 Log 印完整版；**失敗清單／總結只取第一行**（`str(e).split('
+')[0]`），避免總結被灌爆。網址讀取視窗 → `_handle_url_fetch_request` 只附「結論」那一行，且 `_set_status` 已改 `setWordWrap(True)`，長訊息不會把狀態列（連帶整個面板）撐寬。
+    *   `check_url_fetch.py` 是同一個函式的手動入口（想主動測網路時用），不重複實作邏輯。
 *   **FC2 R-18 年齡閘門自動通過**: `fetch_url()` 偵測到回應 HTML 含 `class="age_verify_box_form"` 時，自動帶 `Cookie: age_check=1` 重試，取得真實內容（無需使用者手動確認年齡）。實例：`copymatome.blog.fc2.com`。HTTP 層抽出為 `_fetch_raw(url, extra_headers)` 輔助函式，decode 抽出為 `_decode_bytes()`，`fetch_url()` 組合兩者並加入年齡閘門判斷。
 *   **關聯記事導航**: 顯示同系列各話的連結清單，可直接點擊切換；提供上一話/下一話按鈕。
 *   **忽略留言開關 (`author_only`)**: Dialog 中的「忽略留言」開關，開啟時完全排除非作者的貼文。若同時填寫作者名稱則以該名稱為準；**若未填作者名稱則自動偵測**（`_detect_main_author_from_dt()` 對應 dt/dd 結構、`_detect_main_author_from_lines()` 對應 FC2 類型的「N 名前：…」行結構），取貼文中**第一個非「名無」的投稿者**作為作者。<br>**略過「名無」匿名留言者**：多數網站的留言者 ID 都含「名無」（名無しさん），自動偵測時若某樓投稿者名稱含「名無」，視為匿名留言、往下一樓繼續找，直到找到不含「名無」的名稱；若整串貼文皆為匿名，退回第一個出現的名稱（維持舊行為，避免空作者導致全部被過濾）。此略過**僅在自動偵測（未填作者名稱）時生效**——使用者明確填入名稱（含填入「名無」強制尋找匿名樓）時不受此限，仍以填入名稱為準。共用 helper `_extract_poster_name()` 負責從標頭抽取名稱。狀態持久化至暫存，「下一話」功能同樣遵循此設定。

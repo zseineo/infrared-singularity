@@ -730,5 +730,7 @@ class UrlFetchWindow(QWidget):
         )
 
     def _set_status(self, text: str, color: str):
+        # 自動換行：診斷結論等長訊息不會把標籤（連帶整個面板）撐寬
+        self.status_label.setWordWrap(True)
         self.status_label.setText(text)
         self.status_label.setStyleSheet(f"color: {color};")

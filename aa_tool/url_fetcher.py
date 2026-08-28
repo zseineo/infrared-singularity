@@ -16,6 +16,10 @@
   - naitomeazirou.fc2.net（走預設 article div 解析；模板無 relate_dl，關聯記事改由全記事一覽
     archives.html サイトマップ 依分類編號篩出同系列，見 `_fetch_fc2_sitemap_nav`）
 
+連線層（`_fetch_raw`）對 TLS 握手逾時／連線重置等**暫時性錯誤自動重試 2 次**、
+逾時逐次放寬；`HTTPError`（伺服器已回應）不重試。三次皆失敗會換成附排查方向的
+中文訊息。單機連不上但瀏覽器正常時，用 `check_url_fetch.py` 逐層診斷。
+
 顏色標籤一律輸出為 `<span style="color:#rrggbb">`；來源的 `rgb(R, G, B)` 形式
 （yaruobook.com / .jp、himanatokiniyaruo.com 等）會正規化為 `#rrggbb`，
 標籤內不留空白與逗號（見 `_canon_color_value`）。
@@ -25,6 +29,10 @@ from __future__ import annotations
 import gzip
 import html
 import re
+import socket
+import ssl
+import time
+import urllib.error
 import urllib.request
 from urllib.parse import urljoin, urlparse
 
@@ -36,6 +44,17 @@ _HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'Accept-Encoding': 'gzip, deflate',
 }
+
+# 連線層暫時性失敗的重試次數與間隔（秒）。
+# 起因：使用者回報 `_ssl.c:983: The handshake operation timed out`——TCP 已連上
+# 但 TLS 握手沒完成（同一網址在瀏覽器與其他機器都正常）。這類卡在中間盒的狀況
+# （防毒的 HTTPS 掃描、公司/學校的透明 Proxy、VPN、線路不穩）多半重試就過，
+# 且逾時值逐次放寬以涵蓋「單純很慢」的線路。只重試連線層錯誤：伺服器已回應
+# （HTTPError，如 403/404）代表連線本身沒問題，重試無意義。
+_FETCH_RETRIES = 2
+_FETCH_RETRY_WAIT = (2.0, 5.0)
+# 每次嘗試的逾時倍率（搭配 fetch_url 的 timeout 參數）
+_FETCH_TIMEOUT_SCALE = (1.0, 1.5, 2.25)
 
 # euc_jis_2004 為 euc-jp 的超集，涵蓋 JIS X 0213 機種依存文字（如 Ⅵ、①），
 # 置於 euc-jp 之前；標準 euc-jp 頁面以它解碼結果一致。
@@ -82,18 +101,196 @@ def _decode_bytes(page_bytes: bytes, declared_charset: str | None = None) -> str
     return page_bytes.decode('utf-8', errors='replace')
 
 
+# 憑證簽發者含這些字樣 ＝ 連線被本機防毒或網路上的資安設備解密重簽（TLS 攔截）
+_MITM_ISSUER_HINTS = (
+    'eset', 'kaspersky', 'avast', 'avg ', 'bitdefender', 'norton', 'symantec',
+    'mcafee', 'trend micro', 'sophos', 'f-secure', 'dr.web', 'zscaler',
+    'fortinet', 'fortigate', 'palo alto', 'bluecoat', 'netskope', 'sslsplit',
+    'mitmproxy', 'charles', 'fiddler', 'proxy', 'firewall', 'antivirus',
+)
+
+# 診斷用的對照站台：用來分辨「只有這個站連不上」還是「整條連線都有問題」
+_CONTROL_HOST = 'www.microsoft.com'
+
+# 診斷結果快取（host → (時間, 診斷行)）。整批自動翻譯若每話都連線失敗，
+# 沒有快取就會每話重測一次（最壞每次數十秒），對判斷結果也沒有幫助。
+_DIAG_TTL = 120.0
+_diag_cache: dict[str, tuple[float, list[str]]] = {}
+
+
+def _probe_tls(host: str, port: int, timeout: float) -> dict:
+    """量測單一主機的 TCP／TLS，回傳診斷用的原始數據（不丟例外）。"""
+    info: dict = {'tcp': False, 'tls': False, 'issuer': '', 'proto': '',
+                  'error': '', 'tcp_sec': 0.0, 'tls_sec': 0.0}
+    sock = None
+    try:
+        t0 = time.time()
+        sock = socket.create_connection((host, port), timeout=timeout)
+        info['tcp'] = True
+        info['tcp_sec'] = time.time() - t0
+        if port != 443:
+            return info
+        t1 = time.time()
+        with ssl.create_default_context().wrap_socket(
+                sock, server_hostname=host) as ss:
+            info['tls'] = True
+            info['tls_sec'] = time.time() - t1
+            info['proto'] = ss.version() or ''
+            cert = ss.getpeercert() or {}
+            try:
+                fields = dict(x[0] for x in cert.get('issuer', ()))
+            except Exception:  # noqa: BLE001 — 憑證異常不該讓診斷中斷
+                fields = {}
+            info['issuer'] = (fields.get('organizationName')
+                              or fields.get('commonName') or '')
+        sock = None  # wrap_socket 的 with 已關閉
+    except Exception as e:  # noqa: BLE001 — 診斷本身不該再丟例外
+        info['error'] = f"{type(e).__name__}: {e}"
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    return info
+
+
+def diagnose_connection(url: str, *, timeout: float = 8.0) -> list[str]:
+    """抓取失敗時逐層探測連線，回傳可直接印進 Log 的診斷（**第一行為結論**）。
+
+    分層：DNS → TCP → TLS（含憑證簽發者）→ 對照站台 → 系統 Proxy。
+    設計目的是讓回報者不必自行執行任何指令——程式失敗時就把原因印出來。
+    判定重點：
+
+    * 憑證簽發者不是公開 CA（命中 `_MITM_ISSUER_HINTS`）→ 連線正被 TLS 攔截，
+      幾乎都是防毒的 HTTPS 掃描或公司資安設備。
+    * TCP 通、TLS 不通 → 連線被中間環節接走；再看對照站台是否也失敗，
+      分辨「本機／整條網路的問題」還是「只有這個站台」。
+    """
+    host = urlparse(url).hostname or url
+    port = urlparse(url).port or (443 if urlparse(url).scheme != 'http' else 80)
+    cached = _diag_cache.get(host)
+    if cached and time.time() - cached[0] < _DIAG_TTL:
+        return cached[1]
+    lines: list[str] = []
+
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        addrs = sorted({i[4][0] for i in infos})
+        lines.append(f"  DNS  ✅ {host} → {', '.join(addrs[:3])}")
+    except Exception as e:  # noqa: BLE001
+        result = [f"🔍 診斷結論：DNS 解析失敗（{type(e).__name__}: {e}）"
+                  f"→ 網路未連線、DNS 設定有問題，或該網域已失效",
+                  f"  DNS  ❌ {host} 無法解析"]
+        _diag_cache[host] = (time.time(), result)
+        return result
+
+    got = _probe_tls(host, port, timeout)
+    if got['tcp']:
+        lines.append(f"  TCP  ✅ 連得上（{got['tcp_sec']:.1f} 秒）")
+    else:
+        lines.append(f"  TCP  ❌ 連不上：{got['error']}")
+    if got['tcp'] and got['tls']:
+        lines.append(f"  TLS  ✅ 握手完成（{got['tls_sec']:.1f} 秒，{got['proto']}）")
+        lines.append(f"  憑證 {'⚠️' if _is_mitm(got['issuer']) else '✅'} "
+                     f"簽發者「{got['issuer'] or '未知'}」")
+    elif got['tcp']:
+        lines.append(f"  TLS  ❌ 握手失敗／逾時：{got['error']}")
+
+    # 對照站台：分辨「只有這站」還是「整條連線」
+    ctrl = _probe_tls(_CONTROL_HOST, 443, timeout)
+    lines.append(f"  對照 {'✅' if ctrl['tls'] else '❌'} {_CONTROL_HOST}"
+                 + (f"（簽發者「{ctrl['issuer']}」）" if ctrl['tls']
+                    else f"：{ctrl['error']}"))
+    proxies = urllib.request.getproxies()
+    lines.append(f"  Proxy {'⚠️ ' + str(proxies) if proxies else '（未設定）'}")
+
+    issuer = got['issuer'] or ctrl['issuer']
+    if _is_mitm(issuer):
+        verdict = (f"連線正被 TLS 攔截（憑證簽發者「{issuer}」不是公開 CA）"
+                   f"→ 請暫時關閉防毒／資安軟體的「HTTPS（SSL）掃描」再試")
+    elif got['tls']:
+        verdict = ("診斷當下連線正常（DNS／TCP／TLS 都通、憑證未被攔截）"
+                   "→ 若剛才確實抓取失敗，多半是暫時性的線路不穩或塞車；"
+                   "程式已自動重試 3 次，可稍後再試或換網路（如手機熱點）")
+    elif got['tcp'] and not ctrl['tls']:
+        verdict = ("TCP 連得上但 TLS 握手不成功，且連對照站台也一樣 "
+                   "→ 問題在本機或整條網路：防毒的 HTTPS 掃描、公司／學校 Proxy、"
+                   "VPN 最常見（瀏覽器走不同的 TLS 實作，故可能只有瀏覽器正常）")
+    elif got['tcp']:
+        verdict = (f"TCP 連得上但 TLS 握手不成功，對照站台正常 "
+                   f"→ 問題僅出在連往 {host} 的路徑：可能是該站被中間設備針對性"
+                   f"攔截、線路繞遠丟包，或站台本身暫時異常")
+    elif ctrl['tls']:
+        verdict = (f"連 TCP 都連不上，但對照站台正常 → {host} 可能暫時掛掉，"
+                   f"或被防火牆／ISP 擋掉")
+    else:
+        verdict = "連對照站台都連不上 → 這台電腦目前沒有可用的網路連線"
+    if proxies:
+        verdict += f"（另偵測到系統 Proxy 設定：{proxies}）"
+    result = [f"🔍 診斷結論：{verdict}"] + lines
+    _diag_cache[host] = (time.time(), result)
+    return result
+
+
+def _is_mitm(issuer: str) -> bool:
+    low = (issuer or '').lower()
+    return bool(low) and any(h in low for h in _MITM_ISSUER_HINTS)
+
+
+def _connection_error(url: str, err: Exception) -> Exception:
+    """把連線層錯誤換成看得懂的訊息，並附上自動診斷結果。
+
+    診斷（`diagnose_connection`）只在**三次嘗試都失敗**後才跑，成功路徑不受影響。
+    回傳的例外帶有 `diagnosis` 屬性（list[str]），呼叫端可把它印進 Log；
+    訊息本身刻意維持單行短句，避免撐大狀態列 QLabel 的寬度。
+    """
+    text = str(err)
+    try:
+        diagnosis = diagnose_connection(url)
+    except Exception as diag_err:  # noqa: BLE001 — 診斷失敗不該蓋掉原始錯誤
+        diagnosis = [f"🔍 診斷本身失敗：{type(diag_err).__name__}: {diag_err}"]
+    if 'handshake' in text or 'timed out' in text or isinstance(err, TimeoutError):
+        new_err: Exception = TimeoutError(
+            f"連線逾時或 TLS 握手未完成（已重試 {_FETCH_RETRIES} 次）：{text}")
+    else:
+        new_err = err
+    new_err.diagnosis = diagnosis  # type: ignore[attr-defined]
+    return new_err
+
+
 def _fetch_raw(url: str, *, timeout: int,
                extra_headers: dict | None = None) -> tuple[bytes, str | None]:
-    """發送請求，回傳 (解壓後的位元組, HTTP header 宣告的 charset 或 None)。"""
+    """發送請求，回傳 (解壓後的位元組, HTTP header 宣告的 charset 或 None)。
+
+    連線層錯誤（TLS 握手逾時、連線被重置等）會重試 `_FETCH_RETRIES` 次，
+    每次放寬逾時；伺服器已回應的 HTTPError 不重試（見 `_FETCH_RETRIES` 註解）。
+    """
     headers = dict(_HEADERS)
     if extra_headers:
         headers.update(extra_headers)
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read()
-        data = gzip.decompress(raw) if resp.headers.get('Content-Encoding') == 'gzip' else raw
-        cm = re.search(r'charset=([\w-]+)', resp.headers.get('Content-Type', ''), re.IGNORECASE)
-        return data, (cm.group(1) if cm else None)
+    last_err: Exception | None = None
+    for attempt in range(_FETCH_RETRIES + 1):
+        scale = _FETCH_TIMEOUT_SCALE[min(attempt, len(_FETCH_TIMEOUT_SCALE) - 1)]
+        try:
+            with urllib.request.urlopen(req, timeout=timeout * scale) as resp:
+                raw = resp.read()
+                data = (gzip.decompress(raw)
+                        if resp.headers.get('Content-Encoding') == 'gzip' else raw)
+                cm = re.search(r'charset=([\w-]+)',
+                               resp.headers.get('Content-Type', ''), re.IGNORECASE)
+                return data, (cm.group(1) if cm else None)
+        except urllib.error.HTTPError:
+            raise  # 伺服器有回應（403/404/5xx）→ 連線沒問題，重試無意義
+        except (urllib.error.URLError, ssl.SSLError, TimeoutError,
+                ConnectionError, OSError) as e:
+            last_err = e
+            if attempt >= _FETCH_RETRIES:
+                break
+            time.sleep(_FETCH_RETRY_WAIT[min(attempt,
+                                             len(_FETCH_RETRY_WAIT) - 1)])
+    raise _connection_error(url, last_err) from last_err
 
 
 def fetch_url(url: str, *, timeout: int = 20) -> str:

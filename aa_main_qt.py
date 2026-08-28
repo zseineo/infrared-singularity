@@ -68,7 +68,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.12"
+APP_VERSION = "2.13"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -2114,6 +2114,11 @@ class MainWindow(QMainWindow):
                     author_only=author_only)
             except Exception as ex:
                 err = str(ex)
+                # 連線層失敗時 url_fetcher 會附診斷（見 SPEC §4.5）；取第一行
+                # 「結論」附在訊息後，讓使用者不必看 Log 也知道原因。
+                _diag = getattr(ex, "diagnosis", None)
+                if _diag:
+                    err += chr(10) + _diag[0]
                 self._invoke_on_main.emit(
                     lambda: self._url_fetch_win.on_fetch_done(
                         success=False,

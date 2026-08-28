@@ -170,7 +170,14 @@ def _fetch_and_parse(url: str, cfg: AutoConfig) -> tuple[str, list, str, str]:
         try:
             page_html = url_fetcher.fetch_url(url)
         except Exception as e:
-            raise ChapterError(f"抓取網頁失敗：{e}") from e
+            # 連線層失敗時 url_fetcher 會附上自動診斷（DNS／TCP／TLS／憑證簽發者
+            # ／對照站台／Proxy），一併帶進訊息讓它出現在面板 Log，回報者不必
+            # 自己跑任何指令就看得到原因。
+            detail = getattr(e, "diagnosis", None)
+            msg = f"抓取網頁失敗：{e}"
+            if detail:
+                msg += chr(10) + chr(10).join(detail)
+            raise ChapterError(msg) from e
         _write_url_cache(url, page_html)
     try:
         text_content, nav_links, page_title = url_fetcher.parse_page_html(
@@ -594,7 +601,8 @@ def run_auto_translate(
                 source, nav_links, page_title, display_title = _fetch_and_parse(
                     url, cfg)
             except ChapterError as e:
-                result.failed.append((url, str(e)))
+                # 訊息可能含多行診斷：Log 印完整版，失敗清單／總結只留第一行
+                result.failed.append((url, str(e).split(chr(10))[0]))
                 if urls:
                     # 清單模式：下一話網址已知（不靠這一話的關聯記事），可續跑
                     log(f"  ❌ {e} → 跳過此話，繼續下一話。")

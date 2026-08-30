@@ -495,6 +495,8 @@ def run_auto_translate(
     sm = settings_manager.SettingsManager(base_dir)
     cache = sm.load_cache()
     backend = (backend or cache.translate_backend or "browser").lower()
+    # 抓網頁用的代理：CLI 直接執行時也要套用（GUI 端載入設定時已套過一次）
+    url_fetcher.set_fetch_proxy(getattr(cache, "fetch_proxy_url", "") or "")
     if fetch_auto_fill_title is None:
         fetch_auto_fill_title = cache.fetch_auto_fill_title
     if append_mode is None:
@@ -533,12 +535,13 @@ def run_auto_translate(
                        cache.gemini_api_system_prompt or ""]
         api_system_prompt = "\n\n".join(p.strip() for p in api_prompts if p.strip())
         api_timeout = int(getattr(cache, "api_timeout", 0) or 0)
+        api_proxy = getattr(cache, "api_proxy_url", "") or ""  # 與抓網頁分開設定
         if provider == "gemini":
             session = gemini_api.GeminiApiSession(
                 keys, cache.gemini_api_model,
                 system_prompt=api_system_prompt, log=log,
                 stop_event=stop_event, base_dir=base_dir,
-                timeout=api_timeout)
+                timeout=api_timeout, proxy=api_proxy)
             open_log = f"使用 Gemini API（模型 {cache.gemini_api_model}）…"
         else:
             meta = openai_api.API_PROVIDERS.get(provider, {})
@@ -550,7 +553,7 @@ def run_auto_translate(
                 keys, model,
                 scheme=meta.get("scheme", "openai"), base_url=base_url,
                 system_prompt=api_system_prompt, log=log, stop_event=stop_event,
-                timeout=api_timeout)
+                timeout=api_timeout, proxy=api_proxy)
             open_log = f"使用 {meta.get('label', provider)} API（模型 {model}）…"
     else:
         gem_url = gem_url or cache.gemini_gem_url

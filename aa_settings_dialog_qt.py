@@ -7,7 +7,7 @@ from typing import Callable
 
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QHBoxLayout, QLabel, QMessageBox,
+    QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
@@ -75,6 +75,8 @@ class SettingsDialog(QWidget):
         glossary_auto_persist: bool,
         glossary_translation_only: bool,
         fetch_auto_fill_title: bool,
+        fetch_proxy_url: str,
+        api_proxy_url: str,
         orig_cache_path: str,
         on_apply: Callable[[dict], None],
         on_clear_url_history: Callable[[int], int],
@@ -95,7 +97,8 @@ class SettingsDialog(QWidget):
                        glossary_avoid_aa, glossary_kana_fold,
                        glossary_skip_extract,
                        glossary_auto_persist,
-                       glossary_translation_only, fetch_auto_fill_title)
+                       glossary_translation_only, fetch_auto_fill_title,
+                       fetch_proxy_url, api_proxy_url)
         self._refresh_cache_size()
 
     def _build_ui(self, auto_copy: bool, wh_limit: int, fh_limit: int,
@@ -110,7 +113,8 @@ class SettingsDialog(QWidget):
                   glossary_skip_extract: bool,
                   glossary_auto_persist: bool,
                   glossary_translation_only: bool,
-                  fetch_auto_fill_title: bool) -> None:
+                  fetch_auto_fill_title: bool,
+                  fetch_proxy_url: str, api_proxy_url: str) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(10)
@@ -335,6 +339,40 @@ class SettingsDialog(QWidget):
         row2.addStretch()
         root.addLayout(row2)
 
+        # ── 代理伺服器（抓網頁／API 翻譯分開）──
+        # 動機：使用者在有網路封鎖的環境（實例：中國大陸連 FC2）抓網頁失敗，
+        # 但瀏覽器打得開——代理只掛在瀏覽器上，本程式走直連。兩個欄位分開是因為
+        # 被封鎖的通常是來源站台，API 端點多半直連更快。
+        for attr, label, tip in (
+            ("fetch_proxy_edit", "抓網頁 Proxy：",
+             "抓取 AA 故事網頁（含自動翻譯抓下一話、網址讀取）時使用的代理。\n"
+             "留空＝直連（沿用 Windows 系統設定）。\n"
+             "格式：http://127.0.0.1:7890（Clash 預設）或 127.0.0.1:10809（v2rayN）。\n"
+             "用途：來源站台被網路封鎖時（瀏覽器有掛代理所以開得起來、\n"
+             "本程式卻抓不到）填入代理位址即可正常抓取。"),
+            ("api_proxy_edit", "API 翻譯 Proxy：",
+             "自動翻譯 API 模式呼叫供應商端點時使用的代理。\n"
+             "留空＝直連（沿用 Windows 系統設定）。\n"
+             "與上面的抓網頁代理分開：API 端點若本來就連得上，\n"
+             "直連通常比走代理快。"),
+        ):
+            prow = QHBoxLayout()
+            plbl = QLabel(label)
+            plbl.setFont(_ui_font(12))
+            prow.addWidget(plbl)
+            edit = QLineEdit()
+            edit.setFont(_ui_font(11))
+            edit.setPlaceholderText("留空＝不使用代理（例：http://127.0.0.1:7890）")
+            edit.setMinimumWidth(150)
+            edit.setMaximumWidth(260)
+            edit.setToolTip(tip)
+            setattr(self, attr, edit)
+            prow.addWidget(edit, 1)
+            prow.addStretch()
+            root.addLayout(prow)
+        self.fetch_proxy_edit.setText(fetch_proxy_url or "")
+        self.api_proxy_edit.setText(api_proxy_url or "")
+
         # ── 原文暫存上限 ──
         row3 = QHBoxLayout()
         lbl3 = QLabel("原文暫存儲存數量：")
@@ -439,6 +477,8 @@ class SettingsDialog(QWidget):
             'glossary_translation_only':
                 self.glossary_translation_only_cb.isChecked(),
             'fetch_auto_fill_title': self.fetch_auto_fill_title_cb.isChecked(),
+            'fetch_proxy_url': self.fetch_proxy_edit.text().strip(),
+            'api_proxy_url': self.api_proxy_edit.text().strip(),
         }
         try:
             self._on_apply(values)

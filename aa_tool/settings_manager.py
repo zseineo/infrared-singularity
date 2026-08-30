@@ -169,6 +169,11 @@ class AppCache:
     pad_space_count: int = 2
     # 網址讀取成功且有正確辨識標題時，自動把標題填入作品名稱框。
     fetch_auto_fill_title: bool = False
+    # 代理伺服器（空＝直連／沿用系統設定）。抓網頁與 API 翻譯**分開設定**：
+    # 被封鎖的通常是來源站台（實例：中國大陸連 FC2），API 端點多半直連更快。
+    # 格式如 http://127.0.0.1:7890（Clash 預設）或 127.0.0.1:10809（v2rayN）。
+    fetch_proxy_url: str = ""
+    api_proxy_url: str = ""
     # 主畫面「填入翻譯」旁的核取框：讀取新的一話（上一話／下一話／網址讀取）
     # 成功後自動清空「填入翻譯」欄，避免舊譯文殘留被誤用。預設關閉。
     fetch_clear_ai_text: bool = False
@@ -424,6 +429,10 @@ class SettingsManager:
                 'fetch_auto_fill_title', cache.fetch_auto_fill_title))
             cache.fetch_clear_ai_text = bool(data.get(
                 'fetch_clear_ai_text', cache.fetch_clear_ai_text))
+            cache.fetch_proxy_url = str(data.get(
+                'fetch_proxy_url', cache.fetch_proxy_url))
+            cache.api_proxy_url = str(data.get(
+                'api_proxy_url', cache.api_proxy_url))
             try:
                 cache.api_timeout = max(0, int(data.get(
                     'api_timeout', cache.api_timeout)))
@@ -565,6 +574,8 @@ class SettingsManager:
                 'pad_space_count': cache.pad_space_count,
                 'fetch_auto_fill_title': cache.fetch_auto_fill_title,
                 'fetch_clear_ai_text': cache.fetch_clear_ai_text,
+                'fetch_proxy_url': cache.fetch_proxy_url,
+                'api_proxy_url': cache.api_proxy_url,
                 'api_timeout': cache.api_timeout,
                 'gemini_gem_url': cache.gemini_gem_url,
                 'gemini_profile_dir': cache.gemini_profile_dir,

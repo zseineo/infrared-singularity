@@ -43,6 +43,7 @@ from aa_tool.constants import (
 )
 from aa_tool.html_io import read_html_pre_content, write_html_file, read_html_bg_color
 from aa_tool import original_cache
+from aa_tool import url_fetcher as _url_fetcher
 from aa_tool.qt_helpers import WrapRow, show_toast
 from aa_tool.settings_manager import (
     SettingsManager, AppSettings, AppCache,
@@ -68,7 +69,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.13"
+APP_VERSION = "2.14"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -744,6 +745,9 @@ class MainWindow(QMainWindow):
         self._glossary_translation_only: bool = False
         self._fetch_auto_fill_title: bool = False
         self._fetch_clear_ai_text: bool = False
+        # 代理伺服器：抓網頁與 API 翻譯分開設定（見 aa_tool/net_proxy.py）
+        self._fetch_proxy_url: str = ""
+        self._api_proxy_url: str = ""
         # 「複製指定範圍」上次輸入的範圍字串（僅本次執行期間記住）
         self._copy_range_last: str = ""
 
@@ -2377,6 +2381,8 @@ class MainWindow(QMainWindow):
             pad_space_count=self._pad_space_count,
             fetch_auto_fill_title=self._fetch_auto_fill_title,
             fetch_clear_ai_text=self._fetch_clear_ai_text,
+            fetch_proxy_url=self._fetch_proxy_url,
+            api_proxy_url=self._api_proxy_url,
             gemini_gem_url=self._gemini_gem_url,
             gemini_profile_dir=self._gemini_profile_dir,
             gemini_max_per_session=self._gemini_max_per_session,
@@ -2470,6 +2476,10 @@ class MainWindow(QMainWindow):
         self._fetch_auto_fill_title = bool(cache.fetch_auto_fill_title)
         self._fetch_clear_ai_text = bool(
             getattr(cache, "fetch_clear_ai_text", False))
+        self._fetch_proxy_url = str(getattr(cache, "fetch_proxy_url", "") or "")
+        self._api_proxy_url = str(getattr(cache, "api_proxy_url", "") or "")
+        # 抓網頁代理是 url_fetcher 的模組狀態，載入設定後立即套用
+        _url_fetcher.set_fetch_proxy(self._fetch_proxy_url)
         cb = getattr(p, "clear_ai_cb", None)
         if cb is not None:
             cb.blockSignals(True)
@@ -2593,6 +2603,8 @@ class MainWindow(QMainWindow):
             glossary_auto_persist=self._glossary_auto_persist,
             glossary_translation_only=self._glossary_translation_only,
             fetch_auto_fill_title=self._fetch_auto_fill_title,
+            fetch_proxy_url=self._fetch_proxy_url,
+            api_proxy_url=self._api_proxy_url,
             orig_cache_path=os.path.join(
                 self._base_dir(), original_cache.CACHE_FILENAME),
             on_apply=self._on_settings_applied,
@@ -2879,6 +2891,12 @@ class MainWindow(QMainWindow):
             'glossary_translation_only', self._glossary_translation_only))
         self._fetch_auto_fill_title = bool(values.get(
             'fetch_auto_fill_title', self._fetch_auto_fill_title))
+        if 'fetch_proxy_url' in values:
+            # 立即套用，不必重開程式（url_fetcher 以模組狀態保存）
+            self._fetch_proxy_url = _url_fetcher.set_fetch_proxy(
+                values.get('fetch_proxy_url', ''))
+        if 'api_proxy_url' in values:
+            self._api_proxy_url = str(values.get('api_proxy_url', '') or '')
         self._apply_doc_num_state()
         if self._batch_window is not None:
             self._batch_window.glossary_auto_search = self._glossary_auto_search

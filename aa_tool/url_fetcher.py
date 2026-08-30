@@ -16,6 +16,9 @@
   - naitomeazirou.fc2.net（走預設 article div 解析；模板無 relate_dl，關聯記事改由全記事一覽
     archives.html サイトマップ 依分類編號篩出同系列，見 `_fetch_fc2_sitemap_nav`）
 
+抓網頁可指定**代理伺服器**（`set_fetch_proxy()`；與 API 翻譯的代理分開設定，
+見 `aa_tool/net_proxy.py`），供來源站台被網路封鎖的環境使用。
+
 連線層（`_fetch_raw`）對 TLS 握手逾時／連線重置等**暫時性錯誤自動重試 2 次**、
 逾時逐次放寬；`HTTPError`（伺服器已回應）不重試。三次皆失敗會換成附排查方向的
 中文訊息。單機連不上但瀏覽器正常時，用 `check_url_fetch.py` 逐層診斷。
@@ -29,12 +32,15 @@ from __future__ import annotations
 import gzip
 import html
 import re
+import errno
 import socket
 import ssl
 import time
 import urllib.error
 import urllib.request
 from urllib.parse import urljoin, urlparse
+
+from . import net_proxy
 
 # ════════════════════════════════════════════════════════════════
 #  HTTP 請求
@@ -44,6 +50,24 @@ _HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'Accept-Encoding': 'gzip, deflate',
 }
+
+# 抓網頁用的代理（空＝直連／沿用系統設定）。由主程式在載入設定與套用設定時
+# 呼叫 `set_fetch_proxy()` 寫入；與 API 翻譯用的代理**分開設定**，因為被封鎖的
+# 通常是來源站台，API 端點多半直連即可（見 aa_tool/net_proxy.py）。
+_fetch_proxy: str = ''
+
+
+def set_fetch_proxy(proxy: str) -> str:
+    """設定抓網頁用的代理，回傳正規化後的值（空字串＝不使用代理）。"""
+    global _fetch_proxy
+    _fetch_proxy = net_proxy.normalize(proxy)
+    return _fetch_proxy
+
+
+def get_fetch_proxy() -> str:
+    """目前抓網頁使用的代理（空字串＝直連）。"""
+    return _fetch_proxy
+
 
 # 連線層暫時性失敗的重試次數與間隔（秒）。
 # 起因：使用者回報 `_ssl.c:983: The handshake operation timed out`——TCP 已連上
@@ -112,6 +136,16 @@ _MITM_ISSUER_HINTS = (
 # 診斷用的對照站台：用來分辨「只有這個站連不上」還是「整條連線都有問題」
 _CONTROL_HOST = 'www.microsoft.com'
 
+# 「該網域被針對性阻斷」時的共用提示。實例：中國大陸的網路封鎖 FC2 等日本站台，
+# 使用者的瀏覽器裝了代理擴充功能／PAC 所以開得起來，但本程式（urllib 只讀 Windows
+# 登錄檔的系統代理、不支援 PAC）走直連就被擋——症狀正是 TLS 握手逾時與連線被
+# 拒絕（WinError 10061）交替出現。
+_BLOCKED_HINT = (
+    "。常見於中國大陸等有網路封鎖的環境（FC2 等日本站台）或校園／公司網路。"
+    "瀏覽器打得開通常是因為代理只掛在瀏覽器上（擴充功能或 PAC），"
+    "而本程式走直連——請把代理工具改成系統代理／全域（TUN）模式讓所有程式"
+    "都走得到，或改用能連上該站的網路")
+
 # 診斷結果快取（host → (時間, 診斷行)）。整批自動翻譯若每話都連線失敗，
 # 沒有快取就會每話重測一次（最壞每次數十秒），對判斷結果也沒有幫助。
 _DIAG_TTL = 120.0
@@ -121,7 +155,7 @@ _diag_cache: dict[str, tuple[float, list[str]]] = {}
 def _probe_tls(host: str, port: int, timeout: float) -> dict:
     """量測單一主機的 TCP／TLS，回傳診斷用的原始數據（不丟例外）。"""
     info: dict = {'tcp': False, 'tls': False, 'issuer': '', 'proto': '',
-                  'error': '', 'tcp_sec': 0.0, 'tls_sec': 0.0}
+                  'error': '', 'tcp_sec': 0.0, 'tls_sec': 0.0, 'refused': False}
     sock = None
     try:
         t0 = time.time()
@@ -146,6 +180,11 @@ def _probe_tls(host: str, port: int, timeout: float) -> dict:
         sock = None  # wrap_socket 的 with 已關閉
     except Exception as e:  # noqa: BLE001 — 診斷本身不該再丟例外
         info['error'] = f"{type(e).__name__}: {e}"
+        # 連線被「主動拒絕」＝ 對方或中間設備回了 RST（WinError 10061 /
+        # ECONNREFUSED）。網站正常運作時不會這樣，是連線被阻斷的典型特徵。
+        info['refused'] = (getattr(e, 'winerror', None) == 10061
+                           or getattr(e, 'errno', None) == errno.ECONNREFUSED
+                           or isinstance(e, ConnectionRefusedError))
     finally:
         if sock is not None:
             try:
@@ -203,9 +242,15 @@ def diagnose_connection(url: str, *, timeout: float = 8.0) -> list[str]:
                  + (f"（簽發者「{ctrl['issuer']}」）" if ctrl['tls']
                     else f"：{ctrl['error']}"))
     proxies = urllib.request.getproxies()
-    lines.append(f"  Proxy {'⚠️ ' + str(proxies) if proxies else '（未設定）'}")
+    lines.append("  Proxy "
+                 + (f"抓網頁＝{_fetch_proxy}" if _fetch_proxy else "（未設定）")
+                 + (f"，系統＝{proxies}" if proxies else ""))
 
     issuer = got['issuer'] or ctrl['issuer']
+    if _fetch_proxy:
+        blocked_hint = ""  # 已指定代理 → 改由下方的「注意」說明
+    else:
+        blocked_hint = _BLOCKED_HINT
     if _is_mitm(issuer):
         verdict = (f"連線正被 TLS 攔截（憑證簽發者「{issuer}」不是公開 CA）"
                    f"→ 請暫時關閉防毒／資安軟體的「HTTPS（SSL）掃描」再試")
@@ -219,14 +264,24 @@ def diagnose_connection(url: str, *, timeout: float = 8.0) -> list[str]:
                    "VPN 最常見（瀏覽器走不同的 TLS 實作，故可能只有瀏覽器正常）")
     elif got['tcp']:
         verdict = (f"TCP 連得上但 TLS 握手不成功，對照站台正常 "
-                   f"→ 問題僅出在連往 {host} 的路徑：可能是該站被中間設備針對性"
-                   f"攔截、線路繞遠丟包，或站台本身暫時異常")
+                   f"→ 問題僅出在連往 {host} 的路徑，這是「該網域被針對性阻斷」"
+                   f"的典型特徵（防火牆看到連線目標才切斷）" + blocked_hint)
+    elif ctrl['tls'] and got['refused']:
+        verdict = (f"連往 {host} 的連線被「主動拒絕」（收到 RST），對照站台正常"
+                   f" → 該網域被針對性阻斷（網站正常運作時不會拒絕連線）"
+                   + blocked_hint)
     elif ctrl['tls']:
         verdict = (f"連 TCP 都連不上，但對照站台正常 → {host} 可能暫時掛掉，"
-                   f"或被防火牆／ISP 擋掉")
+                   f"或被防火牆／ISP 擋掉" + blocked_hint)
     else:
         verdict = "連對照站台都連不上 → 這台電腦目前沒有可用的網路連線"
-    if proxies:
+    if _fetch_proxy:
+        # 上面的探測一律直連，但實際抓取會走代理 → 結論要據此修正，
+        # 否則使用者會被「被阻斷」的字樣誤導成代理沒設好。
+        verdict += (f"。注意：以上為直連測試，本程式抓網頁已設定代理"
+                    f" {_fetch_proxy}，實際抓取走該代理；若抓取仍失敗，"
+                    f"請確認代理位址正確、代理程式正在執行")
+    elif proxies:
         verdict += f"（另偵測到系統 Proxy 設定：{proxies}）"
     result = [f"🔍 診斷結論：{verdict}"] + lines
     _diag_cache[host] = (time.time(), result)
@@ -274,7 +329,8 @@ def _fetch_raw(url: str, *, timeout: int,
     for attempt in range(_FETCH_RETRIES + 1):
         scale = _FETCH_TIMEOUT_SCALE[min(attempt, len(_FETCH_TIMEOUT_SCALE) - 1)]
         try:
-            with urllib.request.urlopen(req, timeout=timeout * scale) as resp:
+            with net_proxy.urlopen(req, timeout=timeout * scale,
+                                   proxy=_fetch_proxy) as resp:
                 raw = resp.read()
                 data = (gzip.decompress(raw)
                         if resp.headers.get('Content-Encoding') == 'gzip' else raw)

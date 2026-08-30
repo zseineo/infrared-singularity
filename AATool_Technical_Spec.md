@@ -12,7 +12,7 @@
     *   `check_ui_layout.py` — UI 版面解析度適配檢查（離螢幕跑，見 §4.14）
     *   `aa_auto_translate.py` — 連續多話自動翻譯協調器（CLI 入口，亦由主視窗 GUI 呼叫）。詳見 §4.13
     *   `aa_auto_translate_qt.py` — 自動翻譯面板 `AutoTranslatePanel`（嵌入主視窗 QStackedWidget index 4）。詳見 §4.13
-    *   `aa_tool/` — 純邏輯模組（無 UI 依賴）：`constants`、`font_measure`（Protocol）、`html_io`、`settings_manager`、`text_extraction`、`translation_engine`、`bubble_alignment`、`url_fetcher`、`wiki_name_fetcher`、`gemini_web`、`gemini_api`、`secure_store`、`original_cache`、`qt_helpers`、`dark_theme.qss`
+    *   `aa_tool/` — 純邏輯模組（無 UI 依賴）：`net_proxy`（代理設定，見 §4.5）、`constants`、`font_measure`（Protocol）、`html_io`、`settings_manager`、`text_extraction`、`translation_engine`、`bubble_alignment`、`url_fetcher`、`wiki_name_fetcher`、`gemini_web`、`gemini_api`、`secure_store`、`original_cache`、`qt_helpers`、`dark_theme.qss`
 *   **技術棧**: Python 3, **PyQt6** (UI 框架), `re`, `math`, `os`, `html`, `urllib.request`, `threading`, `gzip`, `json`, `subprocess`；自動翻譯另需 **Playwright**（操控網頁版 Gemini，見 §4.13）
 *   **狀態存儲機制**:
     *   `aa_settings_cache.json` — 暫存 UI 狀態 (原文、過濾規則、術語表、話數、預覽暫存、URL 記錄、背景/文字色、各開關狀態、作品+作者歷史 `work_history`、韓文提取模式開關 `korean_mode`、實驗性日文提取演算法開關 `experimental_extraction`、實驗性「替換翻譯時偵測文字右側 AA 圖並補空白」開關 `pad_right_aa` 等)，確保關閉重開後不丟失資料。**正則表達式不從暫存讀取**，由 `AA_Settings.json` 管理（韓文模式啟用時改用 `DEFAULT_BASE_REGEX_KO` 常數，亦不從暫存讀取）。
@@ -340,6 +340,10 @@
     *   呈現路徑：自動翻譯 → `_fetch_and_parse` 把診斷併進 `ChapterError` 訊息 → 面板 Log 印完整版；**失敗清單／總結只取第一行**（`str(e).split('
 ')[0]`），避免總結被灌爆。網址讀取視窗 → `_handle_url_fetch_request` 只附「結論」那一行，且 `_set_status` 已改 `setWordWrap(True)`，長訊息不會把狀態列（連帶整個面板）撐寬。
     *   `check_url_fetch.py` 是同一個函式的手動入口（想主動測網路時用），不重複實作邏輯。
+*   **代理伺服器設定（`aa_tool/net_proxy.py`，v2.14）**: ⚙ 全域設定提供**兩個獨立欄位**——「抓網頁 Proxy」（`fetch_proxy_url`）與「API 翻譯 Proxy」（`api_proxy_url`）。**刻意分開**：被封鎖的通常是來源站台（實例：中國大陸連 FC2），而 API 端點（如 `api.deepseek.com`）多半直連更快。留空＝維持原行為（直連，仍沿用 Windows 系統代理）。
+    *   `net_proxy.normalize()` 補 scheme（使用者常只填 `127.0.0.1:7890`／Clash、`127.0.0.1:10809`／v2rayN）；`opener_for()` 依代理位址快取 opener；`net_proxy.urlopen(req, timeout=, proxy=)` 是 `urllib.request.urlopen` 的替代，未指定代理時行為完全不變。
+    *   **不使用環境變數或 `install_opener` 等全域狀態**——兩個設定必須能同時生效、互不干擾。抓網頁端由 `url_fetcher.set_fetch_proxy()` 以模組狀態保存（`MainWindow._apply_cache` 載入時與 ⚙ 設定套用時各呼叫一次，**改完立即生效不必重開**；CLI 走 `run_auto_translate` 開頭讀 cache 套用）；API 端由 `GeminiApiSession` / `ChatApiSession` 的建構子參數 `proxy=` 傳入（`run_auto_translate` 從 `cache.api_proxy_url` 讀出），並在 `open()` 的就緒 Log 顯示。
+    *   `diagnose_connection()` 會印出目前的抓網頁代理；**已設定代理時，結論會改口說明「以上為直連測試、實際抓取走代理」**並拿掉「請改用系統代理」的建議，避免使用者被誤導。
 *   **FC2 R-18 年齡閘門自動通過**: `fetch_url()` 偵測到回應 HTML 含 `class="age_verify_box_form"` 時，自動帶 `Cookie: age_check=1` 重試，取得真實內容（無需使用者手動確認年齡）。實例：`copymatome.blog.fc2.com`。HTTP 層抽出為 `_fetch_raw(url, extra_headers)` 輔助函式，decode 抽出為 `_decode_bytes()`，`fetch_url()` 組合兩者並加入年齡閘門判斷。
 *   **關聯記事導航**: 顯示同系列各話的連結清單，可直接點擊切換；提供上一話/下一話按鈕。
 *   **忽略留言開關 (`author_only`)**: Dialog 中的「忽略留言」開關，開啟時完全排除非作者的貼文。若同時填寫作者名稱則以該名稱為準；**若未填作者名稱則自動偵測**（`_detect_main_author_from_dt()` 對應 dt/dd 結構、`_detect_main_author_from_lines()` 對應 FC2 類型的「N 名前：…」行結構），取貼文中**第一個非「名無」的投稿者**作為作者。<br>**略過「名無」匿名留言者**：多數網站的留言者 ID 都含「名無」（名無しさん），自動偵測時若某樓投稿者名稱含「名無」，視為匿名留言、往下一樓繼續找，直到找到不含「名無」的名稱；若整串貼文皆為匿名，退回第一個出現的名稱（維持舊行為，避免空作者導致全部被過濾）。此略過**僅在自動偵測（未填作者名稱）時生效**——使用者明確填入名稱（含填入「名無」強制尋找匿名樓）時不受此限，仍以填入名稱為準。共用 helper `_extract_poster_name()` 負責從標頭抽取名稱。狀態持久化至暫存，「下一話」功能同樣遵循此設定。

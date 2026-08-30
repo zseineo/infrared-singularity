@@ -28,6 +28,8 @@ import json
 import time
 import urllib.error
 import urllib.request
+
+from . import net_proxy
 from typing import Callable
 
 from .gemini_web import GeminiAborted, GeminiQuotaExceeded, GeminiWebError
@@ -118,10 +120,12 @@ class ChatApiSession:
         log: Callable[[str], None] | None = None,
         stop_event=None,
         timeout: int = 0,
+        proxy: str = "",
     ) -> None:
         self._keys = [k.strip() for k in (api_keys or []) if k.strip()]
         self._model = (model or "").strip()
         self._timeout = int(timeout) if timeout and int(timeout) > 0 else _TIMEOUT
+        self._proxy = net_proxy.normalize(proxy)
         self._scheme = scheme if scheme in ("openai", "anthropic") else "openai"
         self._base_url = (base_url or "").strip().rstrip("/")
         self._system_prompt = system_prompt or ""
@@ -141,7 +145,8 @@ class ChatApiSession:
             raise GeminiWebError("未設定 API 模型")
         self._log(f"API 後端就緒：{self._scheme} @ {self._base_url}，"
                   f"模型 {self._model}，共 {len(self._keys)} 把金鑰輪換，"
-                  f"逾時 {self._timeout}s")
+                  f"逾時 {self._timeout}s"
+                  + (f"，代理 {self._proxy}" if self._proxy else ""))
 
     def close(self) -> None:
         pass
@@ -225,7 +230,8 @@ class ChatApiSession:
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            with net_proxy.urlopen(req, timeout=self._timeout,
+                                   proxy=self._proxy) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except TimeoutError as e:
             # socket 讀取逾時（"The read operation timed out"）。原訊息看不出可調整，

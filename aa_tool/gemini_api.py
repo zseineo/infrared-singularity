@@ -29,6 +29,8 @@ import re
 import time
 import urllib.error
 import urllib.request
+
+from . import net_proxy
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
@@ -111,10 +113,12 @@ class GeminiApiSession:
         stop_event=None,
         base_dir: str | None = None,
         timeout: int = 0,
+        proxy: str = "",
     ) -> None:
         self._keys = [k.strip() for k in (api_keys or []) if k.strip()]
         self._model = (model or DEFAULT_API_MODEL).strip()
         self._timeout = int(timeout) if timeout and int(timeout) > 0 else _TIMEOUT
+        self._proxy = net_proxy.normalize(proxy)
         self._system_prompt = system_prompt or ""
         self._log = log or (lambda m: print(f"[gemini_api] {m}"))
         self._stop_event = stop_event
@@ -133,7 +137,8 @@ class GeminiApiSession:
             raise GeminiWebError("API 模式但未設定任何 API 金鑰")
         self._load_quota_state()  # 載入上次未過重置時間的 RPD 冷卻；過期者自動清除
         self._log(f"API 後端就緒：模型 {self._model}，"
-                  f"共 {len(self._keys)} 把金鑰輪換，逾時 {self._timeout}s")
+                  f"共 {len(self._keys)} 把金鑰輪換，逾時 {self._timeout}s"
+                  + (f"，代理 {self._proxy}" if self._proxy else ""))
 
     def close(self) -> None:
         pass
@@ -242,7 +247,8 @@ class GeminiApiSession:
         req = urllib.request.Request(
             url, data=data, headers={"Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            with net_proxy.urlopen(req, timeout=self._timeout,
+                                   proxy=self._proxy) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except TimeoutError as e:
             raise GeminiWebError(

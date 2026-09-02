@@ -1,4 +1,4 @@
-"""對外連線的 Proxy（代理伺服器）支援。
+"""對外連線的共用設定：Proxy（代理伺服器）與 API 請求的 User-Agent。
 
 為什麼需要：使用者回報在有網路封鎖的環境（實例：中國大陸連 FC2）抓網頁失敗，
 症狀是 TLS 握手逾時與 `WinError 10061 連線被主動拒絕` 交替出現，但**瀏覽器打得開**
@@ -15,6 +15,15 @@ urllib 只讀 Windows 登錄檔的系統代理、**不支援 PAC**，所以需�
 from __future__ import annotations
 
 import urllib.request
+
+#: API 請求用的 User-Agent。
+#: **為什麼要指定**：不帶此標頭時 urllib 會自動補上 `Python-urllib/3.x`，
+#: 部分 LLM API 中轉商（代理商）的防護會直接擋掉這種一看就是腳本的請求
+#: （使用者實測：補上 User-Agent 後即可正常使用）。開頭的 `Mozilla/5.0`
+#: 是為了通過那類只看前綴的過濾，尾端 `AATool` 仍誠實標明是本程式。
+#: 與 `url_fetcher._HEADERS` 的 User-Agent **刻意分開**：抓 AA 故事網頁時是
+#: 以瀏覽器身分抓公開網頁，兩者將來可能需要不同值。
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 AATool"
 
 #: 已建立的 opener 快取（正規化後的代理位址 → opener）
 _openers: dict[str, urllib.request.OpenerDirector] = {}

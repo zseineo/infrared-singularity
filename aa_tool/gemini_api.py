@@ -245,7 +245,8 @@ class GeminiApiSession:
         url = _ENDPOINT.format(model=self._model) + f"?key={key}"
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
-            url, data=data, headers={"Content-Type": "application/json"})
+            url, data=data, headers={"Content-Type": "application/json",
+                                     "User-Agent": net_proxy.USER_AGENT})
         try:
             with net_proxy.urlopen(req, timeout=self._timeout,
                                    proxy=self._proxy) as resp:

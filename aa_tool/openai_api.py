@@ -263,6 +263,7 @@ class ChatApiSession:
             url = f"{self._base_url}/messages"
             headers = {
                 "Content-Type": "application/json",
+                "User-Agent": net_proxy.USER_AGENT,
                 "x-api-key": key,
                 "anthropic-version": _ANTHROPIC_VERSION,
             }
@@ -278,6 +279,7 @@ class ChatApiSession:
         url = f"{self._base_url}/chat/completions"
         headers = {
             "Content-Type": "application/json",
+            "User-Agent": net_proxy.USER_AGENT,
             "Authorization": f"Bearer {key}",
         }
         messages = []

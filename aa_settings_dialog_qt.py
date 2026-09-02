@@ -5,10 +5,11 @@ import json
 import os
 from typing import Callable
 
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import QUrl
+from PyQt6.QtGui import QDesktopServices, QFont
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+    QMessageBox, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 
@@ -78,12 +79,16 @@ class SettingsDialog(QWidget):
         fetch_proxy_url: str,
         api_proxy_url: str,
         orig_cache_path: str,
+        data_dir: str,
         on_apply: Callable[[dict], None],
         on_clear_url_history: Callable[[int], int],
+        on_import_settings: Callable[[str], tuple[str | None, list[str]]],
         on_close: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self._orig_cache_path = orig_cache_path
+        self._data_dir = data_dir
+        self._on_import_settings = on_import_settings
         self._on_apply = on_apply
         self._on_clear_url_history = on_clear_url_history
         self._on_close = on_close
@@ -394,6 +399,40 @@ class SettingsDialog(QWidget):
         row3.addStretch()
         root.addLayout(row3)
 
+        # ── 設定資料夾 ──
+        # 所有設定／暫存／金鑰都集中在這個資料夾（預設 %APPDATA%\AATool），
+        # 更新程式不會動到；要換電腦或備份，複製這一個資料夾即可。
+        row4 = QHBoxLayout()
+        lbl4 = QLabel("設定資料夾：")
+        lbl4.setFont(_ui_font(12))
+        row4.addWidget(lbl4)
+        self.data_dir_edit = QLineEdit(self._data_dir)
+        self.data_dir_edit.setFont(_ui_font(10))
+        self.data_dir_edit.setReadOnly(True)
+        self.data_dir_edit.setMinimumWidth(150)
+        self.data_dir_edit.setMaximumWidth(320)
+        self.data_dir_edit.setCursorPosition(0)
+        self.data_dir_edit.setToolTip(
+            "設定、暫存、API 金鑰都存放在這裡。\n"
+            "更新程式（覆蓋 exe／重新解壓）不會動到這個資料夾；\n"
+            "要備份或換電腦，複製整個資料夾過去即可。")
+        row4.addWidget(self.data_dir_edit, 1)
+        btn_open_dir = _make_btn("開啟", "#17a2b8", "#138496",
+                                 font=_ui_font(11), width=56)
+        btn_open_dir.setToolTip("用檔案總管開啟設定資料夾")
+        btn_open_dir.clicked.connect(self._on_open_data_dir)
+        row4.addWidget(btn_open_dir)
+        btn_import = _make_btn("匯入舊版設定", "#6f42c1", "#5a32a3",
+                               font=_ui_font(11), width=110)
+        btn_import.setToolTip(
+            "從舊版程式繼承設定：選擇舊版的程式資料夾（設定就在裡面的根目錄），\n"
+            "或另一台電腦備份下來的 AATool 資料夾。\n"
+            "會覆蓋目前設定，覆蓋前自動留一份 .before-import 備份。")
+        btn_import.clicked.connect(self._on_import_old)
+        row4.addWidget(btn_import)
+        row4.addStretch()
+        root.addLayout(row4)
+
         root.addStretch()
 
         # ── 底部按鈕（確定在左、取消在右）──
@@ -432,6 +471,51 @@ class SettingsDialog(QWidget):
             QMessageBox.information(self, "清除完成", "原文暫存已清空。")
         except OSError as e:
             QMessageBox.warning(self, "清除失敗", f"無法寫入暫存檔：{e}")
+
+    def _on_open_data_dir(self) -> None:
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(self._data_dir)):
+            QMessageBox.warning(self, "開啟失敗",
+                                f"無法開啟資料夾：\n{self._data_dir}")
+
+    def _on_import_old(self) -> None:
+        """從舊版資料夾繼承設定。
+
+        使用者挑的可能是舊版程式資料夾（設定在其根目錄）或備份的 AATool
+        資料夾，實際定位交給 `app_paths.detect_settings_dir`（由主視窗的
+        callback 呼叫），這裡只負責挑資料夾、確認與回報結果。
+        """
+        folder = QFileDialog.getExistingDirectory(
+            self, "選擇舊版程式資料夾（或備份的 AATool 資料夾）")
+        if not folder:
+            return
+        ret = QMessageBox.question(
+            self, "匯入舊版設定",
+            f"要從這個資料夾匯入設定嗎？\n{folder}\n\n"
+            "目前的設定會被覆蓋（覆蓋前自動備份成 .before-import），\n"
+            "匯入後立即套用。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        src, copied = self._on_import_settings(folder)
+        if not src:
+            QMessageBox.warning(
+                self, "找不到設定檔",
+                "這個資料夾（及其下的 AATool 子資料夾）裡沒有任何設定檔。\n"
+                "請選擇舊版程式所在的資料夾，或備份下來的 AATool 資料夾。")
+            return
+        if not copied:
+            QMessageBox.information(self, "沒有匯入任何檔案",
+                                    f"來源：{src}\n沒有檔案被複製過來。")
+            return
+        QMessageBox.information(
+            self, "匯入完成",
+            "來源：" + src + "\n\n已匯入：\n  " + "\n  ".join(copied)
+            + "\n\n設定已重新載入，本面板將關閉；要檢視新設定請重新開啟 ⚙。")
+        # 必須關閉：面板上的欄位仍是匯入前的舊值，若留著讓使用者按「確定」，
+        # 會把剛匯入的設定又蓋回去。面板每次開啟都會以當前狀態重建。
+        self._handle_close()
 
     def _on_clear_url_btn(self) -> None:
         keep_n = int(self.fetch_spin.value())

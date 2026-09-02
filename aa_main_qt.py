@@ -42,6 +42,7 @@ from aa_tool.constants import (
     DEFAULT_BG_COLOR, DEFAULT_FG_COLOR,
 )
 from aa_tool.html_io import read_html_pre_content, write_html_file, read_html_bg_color
+from aa_tool import app_paths
 from aa_tool import original_cache
 from aa_tool import url_fetcher as _url_fetcher
 from aa_tool.qt_helpers import WrapRow, show_toast
@@ -69,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.14"
+APP_VERSION = "2.15"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -723,13 +724,11 @@ class MainWindow(QMainWindow):
         self._dark_title_applied = False
 
         # ── 設定管理 ──
-        # frozen（PyInstaller）時 __file__ 指向 _internal/；改用 exe 旁的目錄
-        if getattr(sys, 'frozen', False):
-            _base_dir = os.path.dirname(sys.executable)
-        else:
-            _base_dir = os.path.dirname(os.path.abspath(__file__))
-        # 設定／金鑰／cache 的統一基準目錄（凍結時為 exe 旁）。自動翻譯的金鑰存取與
-        # run_auto_translate 都必須用它，否則打包版會從 _internal/ 讀不到而回退預設。
+        # 設定／金鑰／cache 的統一基準目錄＝設定資料夾（預設 %APPDATA%\AATool）。
+        # 自動翻譯的金鑰存取與 run_auto_translate 都必須用它，否則會讀不到而回退預設。
+        # auto_migrate 會把程式根目錄殘留的舊設定複製過來（逐檔補缺，原檔保留）。
+        app_paths.auto_migrate()
+        _base_dir = app_paths.data_dir()
         self._settings_base_dir = _base_dir
         self.settings_mgr = SettingsManager(_base_dir)
         self.current_base_regex = DEFAULT_BASE_REGEX
@@ -2607,8 +2606,10 @@ class MainWindow(QMainWindow):
             api_proxy_url=self._api_proxy_url,
             orig_cache_path=os.path.join(
                 self._base_dir(), original_cache.CACHE_FILENAME),
+            data_dir=self._settings_base_dir,
             on_apply=self._on_settings_applied,
             on_clear_url_history=self._on_clear_url_history_from_settings,
+            on_import_settings=self._on_import_old_settings,
             on_close=self._settings_panel.hide,
         )
         # setWidget 會接管所有權並刪除舊內容 widget
@@ -2928,6 +2929,25 @@ class MainWindow(QMainWindow):
         self.save_cache()
         return new_count
 
+    def _on_import_old_settings(self, folder: str) -> tuple[str | None, list[str]]:
+        """⚙ →「匯入舊版設定」：從舊版資料夾覆蓋匯入後立即重新載入。
+
+        回傳 (實際來源資料夾, 已匯入檔名)；資料夾裡沒有設定檔時來源為 None。
+        翻譯進行中不給匯入——中途換掉設定與金鑰會讓後續幾話用到不一致的參數。
+        """
+        if self._auto_translate_running:
+            self.show_status("⚠️ 自動翻譯進行中，無法匯入設定", "#f39c12")
+            return None, []
+        src, copied = app_paths.import_settings_from(folder)
+        if not copied:
+            return src, copied
+        # 重新載入：cache（UI 狀態／自動翻譯參數）＋ AA_Settings.json（正則／術語）
+        self._load_initial_state()
+        if self._auto_window is not None:
+            self._auto_window.refresh_from_main()
+        self.show_status(f"✅ 已從舊版資料夾匯入 {len(copied)} 個設定檔", "#0f0")
+        return src, copied
+
     def _load_initial_state(self) -> None:
         self.load_cache()
         settings = self.settings_mgr.load_settings()
@@ -3020,7 +3040,12 @@ class MainWindow(QMainWindow):
     # ════════════════════════════════════════════════════════════
 
     def _base_dir(self) -> str:
-        return os.path.dirname(os.path.abspath(__file__))
+        """原文暫存所在目錄——與設定／金鑰同一個設定資料夾。
+
+        （舊版這裡回傳 `__file__` 的目錄，frozen 打包時會落在 `_internal/`，
+        與其他設定不同層；改用 `_settings_base_dir` 後統一。）
+        """
+        return self._settings_base_dir
 
     @classmethod
     def _compute_author_fingerprint(cls, text: str) -> str | None:
@@ -3366,6 +3391,9 @@ class MainWindow(QMainWindow):
 # ════════════════════════════════════════════════════════════
 
 def main() -> None:
+    # 先接收舊設定再裝日誌：crash_logger 一裝上就會寫入 aa_crash.log，
+    # 之後 auto_migrate 便會因「新資料夾已有該檔」而不再接走根目錄的舊日誌。
+    app_paths.auto_migrate()
     from aa_tool.crash_logger import install_crash_logger
     install_crash_logger()
     app = QApplication(sys.argv)

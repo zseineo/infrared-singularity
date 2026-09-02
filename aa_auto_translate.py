@@ -23,7 +23,8 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Callable
 
-from aa_tool import constants, html_io, original_cache, settings_manager
+from aa_tool import app_paths, constants, html_io, original_cache
+from aa_tool import settings_manager
 from aa_tool import text_extraction, translation_engine, url_fetcher
 from aa_tool.gemini_web import (
     GeminiAborted, GeminiModelMismatch, GeminiQuotaExceeded, GeminiWebError,
@@ -378,7 +379,7 @@ def preview_first_filename(
     """
     if not url:
         return None
-    base_dir = base_dir or os.path.dirname(os.path.abspath(__file__))
+    base_dir = base_dir or app_paths.data_dir()
     cfg = load_config(base_dir)
     if fetch_auto_fill_title is None:
         fetch_auto_fill_title = settings_manager.SettingsManager(
@@ -489,7 +490,9 @@ def run_auto_translate(
         GUI 端會自行印更完整的版本，故傳 False 避免面板 log 出現兩份總結。
     """
     log = progress or (lambda m: print(m))
-    base_dir = base_dir or os.path.dirname(os.path.abspath(__file__))
+    # CLI 直接執行時也要接收程式根目錄的舊設定（GUI 端啟動時已做過，重複呼叫無副作用）
+    app_paths.auto_migrate()
+    base_dir = base_dir or app_paths.data_dir()
 
     cfg = load_config(base_dir)
     sm = settings_manager.SettingsManager(base_dir)

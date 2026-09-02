@@ -11,8 +11,10 @@
 # 注意事項：
 #   - 不使用 UPX（避免誤報）
 #   - noconsole（GUI 程式）
-#   - AA_Settings.json / aa_settings_cache.json / aa_original_cache.json
-#     為執行期產生，不打包；首次執行時程式自行在 exe 旁建立。
+#   - AA_Settings.json / aa_settings_cache.json / aa_original_cache.json 等
+#     設定檔為執行期產生，不打包；程式會建立並使用設定資料夾
+#     %APPDATA%\AATool\（見 aa_tool/app_paths.py），因此覆蓋更新 exe
+#     不會動到使用者設定。舊版留在 exe 旁的設定檔會在啟動時自動複製過去。
 
 block_cipher = None
 

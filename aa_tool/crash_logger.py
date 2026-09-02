@@ -4,7 +4,8 @@
     from aa_tool.crash_logger import install_crash_logger
     install_crash_logger()
 
-日誌寫到專案根目錄的 `aa_crash.log`（append 模式，保留跨次啟動紀錄）。
+日誌寫到設定資料夾（`aa_tool.app_paths.data_dir()`，預設 `%APPDATA%\\AATool\\`）
+底下的 `aa_crash.log`（append 模式，保留跨次啟動紀錄）。
 閃退時 `faulthandler` 會直接把 C 堆疊寫入檔案，故事後可打開檢視。
 """
 from __future__ import annotations
@@ -22,8 +23,13 @@ _LOG_FILE = None  # 保留 handle 給 faulthandler 使用；不可關閉
 def _log_path() -> str:
     global _LOG_PATH
     if _LOG_PATH is None:
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        _LOG_PATH = os.path.join(root, "aa_crash.log")
+        try:
+            from .app_paths import path_for
+            _LOG_PATH = path_for("aa_crash.log")
+        except Exception:
+            # 連設定資料夾都取不到也不能讓日誌機制拖垮啟動，退回舊位置
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            _LOG_PATH = os.path.join(root, "aa_crash.log")
     return _LOG_PATH
 
 

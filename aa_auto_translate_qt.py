@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
 
 from aa_tool.gemini_api import API_MODELS
 from aa_tool.openai_api import API_PROVIDERS
-from aa_tool import secure_store
+from aa_tool import app_paths, secure_store
 
 # 翻譯後端選項：(顯示文字, 內部值)
 _BACKEND_OPTIONS: list[tuple[str, str]] = [
@@ -594,9 +594,9 @@ class AutoTranslatePanel(QWidget):
         self.api_timeout_spin.setValue(
             max(30, int(getattr(m, "_api_timeout", 600) or 600)))
         # 各供應商金鑰／模型載入暫存 dict（切換供應商時互換，儲存時一併寫入）。
-        # base_dir 必須與主程式一致（凍結時為 exe 旁），否則打包版讀不到已存金鑰。
+        # base_dir 必須與主程式一致（統一為設定資料夾），否則讀不到已存金鑰。
         base_dir = getattr(m, "_settings_base_dir", None) \
-            or os.path.dirname(os.path.abspath(__file__))
+            or app_paths.data_dir()
         self._provider_keys = {
             p: list(ks) for p, ks in secure_store.load_all_keys(base_dir).items()}
         models = dict(getattr(m, "_api_models", {}) or {})
@@ -710,9 +710,9 @@ class AutoTranslatePanel(QWidget):
         out_dir = self.out_edit.text().strip()
         doc_title = self.doc_title_edit.text().strip()
         auto_fill = bool(getattr(self._main, "_fetch_auto_fill_title", False))
-        # 與主程式一致（凍結時 exe 旁），讓打包版的檔名試算讀到正確設定
+        # 與主程式一致（統一為設定資料夾），讓檔名試算讀到正確設定
         base_dir = getattr(self._main, "_settings_base_dir", None) \
-            or os.path.dirname(os.path.abspath(__file__))
+            or app_paths.data_dir()
         if allow_network:
             self.filename_preview.setText("⏳ 試算中（讀取網址）…")
 

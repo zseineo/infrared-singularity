@@ -13,8 +13,13 @@
       - RPM：短冷卻（優先用伺服器建議的 retryDelay／Retry-After，否則 60 秒），
         稍後自動歸隊。
       - RPD：冷卻到下一個每日重置時刻（GMT+8 每天 15:00），log 顯示重置時間而非倒數；
-        並把該金鑰的重置時間持久化（以金鑰指紋為索引，不存明文金鑰）。下次開啟（新
-        session）載入時，已過重置時間者自動視為可用、未過者沿用剩餘冷卻。
+        並把該金鑰的重置時間持久化，**索引為（金鑰指紋, 模型）**（不存明文金鑰）。
+        下次開啟（新 session）載入時，已過重置時間者自動視為可用、未過者沿用剩餘冷卻。
+        **每日配額是各模型分開計的**（官方 Rate limits 文件：「Rate limits are per
+        model, not per key」「Limits vary depending on the specific model being
+        used」），所以持久化必須連模型一起記——只記金鑰的話，某把金鑰在
+        gemini-3.5-flash 用完，換到 gemini-3.7-flash 時會被誤判為仍在冷卻而整把
+        跳過，白白浪費另一個模型的獨立額度。
   * 當所有金鑰都在冷卻中：若最近解除時間在可接受範圍內（多為 RPM）→ stop-aware
     等待後重試；若是長冷卻（RPD）或反覆全滿 → 丟 GeminiQuotaExceeded（協調器中止整批）。
 
@@ -85,7 +90,9 @@ _DURATION_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE)
 # 每日配額（RPD）重置時間：GMT+8 每天 15:00。冷卻長度＝距下一個重置時刻。
 _RESET_TZ = timezone(timedelta(hours=8))
 _RESET_HOUR = 15
-# RPD 冷卻狀態持久化檔（只存金鑰雜湊→重置時間，不存明文金鑰）
+# RPD 冷卻狀態持久化檔。格式：{金鑰雜湊: {模型: 重置時間 ISO}}——不存明文金鑰，
+# 且**每個模型分開記**（每日配額各模型獨立，見模組 docstring）。
+# 舊版為扁平的 {金鑰雜湊: 重置時間 ISO}（沒記模型），載入時捨棄，見 _normalize_quota。
 _QUOTA_STATE_FILENAME = "aa_api_quota.json"
 
 
@@ -101,6 +108,41 @@ def _next_rpd_reset(now: datetime | None = None) -> datetime:
 def _key_fingerprint(key: str) -> str:
     """金鑰指紋（sha256 前 16 碼），作為持久化索引；不外洩明文金鑰。"""
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+def _normalize_quota(raw) -> dict[str, dict[str, str]]:
+    """把讀進來的 JSON 正規化成 {金鑰指紋: {模型: ISO 時間}}。
+
+    **舊版扁平格式 `{指紋: ISO}` 一律捨棄**：那時沒記模型，無從判斷是哪個模型
+    用完的，硬套到任一模型都可能誤擋一整把金鑰。捨棄後最壞情況只是多送一次
+    請求、拿到 429 再重新冷卻（會立刻以正確的模型記回去），代價遠小於誤擋。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for fp, v in raw.items():
+        if isinstance(v, dict):
+            per_model = {str(m): str(t) for m, t in v.items() if t}
+            if per_model:
+                out[str(fp)] = per_model
+    return out
+
+
+def _prune_quota(data: dict[str, dict[str, str]],
+                 now: datetime) -> dict[str, dict[str, str]]:
+    """去掉已過重置時間或無法解析的項目（含其他模型／其他金鑰的）。"""
+    out: dict[str, dict[str, str]] = {}
+    for fp, per_model in data.items():
+        alive = {}
+        for model, iso in per_model.items():
+            try:
+                if (datetime.fromisoformat(iso) - now).total_seconds() > 0:
+                    alive[model] = iso
+            except (TypeError, ValueError):
+                continue
+        if alive:
+            out[fp] = alive
+    return out
 
 
 class GeminiServerBusy(GeminiWebError):
@@ -368,54 +410,75 @@ class GeminiApiSession:
             return None
         return os.path.join(self._base_dir, _QUOTA_STATE_FILENAME)
 
-    def _load_quota_state(self) -> None:
-        """載入上次存的 RPD 冷卻：以金鑰指紋對映重置時間。
+    def _model_key(self) -> str:
+        """持久化用的模型索引（小寫，與 _DEFAULT_THINKING_LEVEL 的比對方式一致）。"""
+        return self._model.strip().lower()
 
-        重置時間「未過」→ 設回冷卻（換算成單調時鐘剩餘秒數）；「已過」→ 視為可用
-        （自動重算），不載入。載入後重寫檔案以清掉過期項目。
-        """
+    def _read_quota_raw(self):
+        """讀回檔案原始 JSON（讀不到／壞掉回 None，呼叫端視為沒有紀錄）。"""
         path = self._quota_state_path()
         if not path or not os.path.exists(path):
-            return
+            return None
         try:
             with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
+                return json.load(f)
+        except Exception:  # noqa: BLE001 — 壞檔不該讓翻譯開不起來
+            return None
+
+    def _load_quota_state(self) -> None:
+        """載入上次存的 RPD 冷卻：只取「本 session 這個模型」的紀錄。
+
+        重置時間「未過」→ 設回冷卻（換算成單調時鐘剩餘秒數）；「已過」→ 視為可用
+        （自動重算），不載入。**其他模型的紀錄一律不套用**——每日配額各模型獨立。
+        """
+        raw = self._read_quota_raw()
+        if raw is None:
             return
-        if not isinstance(data, dict):
-            return
+        data = _normalize_quota(raw)
         now = datetime.now(_RESET_TZ)
-        loaded = 0
+        model = self._model_key()
         for i, key in enumerate(self._keys):
-            iso = data.get(_key_fingerprint(key))
+            iso = data.get(_key_fingerprint(key), {}).get(model)
             if not iso:
                 continue
             try:
                 reset_dt = datetime.fromisoformat(iso)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
             remaining = (reset_dt - now).total_seconds()
             if remaining > 0:  # 尚未到重置時間 → 仍在 RPD 冷卻
                 self._cooldown_until[i] = self._now() + remaining
                 self._rpd_reset[i] = reset_dt
-                loaded += 1
-                self._log(f"  金鑰 #{i + 1} 仍在每日配額冷卻中，"
+                self._log(f"  金鑰 #{i + 1} 在模型 {self._model} 仍在每日配額冷卻中，"
                           f"額度將於 {reset_dt:%m/%d %H:%M}（GMT+8）重置")
             # remaining <= 0：已過重置時間 → 自動重算為可用，不載入
-        if loaded < len([v for v in data.values() if v]):
-            self._save_quota_state()  # 清掉過期／無關的項目
+        # 檔案含過期項目或舊版扁平格式 → 順手清乾淨（比對正規化＋裁切後的結果）
+        pruned = _prune_quota(data, now)
+        if pruned != raw:
+            self._write_quota_state(pruned)
 
     def _save_quota_state(self) -> None:
-        """把目前仍有效（未過重置時間）的 RPD 冷卻寫檔；空則刪檔。"""
+        """把本 session 的 RPD 冷卻寫回檔案（只動自己那格）。
+
+        **必須與檔案現有內容合併**：檔上可能還有別的模型、或這次沒載入的其他金鑰
+        的有效冷卻，直接覆寫會把它們清掉，那些金鑰／模型下次就會被誤判為可用。
+        """
+        now = datetime.now(_RESET_TZ)
+        model = self._model_key()
+        data = _normalize_quota(self._read_quota_raw())
+        for i, reset_dt in enumerate(self._rpd_reset):
+            per_model = data.setdefault(_key_fingerprint(self._keys[i]), {})
+            if reset_dt is not None and (reset_dt - now).total_seconds() > 0:
+                per_model[model] = reset_dt.isoformat()
+            else:
+                per_model.pop(model, None)  # 本模型已解除 → 移除該格
+        self._write_quota_state(_prune_quota(data, now))
+
+    def _write_quota_state(self, state: dict) -> None:
+        """寫入 RPD 狀態；空則刪檔。失敗只記 log，不影響翻譯。"""
         path = self._quota_state_path()
         if not path:
             return
-        now = datetime.now(_RESET_TZ)
-        state = {
-            _key_fingerprint(self._keys[i]): r.isoformat()
-            for i, r in enumerate(self._rpd_reset)
-            if r is not None and (r - now).total_seconds() > 0
-        }
         try:
             if state:
                 with open(path, "w", encoding="utf-8") as f:

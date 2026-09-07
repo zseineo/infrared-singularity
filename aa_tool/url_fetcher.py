@@ -7,12 +7,16 @@
     yarucha 類 <a name/num> + <dd> 無容器模板）
   - blog105.fc2.com（textar-aa div + relate_dl，FC2 舊版模板，含不帶引號 font color）
   - blog136.fc2.com（entryblock / AA div + relate_dl，FC2 舊版模板）
+  - yaruonichijou.com（獨立網域的 FC2 blog，模板同 blog.fc2.com；須註冊 primary parser，
+    否則頁面唯一的 <dt class="relate_dt">関連記事</dt> 會被 _parse_himanatokiniyaruo 搶走）
   - yaruobook.jp（author-res-dt / author-res 結構 + relatedPostsWrap）
   - yaruohiroba.com（dt/dd 結構 + related-list 關聯清單）
   - yaruobook.net / yaruobook.com（entry-content div + dt/dd + relatedPostsWrap，早期文章含 HTML 數字字元引用）
   - yaruo-matome.com（entry-content div + nexe-prev-post ul）
   - blog.livedoor.jp（textar-aa / span.aa，無關聯記事、尾端嵌入下一話連結）
   - asitayaruo.com（entry-content + dt/dd；本身無 prev/next，關聯記事改由分類頁 ?cat=N&paged=K 取得）
+  - yomuaa.r401.net（Nuxt SSR；article.aa > dl.aa-article 的 dt=コマ編號 + dd=內文，
+    dd 內無 <br>、換行為字面換行字元；本身無關聯記事，改由作品頁 /series/N?page=K 取得）
   - naitomeazirou.fc2.net（走預設 article div 解析；模板無 relate_dl，關聯記事改由全記事一覽
     archives.html サイトマップ 依分類編號篩出同系列，見 `_fetch_fc2_sitemap_nav`）
 
@@ -514,7 +518,7 @@ def _cleanup_unmatched_spans(text: str) -> str:
 # （日期容許 2~4 位年份、`(曜)` 可選；時間 HH:MM:SS、`.ms` 可選）。
 _POST_HEADER_RE = re.compile(
     r'^\s*\d+\s*(?:'
-    r'(?:名前|Name)\s*[：:]'
+    r'(?:名前|Name|自分)\s*[：:]'
     r'|[：:]\s*.+?\s*(?:[：:]|\[[^\]]*\])?\s*\d{4}[/年]'
     r'|\s+\S[^\n]*?\s+\d{1,4}/\d{1,2}/\d{1,2}(?:\([^)]*\))?\s+'
     r'\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\s+ID[：:]'
@@ -523,7 +527,10 @@ _POST_HEADER_RE = re.compile(
 _COLOR_SPAN_RE = re.compile(r'<span\s+style="color:[^"]*">|</span>')
 
 # 從標頭提取投稿者名稱：「N 名前：NAME[...]」→ NAME
-_POSTER_NAME_RE = re.compile(r'(?:名前|Name)\s*[：:]\s*(.+?)(?:\[|投稿日|$)')
+# `自分`：YomuAA（yomuaa.r401.net）這類「自己まとめ」站台把**作者本人**的貼文
+# 標成「N 自分：NAME [] 投稿日：…」，留言則仍是「名前：」；不認得 `自分` 會讓
+# 作者自動偵測抓到留言者（名無しさん）、「忽略留言」模式反而把作者整批濾掉。
+_POSTER_NAME_RE = re.compile(r'(?:名前|Name|自分)\s*[：:]\s*(.+?)(?:\[|投稿日|$)')
 
 # 替代格式 → NAME。名稱與日期之間的分隔符為 `：` / `[...]`（mail 欄，如
 # `[sage]`）/ 空白的**任意連續組合**（zero 個以上）：
@@ -869,6 +876,24 @@ def _parse_himanatokiniyaruo(page_html: str, base_url: str, *, author_name: str 
     )
     content_end = first_dt.start() + end_m.start() if end_m else len(page_html)
     content_html = page_html[first_dt.start():content_end]
+
+    # 安全閥：本解析器假設「<dt> 就是貼文標頭」，但它同時是 fallback 串中最泛用
+    # 的一個（只靠 <dt> 錨定），未註冊網域的頁面只要有任何 <dt> 就會被它接手。
+    # 因此要求「至少一個 <dt> 是貼文標頭」（`_POST_HEADER_RE`），否則回傳 None
+    # 交回 dispatcher。本站台自身的 dt 全部命中此條件，不受影響。已知會被擋下的
+    # 誤接：
+    #   - yomuaa.r401.net：`<dt><span id="koma-N">N</span></dt>` 只是コマ編號，
+    #     其 <dd> 的換行是字面換行字元，被 `_extract_dt_dd_posts` 折成空白會
+    #     毀掉整篇 AA。
+    #   - yaruonichijou.com 等 FC2 站：全頁唯一的 <dt> 是關聯記事區塊的
+    #     `<dt class="relate_dt">関連記事</dt>`，接手後只會抽到「関連記事」
+    #     四個字加關聯標題清單，把真正的內文（`_parse_fc2blog` 才抓得到）蓋掉。
+    dt_texts = [
+        html.unescape(re.sub(r'<[^>]+>', '', m.group(1))).strip()
+        for m in re.finditer(r'<dt(?:\s[^>]*)?>(.*?)</dt>', content_html, re.DOTALL)
+    ]
+    if not any(_POST_HEADER_RE.search(t) for t in dt_texts):
+        return None, [], page_title
 
     lines_out = _extract_dt_dd_posts(content_html, author_name=author_name, author_only=author_only)
     text_content = '\n\n'.join(lines_out) if lines_out else None
@@ -1697,6 +1722,134 @@ def _parse_asitayaruo(page_html: str, base_url: str, *,
 
 
 # ════════════════════════════════════════════════════════════════
+#  解析器：yomuaa.r401.net（YomuAA）
+# ════════════════════════════════════════════════════════════════
+
+# 作品頁（/series/N）的話次條目：`<div class="item-name"><a href="/episode/M">TITLE</a>`
+_YOMUAA_ITEM_RE = re.compile(
+    r'<div\s+class="item-name"[^>]*>\s*<a\s+href="(/episode/\d+)"[^>]*>(.*?)</a>',
+    re.DOTALL)
+_YOMUAA_DD_RE = re.compile(r'<dd>(.*?)</dd>', re.DOTALL)
+_YOMUAA_MAX_PAGES = 50
+
+
+def _norm_episode_url(url: str) -> str:
+    """比對用的話次 URL 正規化（去 fragment／query／結尾斜線）。"""
+    return url.split('#')[0].split('?')[0].rstrip('/')
+
+
+def _fetch_yomuaa_series(series_url: str, current_url: str) -> list[dict]:
+    """逐頁抓取 YomuAA 作品頁的話次清單，回傳「舊 → 新」順序的關聯記事。
+
+    作品頁分頁形式為 `/series/N?page=K`（每頁 100 話；站方本身即以
+    「舊 → 新」排列，**不需 reverse**），逐頁抓到某頁沒有新條目為止。
+    當前話 `is_current=True`、`url=None`。
+    """
+    items: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for page_num in range(1, _YOMUAA_MAX_PAGES + 1):
+        page_url = series_url if page_num == 1 else f"{series_url}?page={page_num}"
+        try:
+            series_html = fetch_url(page_url)
+        except Exception:
+            break
+        added = 0
+        for m in _YOMUAA_ITEM_RE.finditer(series_html):
+            href = urljoin(series_url, m.group(1))
+            if href in seen:
+                continue
+            seen.add(href)
+            title = html.unescape(re.sub(r'<[^>]+>', '', m.group(2))).strip()
+            items.append((href, title))
+            added += 1
+        if added == 0:
+            break
+
+    cur_norm = _norm_episode_url(current_url)
+    nav_links: list[dict] = []
+    for href, title in items:
+        is_current = _norm_episode_url(href) == cur_norm
+        nav_links.append({
+            'title': title,
+            'url': None if is_current else href,
+            'is_current': is_current,
+        })
+    return nav_links
+
+
+def _parse_yomuaa(page_html: str, base_url: str, *,
+                  author_name: str = "",
+                  author_only: bool = False) -> tuple[str | None, list[dict], str]:
+    """解析 yomuaa.r401.net（YomuAA／読むアスキーアート）格式 —— Nuxt SSR 頁面。
+
+    內文：`<article class="aa">` 內的 `<dl class="aa-article">`，每個「コマ」為
+          `<dt><span id="koma-N">N</span></dt><dd>…</dd>`。
+          **與其他站台相反：`<dd>` 內完全沒有 `<br>`，換行就是原始碼裡的字面
+          換行字元（LF），頁面以 white-space: pre 呈現** —— 所以絕對不可把它
+          折成空白（那是其他站台「AA 行被軟換行切斷」的處理，套在這裡會毀掉
+          整篇排版）。各 `<dd>` 直接依序串接即可：每個 `<dd>` 都以換行結尾，
+          不會黏行，串接後的空行數即為原文的排版。
+          `<dt>` 只是コマ編號、不是貼文標頭，故不走 `_extract_dt_dd_posts`。
+          `<dd>` 內的 `<a href="…">URL</a>` 是作者貼在文中的連結，**保留其文字**
+          （不像 livedoor 的導覽連結要整段移除）。
+    標題：`<article class="outline">` 的 `<h1>`，退回 `<title>`（去掉「 | YomuAA」）。
+    關聯：話次頁**沒有**關聯記事區塊，只有「作品目錄」與「次の話」兩個按鈕；
+          目錄按鈕的 `<a href="/series/N">` 指向作品頁，需另發 HTTP 逐頁抓取
+          （見 `_fetch_yomuaa_series`）取得完整話次清單。
+    註：`<dl>` 以外的 `<div class="ps">`（作者前書き／後書き）不是 AA 內文，
+        以 `<dl class="aa-article">` 為界自然排除。
+    """
+    # ── 標題 ──
+    page_title = ""
+    h1_m = re.search(
+        r'<article\s+class="outline">\s*<h1>(.*?)</h1>', page_html, re.DOTALL)
+    if h1_m:
+        page_title = html.unescape(re.sub(r'<[^>]+>', '', h1_m.group(1))).strip()
+    if not page_title:
+        t_m = re.search(r'<title>([^<]+)</title>', page_html)
+        page_title = html.unescape(t_m.group(1)).strip() if t_m else ""
+    page_title = re.sub(r'\s*\|\s*YomuAA\s*$', '', page_title)
+
+    # ── 內文 ──
+    dl_m = re.search(r'<dl\s+class="aa-article"[^>]*>', page_html)
+    if not dl_m:
+        return None, [], page_title
+    dl_end = page_html.find('</dl>', dl_m.end())
+    dl_html = page_html[dl_m.end():dl_end if dl_end >= 0 else len(page_html)]
+
+    chunks: list[str] = []
+    for m in _YOMUAA_DD_RE.finditer(dl_html):
+        seg = m.group(1).replace('\r\n', '\n').replace('\r', '\n')
+        chunks.append(html.unescape(_strip_tags_keep_color(seg)))
+    if not chunks:
+        return None, [], page_title
+
+    txt = ''.join(chunks)
+    if author_name or author_only:
+        txt = _filter_color_by_author(txt, author_name, author_only=author_only)
+    else:
+        txt = _cleanup_unmatched_spans(txt)
+    lines = txt.split('\n')
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    text_content = '\n'.join(lines) if lines else None
+
+    # ── 關聯記事：目錄按鈕 → 作品頁 ──
+    nav_links: list[dict] = []
+    series_m = re.search(r'<a\s+href="(/series/\d+)"', page_html)
+    if series_m:
+        try:
+            nav_links = _fetch_yomuaa_series(
+                urljoin(base_url, series_m.group(1)), base_url)
+        except Exception:
+            nav_links = []
+
+    return text_content, nav_links, page_title
+
+
+# ════════════════════════════════════════════════════════════════
 #  公開入口
 # ════════════════════════════════════════════════════════════════
 
@@ -1707,12 +1860,14 @@ _DOMAIN_PARSERS: dict[str, callable] = {
     'blog.fc2.com': _parse_fc2blog,
     'blog105.fc2.com': _parse_fc2blog,
     'blog136.fc2.com': _parse_fc2blog,
+    'yaruonichijou.com': _parse_fc2blog,
     'yaruobook.jp': _parse_yaruobook,
     'yaruohiroba.com': _parse_yaruobook,
     'yaruobook.net': _parse_yaruobook_net,
     'yaruobook.com': _parse_yaruobook_net,
     'yaruo-matome.com': _parse_yaruo_matome,
     'asitayaruo.com': _parse_asitayaruo,
+    'yomuaa.r401.net': _parse_yomuaa,
 }
 
 

@@ -118,6 +118,10 @@ _TITLE_LEADING_TAGS_RE = re.compile(r'^(?:[【\[][^】\]]*[】\]][\s　]*)+')
 _TITLE_TRAILING_TAGS_RE = re.compile(r'(?:[\s　]*[【\[][^】\]]*[】\]])+\s*$')
 
 
+# 讀取紀錄一次渲染的列數；其餘由「顯示更多」按鈕分批追加。
+HISTORY_PAGE_SIZE = 100
+
+
 def _normalize_title_for_filter(raw_title: str) -> str:
     """把網址記錄的標題正規化成「作品名稱」主體，去掉網站名稱與話數資訊。
 
@@ -167,6 +171,17 @@ class UrlFetchWindow(QWidget):
         self._author_name: str = ""
         self._fetching = False
         self._history_filter: str = ""
+        # 讀取紀錄採分頁渲染：一次只建 HISTORY_PAGE_SIZE 列 widget，
+        # 其餘由底部「顯示更多」按鈕增量追加（紀錄上千筆時開窗會明顯變慢）。
+        self._history_entries: list[dict] = []
+        self._history_shown: int = 0
+        self._more_btn: QPushButton | None = None
+        # _unique_normalized_titles() 的快取（標題正規化含 regex，
+        # resizeEvent 會頻繁重建按鈕列，不快取會重複掃全表）
+        self._norm_titles_cache: list[str] | None = None
+        self._title_btn_count: int = -1
+        # sync_state 用來判斷 url_history 是否真的變過（沒變就不重建列表）
+        self._history_sig: tuple | None = None
 
         self._build_ui()
         self._refresh_nav()
@@ -193,7 +208,12 @@ class UrlFetchWindow(QWidget):
         if initial_url:
             self.url_entry.setText(initial_url)
         self._refresh_nav()
-        self._refresh_history()
+        # 紀錄內容沒變就沿用既有列表（含已展開的分頁），省下重建成本
+        sig = self._history_signature()
+        if sig != self._history_sig:
+            self._history_sig = sig
+            self._invalidate_history_cache()
+            self._refresh_history()
 
     def sync_back_to_main(self) -> None:
         """離開面板（返回首頁）時，由主程式呼叫，將狀態同步回去。"""
@@ -217,6 +237,8 @@ class UrlFetchWindow(QWidget):
             if current_url is not None:
                 self._current_url = current_url
             self._refresh_nav()
+            self._invalidate_history_cache()
+            self._history_sig = self._history_signature()
             self._refresh_history()
             if auto_close:
                 # 依進入來源返回（首頁／自動翻譯），與導覽列返回鈕、ESC 一致
@@ -224,6 +246,8 @@ class UrlFetchWindow(QWidget):
 
     def on_history_cleared(self, url_history: list) -> None:
         self._url_history = url_history
+        self._invalidate_history_cache()
+        self._history_sig = self._history_signature()
         self._refresh_history()
 
     def on_history_updated(self, url_history: list,
@@ -235,6 +259,8 @@ class UrlFetchWindow(QWidget):
             self._refresh_nav()
         if current_url is not None:
             self._current_url = current_url
+        self._invalidate_history_cache()
+        self._history_sig = self._history_signature()
         self._refresh_history()
 
     def on_author_updated(self, author_name: str) -> None:
@@ -490,7 +516,13 @@ class UrlFetchWindow(QWidget):
         self._refresh_history()
 
     def _unique_normalized_titles(self) -> list[str]:
-        """取出 url_history 中唯一的正規化標題（依當前讀取順序，最新優先）。"""
+        """取出 url_history 中唯一的正規化標題（依當前讀取順序，最新優先）。
+
+        結果快取於 `_norm_titles_cache`，由 `_invalidate_history_cache()`
+        在 url_history 變動時清空（resizeEvent 會頻繁重建按鈕列）。
+        """
+        if self._norm_titles_cache is not None:
+            return self._norm_titles_cache
         seen: set[str] = set()
         normalized: list[str] = []
         for entry in reversed(self._url_history):
@@ -502,7 +534,27 @@ class UrlFetchWindow(QWidget):
                 continue
             seen.add(norm)
             normalized.append(norm)
+        self._norm_titles_cache = normalized
         return normalized
+
+    def _invalidate_history_cache(self) -> None:
+        """url_history 內容改變後呼叫，清掉標題正規化快取與按鈕數量記號。"""
+        self._norm_titles_cache = None
+        self._title_btn_count = -1
+
+    def _history_signature(self) -> tuple:
+        """url_history 的輕量指紋：總筆數 + 最後 5 筆的關鍵欄位。
+
+        新增紀錄會改變筆數；`stamp_url_history_meta` 就地改寫的是最新幾筆的
+        title／work_title／author，故一併納入比對。
+        """
+        tail = []
+        for e in self._url_history[-5:]:
+            if not isinstance(e, dict):
+                continue
+            tail.append((e.get('url'), e.get('title'),
+                         e.get('work_title'), e.get('author')))
+        return (len(self._url_history), tuple(tail))
 
     def _rebuild_title_filter_buttons(self) -> None:
         """依當前 url_history 重新產生「標題快速篩選按鈕」。
@@ -511,18 +563,21 @@ class UrlFetchWindow(QWidget):
         - 依當前讀取順序（newest-first）去重後排列
         - 每按鈕固定寬度（90px）顯示前 8 字（超過 8 字尾端加 …），完整標題放 tooltip
         - 依當前可用空間決定可塞入幾顆按鈕，多出來的不顯示
+        - 若可塞入數量與現有按鈕數相同（resizeEvent 常見情形），直接跳過重建
         """
-        # 清掉舊按鈕
-        while self.title_btn_row.count() > 0:
-            item = self.title_btn_row.takeAt(0)
-            if item is None:
-                break
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
+        def clear_row():
+            while self.title_btn_row.count() > 0:
+                item = self.title_btn_row.takeAt(0)
+                if item is None:
+                    break
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
 
         normalized = self._unique_normalized_titles()
         if not normalized:
+            clear_row()
+            self._title_btn_count = 0
             return
 
         btn_w = 90
@@ -537,13 +592,18 @@ class UrlFetchWindow(QWidget):
         used = self.hist_search.width() + 40 + 24 + spacing
         avail = max(0, panel_w - used)
         max_btns = max(0, (avail + spacing) // (btn_w + spacing))
-        if max_btns <= 0:
+        show_n = min(int(max_btns), len(normalized))
+        if show_n == self._title_btn_count:
+            return
+        clear_row()
+        self._title_btn_count = show_n
+        if show_n <= 0:
             return
 
         btn_font = QFont(self.ui_small_font)
         btn_font.setPointSize(max(1, btn_font.pointSize() - 2))
 
-        for title in normalized[:max_btns]:
+        for title in normalized[:show_n]:
             display = title[:8] + ('…' if len(title) > 8 else '')
             btn = QPushButton(display)
             btn.setFont(btn_font)
@@ -632,10 +692,11 @@ class UrlFetchWindow(QWidget):
             self._position_title_expand_panel()
 
     def _refresh_history(self):
+        """重建讀取紀錄列表（只渲染第一頁，其餘由「顯示更多」追加）。"""
         self._rebuild_title_filter_buttons()
         self._clear_layout_rows(self.hist_inner_layout)
-        insert_at = lambda w: self.hist_inner_layout.insertWidget(
-            self.hist_inner_layout.count() - 1, w)
+        self._more_btn = None
+        self._history_shown = 0
 
         kw = self._history_filter
         entries = list(reversed(self._url_history))
@@ -645,13 +706,41 @@ class UrlFetchWindow(QWidget):
                 if kw in (e.get("title") or "").lower()
             ]
             if not entries:
+                self._history_entries = []
                 lbl = QLabel(f"（無符合「{self.hist_search.text()}」的紀錄）")
                 lbl.setFont(self.ui_small_font)
                 lbl.setStyleSheet("color: #888888; padding: 4px;")
-                insert_at(lbl)
+                self._insert_hist_widget(lbl)
                 return
 
-        for entry in entries:
+        self._history_entries = entries
+        self._append_history_page()
+
+    def _insert_hist_widget(self, w: QWidget) -> None:
+        """把 widget 插到紀錄列表尾端（最後一格固定是 stretch）。"""
+        self.hist_inner_layout.insertWidget(
+            self.hist_inner_layout.count() - 1, w)
+
+    def _append_history_page(self) -> None:
+        """追加下一批紀錄列；若仍有剩餘，於底部重掛「顯示更多」按鈕。"""
+        if self._more_btn is not None:
+            self.hist_inner_layout.removeWidget(self._more_btn)
+            self._more_btn.deleteLater()
+            self._more_btn = None
+
+        # 複製按鈕：字型與寬度依 DPI 縮放調整，避免 125%／150% 縮放下「複製」文字溢出。
+        # 以 96 DPI（100% 縮放）為基準；高縮放時 pointSize 再降 1pt、width 依比例放大。
+        screen = self.screen() if hasattr(self, "screen") else None
+        dpi_scale = (screen.logicalDotsPerInch() / 96.0) if screen else 1.0
+        copy_font = QFont(self.ui_small_font)
+        base_pt = self.ui_small_font.pointSize()
+        copy_pt = base_pt - (2 if dpi_scale >= 1.2 else 1)
+        copy_font.setPointSize(max(1, copy_pt))
+        copy_width = int(45 * max(1.0, dpi_scale))
+
+        start = self._history_shown
+        batch = self._history_entries[start:start + HISTORY_PAGE_SIZE]
+        for entry in batch:
             row = QWidget()
             rl = QHBoxLayout(row)
             rl.setContentsMargins(0, 0, 0, 0)
@@ -663,15 +752,6 @@ class UrlFetchWindow(QWidget):
 
             url = entry.get("url", "")
 
-            # 複製按鈕：字型與寬度依 DPI 縮放調整，避免 125%／150% 縮放下「複製」文字溢出。
-            # 以 96 DPI（100% 縮放）為基準；高縮放時 pointSize 再降 1pt、width 依比例放大。
-            screen = self.screen() if hasattr(self, "screen") else None
-            dpi_scale = (screen.logicalDotsPerInch() / 96.0) if screen else 1.0
-            copy_font = QFont(self.ui_small_font)
-            base_pt = self.ui_small_font.pointSize()
-            copy_pt = base_pt - (2 if dpi_scale >= 1.2 else 1)
-            copy_font.setPointSize(max(1, copy_pt))
-            copy_width = int(45 * max(1.0, dpi_scale))
             copy_btn = make_button("複製", color="#6c757d", hover="#5a6268",
                                    font=copy_font, width=copy_width)
             copy_btn.setFixedHeight(22)
@@ -693,7 +773,22 @@ class UrlFetchWindow(QWidget):
             btn.clicked.connect(lambda checked=False, u=url: self._fetch_url(u))
             rl.addWidget(btn, 1)
 
-            insert_at(row)
+            self._insert_hist_widget(row)
+
+        self._history_shown = start + len(batch)
+        remain = len(self._history_entries) - self._history_shown
+        if remain > 0:
+            more = QPushButton(f"顯示更多（尚有 {remain} 筆）")
+            more.setFont(self.ui_small_font)
+            more.setCursor(Qt.CursorShape.PointingHandCursor)
+            more.setStyleSheet("""
+                QPushButton { background: #3a3f44; color: #ddd;
+                    border: 1px solid #555; border-radius: 3px; padding: 4px; }
+                QPushButton:hover { background: #4a5057; color: #fff; }
+            """)
+            more.clicked.connect(lambda checked=False: self._append_history_page())
+            self._more_btn = more
+            self._insert_hist_widget(more)
 
     def _copy_url_to_clipboard(self, url: str) -> None:
         if not url:

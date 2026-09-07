@@ -177,12 +177,16 @@ class SettingsDialog(QWidget):
         root.addWidget(self.glossary_avoid_aa_cb)
 
         self.glossary_kana_fold_cb = QCheckBox(
-            "套用術語表時：平假名／片假名互通")
+            "套用術語表時：平假名術語也命中片假名寫法")
         self.glossary_kana_fold_cb.setFont(_ui_font(12))
         self.glossary_kana_fold_cb.setChecked(glossary_kana_fold)
         self.glossary_kana_fold_cb.setToolTip(
-            "開啟後，套用術語表時，原文（等號左側）的平假名與片假名視為相通：\n"
-            "  • 術語「ライザ=萊莎」會同時等同「らいざ=萊莎」（反之亦然）。\n"
+            "開啟後，術語原文（等號左側）裡的平假名會額外產生一份片假名寫法：\n"
+            "  • 術語「らいざ=萊莎」會同時等同「ライザ=萊莎」。\n"
+            "  • 只做「平假名→片假名」單向。反向（キョウ→きょう）產生的平假名\n"
+            "    術語在日文句子裡碰撞率極高（きょう 會咬到 はんきょう 的尾巴），\n"
+            "    且平假名沒有可靠詞界可防守，故不再自動產生；原文若真的把名字\n"
+            "    寫成平假名，請自行在術語表加一條明確條目。\n"
             "  • 變體只在不與既有術語條目衝突時自動加入（明確寫的條目優先）。\n"
             "  • 漢字、長音符號 ー、英數等非假名字元維持原樣。\n"
             "影響所有術語套用路徑（替換翻譯、重套術語、自動翻譯等）。")

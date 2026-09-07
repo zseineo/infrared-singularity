@@ -88,18 +88,22 @@ _KATA_LO, _KATA_HI = 0x30A1, 0x30F6
 _KANA_OFFSET = _KATA_LO - _HIRA_LO  # 0x60
 
 
-def _swap_kana(text: str) -> str:
-    """把字串中的平假名↔片假名互換，其餘字元（漢字、長音 ー、英數等）原樣保留。
+def _to_katakana(text: str) -> str:
+    """把字串中的平假名轉成片假名，其餘字元（片假名、漢字、長音 ー、英數等）原樣保留。
 
-    例：'ライザ' → 'らいざ'、'らいざ' → 'ライザ'。
+    例：'らいざ' → 'ライザ'（'ライザ' 則原樣不動）。
+
+    **只做平假名→片假名單向**：假名折疊若反向生成平假名 key（`キョウ` → `きょう`），
+    在日文句子裡碰撞率極高 —— `きょう` 會咬到 `はんきょう`（反響）的尾巴，而平假名
+    是助詞與送り仮名的組成字元、沒有可靠詞界可供防守（片假名連續串本身就是詞界，
+    故正向安全，另有 `_is_katakana_fragment_hit` 把關）。原文真的把名字寫成平假名
+    時，請在術語表另加一條明確條目。
     """
     out = []
     for ch in text:
         code = ord(ch)
         if _HIRA_LO <= code <= _HIRA_HI:
             out.append(chr(code + _KANA_OFFSET))
-        elif _KATA_LO <= code <= _KATA_HI:
-            out.append(chr(code - _KANA_OFFSET))
         else:
             out.append(ch)
     return ''.join(out)
@@ -111,9 +115,10 @@ def parse_glossary(glossary_str: str, *, kana_fold: bool = False) -> dict[str, s
     Key 與 value 透過 `decode_glossary_term` 處理：預設剝外圍空白，
     若用 `"..."` 包覆則完整保留外圍空白（內部空白一律保留）。
 
-    `kana_fold=True` 時，對每條術語額外產生「key 平假名↔片假名互換」的變體
-    （例：`ライザ=萊莎` 會同時產生 `らいざ=萊莎`），使原文不論寫成哪種假名都能命中
-    同一個替換。變體只在不與既有明確條目衝突時加入（明確條目優先）。
+    `kana_fold=True` 時，對每條術語額外產生「key 的平假名轉成片假名」的變體
+    （例：`らいざ=萊莎` 會同時產生 `ライザ=萊莎`），使原文寫成片假名時也能命中
+    同一個替換。**只做平假名→片假名單向**，理由見 `_to_katakana`。
+    變體只在不與既有明確條目衝突時加入（明確條目優先）。
     """
     glossary: dict[str, str] = {}
     for line in glossary_str.split('\n'):
@@ -127,9 +132,9 @@ def parse_glossary(glossary_str: str, *, kana_fold: bool = False) -> dict[str, s
                         glossary[k] = v
     if kana_fold:
         for k, v in list(glossary.items()):
-            swapped = _swap_kana(k)
-            if swapped != k and swapped not in glossary:
-                glossary[swapped] = v
+            folded = _to_katakana(k)
+            if folded != k and folded not in glossary:
+                glossary[folded] = v
     return glossary
 
 

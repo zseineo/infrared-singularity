@@ -302,7 +302,7 @@ class EditWindow(QMainWindow):
         translation_only_provider=None,  # () -> bool；對應主程式「術語表只套用於譯文部分」設定
         pad_right_aa_provider=None,  # () -> bool；對應主程式「替換翻譯時偵測右側 AA 圖補空白」設定
         glossary_avoid_aa_provider=None,  # () -> bool；對應主程式「套用術語表時避免套用到 AA 圖」設定
-        glossary_kana_fold_provider=None,  # () -> bool；對應主程式「套用術語表時平假名／片假名互通」設定
+        glossary_kana_fold_provider=None,  # () -> bool；對應主程式「套用術語表時平假名術語也命中片假名寫法」設定
         url_for_text_provider=None,  # (text: str) -> str | None；以指紋查 url_history 取得對應網址
         reload_original_for_file=None,  # (file_path: str) -> str | None；依指紋查原文暫存
         copy_to_replace_provider=None,  # () -> bool；對應主程式「編輯器複製即填入全文替換原文」設定

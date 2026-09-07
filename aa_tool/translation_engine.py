@@ -96,7 +96,7 @@ def _to_katakana(text: str) -> str:
     **只做平假名→片假名單向**：假名折疊若反向生成平假名 key（`キョウ` → `きょう`），
     在日文句子裡碰撞率極高 —— `きょう` 會咬到 `はんきょう`（反響）的尾巴，而平假名
     是助詞與送り仮名的組成字元、沒有可靠詞界可供防守（片假名連續串本身就是詞界，
-    故正向安全，另有 `_is_katakana_fragment_hit` 把關）。原文真的把名字寫成平假名
+    故正向安全，另有 `_is_kana_fragment_hit` 把關）。原文真的把名字寫成平假名
     時，請在術語表另加一條明確條目。
     """
     out = []
@@ -280,8 +280,15 @@ _KATAKANA_RE = re.compile(r'[ァ-ヺ・ー゠ｦ-ﾟ]')
 #     → 不算碎片、應正常替換。
 # 長音 `ー` 屬詞內字元、不列入分隔符（前/後接 `ー` 一律算碎片證據）。
 _KATAKANA_SEPARATORS = frozenset('・゠')
-# 片假名形式的敬稱 — 名字後接這些時不算「誤切更長片假名詞」，不應排除套用。
-_KATAKANA_HONORIFICS = ('サン', 'チャン', 'クン', 'サマ', 'タン', 'ニキ', 'ネキ')
+# 平假名（長音 `ー` 屬 `_KATAKANA_RE`，不重複列入）。
+_HIRAGANA_RE = re.compile(r'[ぁ-ゖ]')
+# 整條 key 是否「全部由假名構成」（平／片假名、長音、分隔符）。只有全假名 key 才做
+# 「同類假名緊鄰」的碎片判定：含漢字／英數的 key（`やる夫`、`怒り`）本身已是可靠
+# 詞單位，其邊界與相鄰假名之間是文字種類的交界，不該當成硬切碎片。
+_ALL_KANA_RE = re.compile(r'^[ぁ-ゖァ-ヺ・ー゠ｦ-ﾟ]+$')
+# 假名形式的敬稱 — 名字後接這些時不算「誤切更長假名詞」，不應排除套用。
+_KANA_HONORIFICS = ('サン', 'チャン', 'クン', 'サマ', 'タン', 'ニキ', 'ネキ',
+                    'さん', 'ちゃん', 'くん', 'さま', 'たん', 'にき', 'ねき')
 # glossary_avoid_aa：命中位置左右視窗 AA 噪聲密度 >= 此值 → 視為落在 AA 圖上。
 _GLOSSARY_AA_DENSITY_TH = 0.5
 # glossary_avoid_aa 規則 C：命中緊鄰「相同裝飾標點」連續 >= 此長度的 run → 視為 AA。
@@ -330,81 +337,119 @@ def _glossary_hit_flanked_by_deco_run(line: str, start: int, end: int) -> bool:
     return False
 
 
-def _is_katakana_fragment_hit(
+def _kana_class(ch: str) -> 'str | None':
+    """字元的假名種類：`'H'`＝平假名、`'K'`＝片假名（含長音 `ー`、半形片假名、
+    分隔符 `・゠`），其餘（漢字／英數／標點／空白）為 `None`。
+    """
+    if _HIRAGANA_RE.match(ch):
+        return 'H'
+    if _KATAKANA_RE.match(ch):
+        return 'K'
+    return None
+
+
+def _is_kana_fragment_hit(
         line: str, start: int, end: int, key: str,
         covered: 'frozenset[int] | None' = None) -> bool:
-    """判斷術語表這次命中是否疑似「把更長的片假名詞硬切成術語碎片」。
+    """判斷術語表這次命中是否疑似「把更長的假名詞硬切成術語碎片」。
 
-    `key` 本身含片假名（`_KATAKANA_RE`）、且命中後緊鄰（前一字或後一字）
-    仍是片假名 → True（如 AI 譯文保留的 `レオリオ` 中的 `リオ`，左鄰 `オ`）。
-    但後方緊接片假名敬稱（`サン` 等）時排除（屬正常的「名字＋敬稱」）。
-    相鄰字若是分隔符 `・゠`（`_KATAKANA_SEPARATORS`）須看其外側那個字：外側也是
-    片假名才算碎片（複合名連接符，如 `ジオン・ズム・ダイクン` 保留不替換）；外側非
-    片假名／行首行尾則是項目符號（如 `・オーガス`），後面是完整詞、應正常替換。
+    判定對象與比對的假名種類：
+      * **全假名 key**（`_ALL_KANA_RE`，如 `エリ`／`えり`）：拿 key **自身該側邊界
+        字元的假名種類**去比對緊鄰字 —— 左鄰與 key 第一字同類、或右鄰與 key 最後
+        一字同類 → 視為碎片（如 `ちゅうがえり` 中的 `えり`，左鄰 `が` 同為平假名；
+        `エリクサー` 中的 `エリ`，右鄰 `ク` 同為片假名）。
+      * **含漢字／英數的混合 key**（如 `ポケモン図鑑`）：沿用舊行為，只在 key 含片
+        假名時、以片假名比對兩側。`やる夫`／`怒り` 這類無片假名的混合 key 不判定 ——
+        它們本身已是可靠詞單位，`やる夫が` 的 `夫`→`が` 是文字種類交界而非詞中切斷。
+
+    例外（不算碎片、應正常替換）：
+      * 後方緊接假名敬稱（`_KANA_HONORIFICS`：`サン`／`さん`／`ちゃん` 等）。
+      * 左鄰恰為屬格助詞 `の` 且 `の` 之前不是平假名（見 `_left_flank_is_genitive_no`）
+        —— AA 故事的招式格式 `【アリスのはなふぶき！！】` 屬此類。
+      * 相鄰字是分隔符 `・゠`（`_KATAKANA_SEPARATORS`）而其外側非同類假名（項目符號
+        `・オーガス`；外側同類時才是複合名連接符，如 `ジオン・ズム・ダイクン`）。
+      * `covered` 有值且整段同類假名 run 被本輪術語蓋滿（見 `_kana_run_fully_covered`）。
 
     `covered`：本行所有術語命中範圍的字元位置集合（由呼叫端預先算好）。
-    命中所在的「整段連續片假名」若被 `covered` 完整覆蓋（見
-    `_katakana_run_fully_covered`），代表整個片假名詞都由本輪術語組成
-    （如 `ハクタイ`＋`ジム`），不視為碎片。
     """
-    if not _KATAKANA_RE.search(key):
+    if _ALL_KANA_RE.match(key):
+        cls_left, cls_right = _kana_class(key[0]), _kana_class(key[-1])
+    elif _KATAKANA_RE.search(key):
+        cls_left = cls_right = 'K'
+    else:
         return False
-    if covered is not None and _katakana_run_fully_covered(
-            line, start, end, covered):
+    if covered is not None and _kana_run_fully_covered(
+            line, start, end, covered, cls_left, cls_right):
         return False
-    if _katakana_flank_is_fragment(line, start - 1, -1):
+    if (_kana_flank_is_fragment(line, start - 1, -1, cls_left)
+            and not _left_flank_is_genitive_no(line, start)):
         return True
-    # 後方緊接片假名敬稱（`タロウサン` 等）屬「名字＋敬稱」，不算硬切碎片。
+    # 後方緊接假名敬稱（`タロウサン`／`ささらさん` 等）屬「名字＋敬稱」，不算碎片。
     tail = line[end:end + 4]
-    if any(tail.startswith(h) for h in _KATAKANA_HONORIFICS):
+    if any(tail.startswith(h) for h in _KANA_HONORIFICS):
         return False
-    if _katakana_flank_is_fragment(line, end, +1):
-        return True
-    return False
+    return _kana_flank_is_fragment(line, end, +1, cls_right)
 
 
-def _katakana_run_fully_covered(
-        line: str, start: int, end: int, covered: 'frozenset[int]') -> bool:
-    """命中 `[start, end)` 所在的「整段連續片假名」是否被本行同輪的術語命中
-    （`covered`）完整覆蓋。
+def _left_flank_is_genitive_no(line: str, start: int) -> bool:
+    """命中左鄰是否為「屬格助詞 `の`」：該字為 `の`，且其再左邊不是平假名。
+
+    `の` 前面是漢字／片假名／標點／行首時，`の` 是把前後接成「A 的 B」的助詞，
+    命中段自成一詞 —— AA 故事的招式行 `【アリスのはなふぶき！！】`、
+    `【篠ノ之束のみきり！！】` 皆屬此類，應正常替換。
+    反之 `の` 前面也是平假名時（`へそのいわ`、`きのこのほうし`），整串是一個平假名
+    複合詞，命中段仍是碎片。
+    """
+    if start < 1 or line[start - 1] != 'の':
+        return False
+    return start < 2 or _kana_class(line[start - 2]) != 'H'
+
+
+def _kana_run_fully_covered(
+        line: str, start: int, end: int, covered: 'frozenset[int]',
+        cls_left: 'str | None', cls_right: 'str | None') -> bool:
+    """命中 `[start, end)` 兩側「與該側同類的連續假名」是否都被本行同輪的術語
+    命中（`covered`）覆蓋。
 
     只看緊鄰一格並不足夠：`『エリクサー』` 裡 `エリ`（`えり=繪里` 的假名折疊
     變體）右鄰的 `ク` 雖然屬於另一術語 `クサ` 的命中，但整段 `エリクサー` 還
-    剩 `ー` 沒有任何術語覆蓋 —— 這種「半覆蓋」不是兩術語合起來蓋滿一個片假名
+    剩 `ー` 沒有任何術語覆蓋 —— 這種「半覆蓋」不是兩術語合起來蓋滿一個假名
     詞，仍屬硬切碎片，應保留原文。
     分隔符 `・゠` 是連接符號、不要求被術語覆蓋（`ハクタイ・ジム` 仍算完整覆蓋）。
     """
     i = start - 1
-    while i >= 0 and _KATAKANA_RE.match(line[i]):
+    while i >= 0 and (_kana_class(line[i]) == cls_left
+                      or line[i] in _KATAKANA_SEPARATORS):
         if i not in covered and line[i] not in _KATAKANA_SEPARATORS:
             return False
         i -= 1
     j = end
-    while j < len(line) and _KATAKANA_RE.match(line[j]):
+    while j < len(line) and (_kana_class(line[j]) == cls_right
+                             or line[j] in _KATAKANA_SEPARATORS):
         if j not in covered and line[j] not in _KATAKANA_SEPARATORS:
             return False
         j += 1
     return True
 
 
-def _katakana_flank_is_fragment(line: str, pos: int, step: int) -> bool:
+def _kana_flank_is_fragment(line: str, pos: int, step: int,
+                            cls: 'str | None') -> bool:
     """命中某一側緊鄰字（位於 `pos`，往 `step`＝-1 左／+1 右方向）是否構成
-    「片假名碎片」證據。分隔符 `・゠` 須看再往外一格（`pos + step`）是否仍為
-    片假名（複合名連接符才算碎片；項目符號的行首行尾外側則不算）。
+    「假名碎片」證據：該字與 `cls`（key 該側邊界字元的假名種類）同類即成立。
+    分隔符 `・゠` 須看再往外一格（`pos + step`）是否為同類假名（複合名連接符才算
+    碎片；項目符號的行首行尾外側則不算）。
     """
-    if pos < 0 or pos >= len(line):
+    if cls is None or pos < 0 or pos >= len(line):
         return False
     ch = line[pos]
-    if not _KATAKANA_RE.match(ch):
-        return False
     if ch in _KATAKANA_SEPARATORS:
         outer_pos = pos + step
         if outer_pos < 0 or outer_pos >= len(line):
             return False
         outer = line[outer_pos]
-        return (_KATAKANA_RE.match(outer) is not None
-                and outer not in _KATAKANA_SEPARATORS)
-    return True
+        return (outer not in _KATAKANA_SEPARATORS
+                and _kana_class(outer) == cls)
+    return _kana_class(ch) == cls
 
 
 def _glossary_hit_on_aa(line: str, start: int, end: int, key: str,
@@ -415,9 +460,9 @@ def _glossary_hit_on_aa(line: str, start: int, end: int, key: str,
     規則 A — 周圍 AA 噪聲密度：命中位置左右視窗（`_local_aa_density`）的 AA
       噪聲密度 >= `_GLOSSARY_AA_DENSITY_TH` → 視為 AA 圖（例：`::::アム::::`
       中的 `アム`，周圍全是 `:` 等 AA 字元）。
-    規則 B — 緊鄰片假名：見 `_is_katakana_fragment_hit`（疑似把更長的片假名
-      詞硬切成術語碎片）。`covered` 為本行所有命中範圍的位置集合，
-      相鄰片假名若也在覆蓋範圍內（同輪另一術語）則不觸發。
+    規則 B — 緊鄰同類假名：見 `_is_kana_fragment_hit`（疑似把更長的假名詞硬切
+      成術語碎片；平／片假名皆判定，以 key 該側邊界字元的假名種類比對）。
+      `covered` 為本行所有命中範圍的位置集合，整段同類假名 run 若被蓋滿則不觸發。
     規則 C — 緊鄰裝飾標點 run：見 `_glossary_hit_flanked_by_deco_run`（命中左/右
       緊鄰 `;;;;` 這類連續重複裝飾標點，屬 AA 裝飾線但不被密度規則計入）。
     """
@@ -425,7 +470,7 @@ def _glossary_hit_on_aa(line: str, start: int, end: int, key: str,
         return True
     if _glossary_hit_flanked_by_deco_run(line, start, end):
         return True
-    return _is_katakana_fragment_hit(line, start, end, key, covered)
+    return _is_kana_fragment_hit(line, start, end, key, covered)
 
 
 def apply_glossary_to_text(text: str, glossary: dict[str, str], *,
@@ -532,21 +577,25 @@ def _apply_glossary_to_segment(text: str, sorted_glossary: list) -> str:
 
     與全域覆蓋 `apply_glossary_to_text` 不同：此處只負責替換、不做 Auto-Padding
     （補空白由後續 `_replace_with_padding` 統一處理）。會略過
-    `_is_katakana_fragment_hit` 判定為「硬切片假名碎片」的命中（如 AI 譯文保留
-    的 `レオリオ` 中的 `リオ`，左鄰 `オ` 仍是片假名 → 保留原文不替換）。
+    `_is_kana_fragment_hit` 判定為「硬切假名碎片」的命中（如 AI 譯文保留的
+    `レオリオ` 中的 `リオ`、`ちゅうがえり` 中的 `えり` → 保留原文不替換）。
 
     採單輪掃描（`sorted_glossary` 已依 key 長度遞減排序，最長者優先匹配），
     避免多輪 `str.replace()` 時「短 key 命中前一輪長 key 替換結果」的問題，
-    也讓緊鄰片假名的判定能在未被前一輪改寫的原始字串上正確進行。
+    也讓緊鄰假名的判定能在未被前一輪改寫的原始字串上正確進行。
+    與全域覆蓋一致，先蒐集本段所有命中範圍當 `covered` 傳入，讓「兩術語合起來
+    蓋滿整個假名詞」的情形（`ゴブリン`＋`オーク`）正常替換而非被判為碎片。
     """
     if not sorted_glossary:
         return text
     term_map = {k: v for k, v in sorted_glossary}
     pattern = re.compile('|'.join(re.escape(k) for k, _ in sorted_glossary))
+    covered = frozenset(
+        i for m in pattern.finditer(text) for i in range(m.start(), m.end()))
 
     def repl(m):
         jp = m.group(0)
-        if _is_katakana_fragment_hit(text, m.start(), m.end(), jp):
+        if _is_kana_fragment_hit(text, m.start(), m.end(), jp, covered):
             return jp
         return term_map[jp]
 

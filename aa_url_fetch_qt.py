@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
 )
 
 from aa_tool.qt_helpers import make_button
-from aa_tool.text_extraction import extract_work_title
+from aa_tool.text_extraction import TITLE_CHAPTER_RES, extract_work_title
 
 
 class FlowLayout(QLayout):
@@ -106,13 +106,9 @@ class FlowLayout(QLayout):
 
 
 # 標題正規化：去掉網站尾綴、外圍 tag、話數資訊，保留作品名稱主體。
-_TITLE_CHAPTER_RES = [
-    re.compile(r'第\s*[0-9０-９〇零一二三四五六七八九十百千]+\s*話'),
-    re.compile(r'その\s*[0-9０-９〇零一二三四五六七八九十百千]+'),
-    re.compile(r'番外編\s*[0-9０-９〇零一二三四五六七八九十百千]*'),
-    re.compile(r'後日談\s*[0-9０-９〇零一二三四五六七八九十百千]*'),
-    re.compile(r'[0-9０-９]+\s*話'),
-]
+# 話數模式清單與 text_extraction 共用（自動翻譯的作品資料夾名走同一份），
+# 避免兩處各自維護而走鐘。
+_TITLE_CHAPTER_RES = TITLE_CHAPTER_RES
 _TITLE_SITE_SUFFIX_RE = re.compile(r'\s+[-—–]\s+.+$')
 _TITLE_LEADING_TAGS_RE = re.compile(r'^(?:[【\[][^】\]]*[】\]][\s　]*)+')
 _TITLE_TRAILING_TAGS_RE = re.compile(r'(?:[\s　]*[【\[][^】\]]*[】\]])+\s*$')

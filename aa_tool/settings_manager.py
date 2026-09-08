@@ -200,6 +200,10 @@ class AppCache:
     # 原文之後）／「替換翻譯」（False，以翻譯取代原文）。自動翻譯一律直接存檔、不進
     # 編輯器。預設 False（替換）。
     auto_translate_append_mode: bool = False
+    # auto_translate_group_by_series：在輸出資料夾下依作品名開一層子資料夾存放
+    # （整批共用同一個、已存在就沿用）。資料夾名本身刻意**不持久化**——它由起始
+    # 網址／作品名稱欄位決定，記住舊值會在換作品時把新作品存進舊資料夾。
+    auto_translate_group_by_series: bool = False
     # 翻譯後端：'browser'（操控網頁版 Gemini）或 'api'（呼叫供應商 API）。
     translate_backend: str = "browser"
     # API 供應商：gemini / openai / claude / deepseek / custom（見
@@ -466,6 +470,9 @@ class SettingsManager:
             cache.auto_translate_append_mode = bool(data.get(
                 'auto_translate_append_mode',
                 cache.auto_translate_append_mode))
+            cache.auto_translate_group_by_series = bool(data.get(
+                'auto_translate_group_by_series',
+                cache.auto_translate_group_by_series))
             cache.gemini_required_model = str(data.get(
                 'gemini_required_model', cache.gemini_required_model) or "pro")
             cache.translate_backend = str(data.get(
@@ -587,6 +594,8 @@ class SettingsManager:
                 'auto_translate_until_last': cache.auto_translate_until_last,
                 'auto_translate_skip_existing': cache.auto_translate_skip_existing,
                 'auto_translate_append_mode': cache.auto_translate_append_mode,
+                'auto_translate_group_by_series':
+                    cache.auto_translate_group_by_series,
                 'gemini_required_model': cache.gemini_required_model,
                 'translate_backend': cache.translate_backend,
                 'api_provider': cache.api_provider,

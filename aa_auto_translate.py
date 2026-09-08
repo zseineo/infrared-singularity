@@ -10,6 +10,10 @@
 
     python aa_auto_translate.py --url <起始網址> --count 5 --out <輸出資料夾>
 
+    # 依作品名在輸出資料夾下開一層子資料夾存放（整批共用同一個）
+    python aa_auto_translate.py --url <起始網址> --count 5 --out <輸出資料夾> \
+        --group-by-series
+
 也可由 aa_main_qt 的 GUI 按鈕呼叫 :func:`run_auto_translate`。
 """
 from __future__ import annotations
@@ -342,6 +346,29 @@ def compute_chapter_name_base(
     return f"{safe_title}_{safe_num}" if safe_num else safe_title
 
 
+def compute_series_folder_name(
+    *,
+    doc_title: str,
+    fetch_auto_fill_title: bool,
+    page_title: str,
+) -> str:
+    """算「依作品名分資料夾」要用的資料夾名（已 sanitize），算不出時回空字串。
+
+    - 手動模式（``fetch_auto_fill_title=False``）：直接用使用者填的 ``doc_title``，
+      不做任何猜測——那本來就是作品名稱欄位。
+    - 自動模式：由 ``page_title`` 經 ``extract_series_folder_name`` 收斂成作品名
+      主體（**去掉話數**）。注意不可改用 ``extract_work_title``：它保留話數，
+      每話結果都不同，會變成一話一個資料夾。
+
+    整批只算一次（見 ``run_auto_translate``），故同一批的 N 話必落在同一資料夾。
+    """
+    if fetch_auto_fill_title:
+        name = text_extraction.extract_series_folder_name(page_title or "")
+    else:
+        name = (doc_title or "").strip()
+    return _sanitize(name)
+
+
 def compute_chapter_filename(
     out_dir: str,
     *,
@@ -361,29 +388,20 @@ def compute_chapter_filename(
     return _unique_path(out_dir, name_base)
 
 
-def preview_first_filename(
-    out_dir: str,
-    url: str,
-    *,
-    base_dir: str | None = None,
-    doc_title: str = "",
-    fetch_auto_fill_title: bool | None = None,
-    allow_network: bool = True,
-) -> str | None:
-    """試算 ``url`` 這一話實際會寫入的檔名（含碰撞序號），不翻譯、不寫檔。
+def _preview_fetch_source(
+    url: str, base_dir: str, allow_network: bool,
+) -> tuple[str, str] | None:
+    """預覽用的抓取＋解析，回傳 ``(source, page_title)``，失敗一律回 None。
 
-    供面板「檔名預覽」即時顯示真正會落地的檔名用。
-    - `allow_network=False`：只吃本地 URL 快取，沒命中回 None（不卡網路，
-      適合面板開啟時的即時預覽）。
-    - fetch/parse 失敗或內文為空一律回 None（預覽不該丟例外）。
+    - `allow_network=False`：只吃本地 URL 快取，沒命中回 None（不卡網路）。
+    - fetch/parse 失敗或內文為空皆回 None（預覽不該丟例外）。
+
+    `preview_first_filename`（檔名）與 `preview_series_folder`（資料夾名）共用，
+    面板按一次「🔄 試算」兩者走同一份快取、不會抓兩次網頁。
     """
     if not url:
         return None
-    base_dir = base_dir or app_paths.data_dir()
     cfg = load_config(base_dir)
-    if fetch_auto_fill_title is None:
-        fetch_auto_fill_title = settings_manager.SettingsManager(
-            base_dir).load_cache().fetch_auto_fill_title
     page_html = _read_url_cache(url)
     if page_html is None:
         if not allow_network:
@@ -405,11 +423,72 @@ def preview_first_filename(
                      if page_title else "")
     source = (display_title + "\n\n" + text_content
               if display_title else text_content)
+    return source, page_title
+
+
+def preview_first_filename(
+    out_dir: str,
+    url: str,
+    *,
+    base_dir: str | None = None,
+    doc_title: str = "",
+    fetch_auto_fill_title: bool | None = None,
+    allow_network: bool = True,
+) -> str | None:
+    """試算 ``url`` 這一話實際會寫入的檔名（含碰撞序號），不翻譯、不寫檔。
+
+    供面板「檔名預覽」即時顯示真正會落地的檔名用。
+    - `allow_network=False`：只吃本地 URL 快取，沒命中回 None（不卡網路，
+      適合面板開啟時的即時預覽）。
+    - fetch/parse 失敗或內文為空一律回 None（預覽不該丟例外）。
+    """
+    if not url:
+        return None
+    base_dir = base_dir or app_paths.data_dir()
+    if fetch_auto_fill_title is None:
+        fetch_auto_fill_title = settings_manager.SettingsManager(
+            base_dir).load_cache().fetch_auto_fill_title
+    fetched = _preview_fetch_source(url, base_dir, allow_network)
+    if fetched is None:
+        return None
+    source, page_title = fetched
     path = compute_chapter_filename(
         out_dir or ".", doc_title=doc_title,
         fetch_auto_fill_title=fetch_auto_fill_title,
         source=source, page_title=page_title, fallback_index=1)
     return os.path.basename(path)
+
+
+def preview_series_folder(
+    url: str,
+    *,
+    base_dir: str | None = None,
+    doc_title: str = "",
+    fetch_auto_fill_title: bool | None = None,
+    allow_network: bool = True,
+) -> str | None:
+    """試算「依作品名分資料夾」會用的資料夾名，不翻譯、不建資料夾。
+
+    供面板「作品資料夾」欄位預先帶入用；使用者可在該欄直接改，開始時以欄位為準。
+    手動模式不必抓網頁（直接用 doc_title）；自動模式的取名規則與實跑完全一致
+    （同走 ``compute_series_folder_name``）。算不出時回 None。
+    """
+    base_dir = base_dir or app_paths.data_dir()
+    if fetch_auto_fill_title is None:
+        fetch_auto_fill_title = settings_manager.SettingsManager(
+            base_dir).load_cache().fetch_auto_fill_title
+    if not fetch_auto_fill_title:
+        # 手動模式：作品名稱就是使用者填的，不必上網
+        return compute_series_folder_name(
+            doc_title=doc_title, fetch_auto_fill_title=False,
+            page_title="") or None
+    fetched = _preview_fetch_source(url, base_dir, allow_network)
+    if fetched is None:
+        return None
+    _source, page_title = fetched
+    return compute_series_folder_name(
+        doc_title=doc_title, fetch_auto_fill_title=True,
+        page_title=page_title) or None
 
 
 def _record_url_history(sm, url: str, page_title: str, nav_links: list,
@@ -464,6 +543,8 @@ def run_auto_translate(
     fetch_auto_fill_title: bool | None = None,
     until_last: bool = False,
     skip_existing: bool = False,
+    group_by_series: bool | None = None,
+    series_folder: str = "",
     url_list: list[str] | None = None,
     append_mode: bool | None = None,
     stop_event=None,
@@ -477,6 +558,13 @@ def run_auto_translate(
     until_last：為 True 時忽略 count，一路翻到沒有下一話為止。
     skip_existing：為 True 時，翻譯前先算好這一話的檔名，若輸出資料夾已有同名檔
         （不計碰撞序號）就跳過該話、直接抓下一話——適合批次中斷後重跑略過已完成的話。
+    group_by_series：為 True 時在 ``out_dir`` 底下依作品名開一層子資料夾，整批的
+        HTML 都寫進去（已存在就直接沿用）。None 時讀 cache 的
+        auto_translate_group_by_series（預設 False）。**資料夾名整批只決定一次**
+        （手動模式用 doc_title；自動模式用第一話 page_title 收斂出的作品名主體），
+        之後的話一律沿用，故不會發生「一話一個資料夾」。算不出名字時退回 out_dir。
+    series_folder：明確指定的作品資料夾名（GUI 面板算好、且使用者可能改過）。
+        非空時直接採用，不再從標題推算——面板顯示什麼就存到哪，所見即所得。
     append_mode：對應主畫面「加入翻譯」（True，保留原文、翻譯附在原文之後）／「替換
         翻譯」（False）。None 時讀 cache 的 auto_translate_append_mode（預設 False）。
     url_list：手動網址清單（一行一個）。非空時**整批完全照清單跑**——第一行即第一話，
@@ -504,7 +592,41 @@ def run_auto_translate(
         fetch_auto_fill_title = cache.fetch_auto_fill_title
     if append_mode is None:
         append_mode = getattr(cache, "auto_translate_append_mode", False)
+    if group_by_series is None:
+        group_by_series = getattr(
+            cache, "auto_translate_group_by_series", False)
     os.makedirs(out_dir, exist_ok=True)
+
+    # ── 依作品名分資料夾 ──
+    # effective_out_dir 是這批實際落檔的資料夾：group_by_series 關閉時就是
+    # out_dir 本身。開啟時整批只決定一次（見 _decide_series_dir），之後所有話
+    # 沿用同一個資料夾——「跳過已存在同名檔」的判定與存檔都吃這個變數，兩者
+    # 必然一致，不會出現「檔案已在子資料夾卻又重譯一份」。
+    effective_out_dir = out_dir
+    series_dir_decided = not group_by_series
+
+    def _decide_series_dir(page_title: str) -> None:
+        """用第一話的標題定下這批的作品資料夾（只會生效一次）。"""
+        nonlocal effective_out_dir, series_dir_decided
+        if series_dir_decided:
+            return
+        series_dir_decided = True
+        name = _sanitize(series_folder) or compute_series_folder_name(
+            doc_title=doc_title, fetch_auto_fill_title=fetch_auto_fill_title,
+            page_title=page_title)
+        if not name:
+            log("  ⚠️ 無法從標題判斷作品名稱 → 這批直接存進輸出資料夾（不分子資料夾）。")
+            return
+        target = os.path.join(out_dir, name)
+        existed = os.path.isdir(target)
+        try:
+            os.makedirs(target, exist_ok=True)
+        except OSError as e:
+            log(f"  ⚠️ 無法建立作品資料夾「{name}」（{e}）→ 改存進輸出資料夾。")
+            return
+        effective_out_dir = target
+        log(f"  📁 作品資料夾：{name}（{'沿用既有' if existed else '新建'}）"
+            f"；本批各話都存進這裡。")
 
     # 手動網址清單：非空時第一行即第一話，整批照清單順序跑（不看關聯記事）
     urls = [u.strip() for u in (url_list or []) if u.strip()]
@@ -619,6 +741,9 @@ def run_auto_translate(
                 break
             # 讀過的網址寫入讀取紀錄（與手動流程一致）
             _record_url_history(sm, url, page_title, nav_links, source, log)
+            # 1.4) 依作品名分資料夾：用第一話的標題定一次，之後各話沿用。
+            #      放在跳過判定之前，確保「已存在同名檔」看的是子資料夾。
+            _decide_series_dir(page_title)
             # 清單模式下一話直接取清單的下一筆（i 為 1-based，故下一筆是 urls[i]）
             if urls:
                 next_url = urls[i] if i < len(urls) else ""
@@ -633,7 +758,7 @@ def run_auto_translate(
                     doc_title=doc_title,
                     fetch_auto_fill_title=fetch_auto_fill_title,
                     source=source, page_title=page_title, fallback_index=i)
-                existing = os.path.join(out_dir, f"{name_base}.html")
+                existing = os.path.join(effective_out_dir, f"{name_base}.html")
                 if os.path.exists(existing):
                     result.skipped.append((url, f"{name_base}.html"))
                     log(f"  ⏭️ 已存在同名檔「{name_base}.html」→ 跳過此話，續下一話。")
@@ -667,7 +792,7 @@ def run_auto_translate(
                     symbol_regex_str=cfg.symbol_regex,
                     glossary_avoid_aa=cfg.glossary_avoid_aa)
                 out_path = compute_chapter_filename(
-                    out_dir,
+                    effective_out_dir,
                     doc_title=doc_title,
                     fetch_auto_fill_title=fetch_auto_fill_title,
                     source=source, page_title=page_title,
@@ -777,6 +902,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="輸出資料夾已有同名檔時跳過該話（重跑批次略過已完成的話）")
     parser.add_argument("--append", action="store_true",
                         help="加入翻譯模式（保留原文、翻譯附在原文之後）；預設為替換翻譯")
+    parser.add_argument("--group-by-series", action="store_true",
+                        help="在輸出資料夾下依作品名開子資料夾存放（整批同一個）")
+    parser.add_argument("--series-folder", default="",
+                        help="指定作品資料夾名（不指定則從第一話標題推算）")
     parser.add_argument("--out", required=True, help="輸出 HTML 的資料夾")
     parser.add_argument("--gem-url", default=None,
                         help="Gemini Gem 網址（預設讀設定 gemini_gem_url）")
@@ -804,6 +933,8 @@ def main(argv: list[str] | None = None) -> int:
             gem_url=args.gem_url, profile_dir=args.profile_dir,
             headless=args.headless, until_last=args.until_last,
             skip_existing=args.skip_existing,
+            group_by_series=(True if args.group_by_series else None),
+            series_folder=args.series_folder,
             append_mode=(True if args.append else None),
             max_per_session=args.max_per_session,
             required_model=args.required_model,

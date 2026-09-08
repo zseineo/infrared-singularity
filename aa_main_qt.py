@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.22"
+APP_VERSION = "2.23"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -766,6 +766,9 @@ class MainWindow(QMainWindow):
         self._auto_translate_count: int = 5
         self._auto_translate_until_last: bool = False
         self._auto_translate_skip_existing: bool = False
+        # 自動翻譯：在輸出資料夾下依作品名開一層子資料夾（資料夾名不持久化，
+        # 由面板每次依起始網址重算，避免換作品時沿用舊名）。
+        self._auto_translate_group_by_series: bool = False
         # 自動翻譯：加入翻譯（True，保留原文）／替換翻譯（False）。預設替換。
         self._auto_translate_append_mode: bool = False
         # 翻譯後端與 API 設定（金鑰另存於加密檔，不在 cache）
@@ -1843,6 +1846,8 @@ class MainWindow(QMainWindow):
         self._auto_translate_count = params["count"]
         self._auto_translate_until_last = params["until_last"]
         self._auto_translate_skip_existing = params.get("skip_existing", False)
+        self._auto_translate_group_by_series = params.get(
+            "group_by_series", False)
         if "url_list" in params:
             self._auto_translate_url_list = '\n'.join(
                 params.get("url_list") or [])
@@ -1862,7 +1867,8 @@ class MainWindow(QMainWindow):
             params["max_per_session"], params["required_model"],
             params.get("doc_title", ""),
             params.get("skip_existing", False),
-            params.get("url_list") or [])
+            params.get("url_list") or [],
+            params.get("series_folder", ""))
 
     def _start_auto_translate(self, start_url: str, count: int,
                                out_dir: str, gem_url: str,
@@ -1871,7 +1877,8 @@ class MainWindow(QMainWindow):
                                required_model: str = "",
                                doc_title: str = "",
                                skip_existing: bool = False,
-                               url_list: list[str] | None = None) -> None:
+                               url_list: list[str] | None = None,
+                               series_folder: str = "") -> None:
         """在背景執行緒跑自動翻譯，進度同步至橫幅、狀態列與面板 Log。"""
         self._auto_translate_running = True
         self._auto_stop_event = threading.Event()
@@ -1888,6 +1895,8 @@ class MainWindow(QMainWindow):
             self._auto_window.append_log(
                 f"=== 啟動自動翻譯：count={count} until_last={until_last} "
                 f"skip_existing={skip_existing} "
+                f"group_by_series={self._auto_translate_group_by_series}"
+                f"{('（' + series_folder + '）') if series_folder else ''} "
                 f"url_list={len(url_list or [])} "
                 f"max_per_session={max_per_session} ===")
         self.show_status("⏳ 自動翻譯啟動中…", "#17a2b8")
@@ -1923,6 +1932,8 @@ class MainWindow(QMainWindow):
                     fetch_auto_fill_title=self._fetch_auto_fill_title,
                     until_last=until_last,
                     skip_existing=skip_existing,
+                    group_by_series=self._auto_translate_group_by_series,
+                    series_folder=series_folder,
                     url_list=url_list,
                     stop_event=stop_event,
                     progress=_progress,
@@ -2392,6 +2403,8 @@ class MainWindow(QMainWindow):
             auto_translate_count=self._auto_translate_count,
             auto_translate_until_last=self._auto_translate_until_last,
             auto_translate_skip_existing=self._auto_translate_skip_existing,
+            auto_translate_group_by_series=(
+                self._auto_translate_group_by_series),
             auto_translate_append_mode=self._auto_translate_append_mode,
             translate_backend=self._translate_backend,
             api_provider=self._api_provider,
@@ -2504,6 +2517,8 @@ class MainWindow(QMainWindow):
             cache.auto_translate_skip_existing)
         self._auto_translate_append_mode = bool(
             getattr(cache, "auto_translate_append_mode", False))
+        self._auto_translate_group_by_series = bool(
+            getattr(cache, "auto_translate_group_by_series", False))
         self._translate_backend = str(cache.translate_backend or "browser")
         self._api_provider = str(getattr(cache, "api_provider", "gemini") or "gemini")
         self._gemini_api_model = str(

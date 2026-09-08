@@ -2206,3 +2206,76 @@ def extract_work_title(title: str) -> str:
     t = _SITE_PIPE_SUFFIX_RE.sub('', t)
     t = _TITLE_TAG_RE.sub('', t)
     return t.strip(' 　\t')
+
+
+# ── 作品名主體（去話數）──
+# 話數模式：標題出現這些字樣即代表其後是「第幾話」而非作品名的一部分，
+# 在最早出現處截斷即得作品名主體。網址讀取面板的標題按鈕（aa_url_fetch_qt
+# 的 _normalize_title_for_filter）與自動翻譯的作品資料夾名共用此清單，
+# 避免兩處的話數判定各自演化而走鐘。
+TITLE_CHAPTER_RES = [
+    re.compile(r'第\s*[0-9０-９〇零一二三四五六七八九十百千]+\s*話'),
+    re.compile(r'その\s*[0-9０-９〇零一二三四五六七八九十百千]+'),
+    re.compile(r'番外編\s*[0-9０-９〇零一二三四五六七八九十百千]*'),
+    re.compile(r'後日談\s*[0-9０-９〇零一二三四五六七八九十百千]*'),
+    re.compile(r'[0-9０-９]+\s*話'),
+]
+# 標題開頭／尾端的 tag 群（【...】／[...]）
+_TITLE_LEAD_TAGS_RE = re.compile(r'^(?:[【\[][^】\]]*[】\]][\s　]*)+')
+_TITLE_TAIL_TAGS_RE = re.compile(r'(?:[\s　]*[【\[][^】\]]*[】\]])+\s*$')
+# 話數截斷後殘留在尾端的分隔符號（含全形）。刻意不含「？！」等語氣符號，
+# 那是作品名的一部分（例：「ご注文はうさぎですか？」）。
+_TITLE_TAIL_SEP_RE = re.compile(r'[\s　\t\-–—ー・~〜:：,、。．,]+$')
+# 支線標記：話數截斷後殘留在尾端的「IF／外伝／番外編…」。
+# **必須前有空白分隔**才視為標記，避免誤砍作品名內含這些字的情形
+# （例：「やる夫の番外地」不該被砍成「やる夫の」）。
+_SERIES_BRANCH_TAIL_RE = re.compile(
+    r'[\s　]+(?:IF|If|if|ＩＦ|外伝|外編|番外編|番外|後日談|幕間|短編|SS|ＳＳ'
+    r'|前編|後編|中編|続編|続)$'
+)
+
+
+def extract_series_folder_name(title: str) -> str:
+    """把頁面標題收斂成「作品名主體」，供自動翻譯的作品資料夾名使用。
+
+    與 ``extract_work_title`` 的差別：後者只去站名與標籤、**保留話數**，
+    因此每話結果都不同（「…　第13話」「…　第14話」），不能拿來當資料夾名，
+    否則一話一個資料夾。本函式在話數處截斷，使同作品各話收斂到同一個名字。
+
+    處理順序：
+      1. ``extract_work_title``（去站名／dash 尾綴／已知【...】標籤）
+      2. 去開頭的 【...】／[...] tag 群
+      3. 在第一個話數模式處截斷（第N話／そのN／番外編N／後日談N／N話）
+      4. 去尾端的 tag 群與殘留分隔符號
+      5. 去尾端支線標記（IF／外伝／番外編…，需前有空白分隔）——
+         使 IF／番外編等支線與本篇歸入同一個資料夾
+      6. 去前後空白（含全形）
+
+    算不出名字（例如標題本身就只有話數）時回傳空字串，由呼叫端決定 fallback。
+
+    >>> extract_series_folder_name('戦車は女の嗜み【ガルパン】 第1話 許せねぇ')
+    '戦車は女の嗜み'
+    >>> extract_series_folder_name('乙女ゲー世界はモブに厳しい世界です　IF　第13話')
+    '乙女ゲー世界はモブに厳しい世界です'
+    """
+    if not title:
+        return ''
+    t = extract_work_title(title)
+    t = _TITLE_LEAD_TAGS_RE.sub('', t)
+    earliest = len(t)
+    for pat in TITLE_CHAPTER_RES:
+        m = pat.search(t)
+        if m and m.start() < earliest:
+            earliest = m.start()
+    if earliest < len(t):
+        t = t[:earliest]
+    t = _TITLE_TAIL_TAGS_RE.sub('', t)
+    t = _TITLE_TAIL_SEP_RE.sub('', t)
+    # 支線標記可能連續出現（例：「…　IF　番外」），砍到不再變動為止
+    while True:
+        stripped = _SERIES_BRANCH_TAIL_RE.sub('', t)
+        stripped = _TITLE_TAIL_SEP_RE.sub('', stripped)
+        if stripped == t:
+            break
+        t = stripped
+    return t.strip(' 　\t')

@@ -134,17 +134,6 @@ class AutoTranslatePanel(QWidget):
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("起始話的網址")
         url_hl.addWidget(self.url_edit, 1)
-        # 網址讀取：與首頁「🌐 網址讀取」同一個面板（貼網址抓取／看關聯記事／
-        # 挑要從哪一話開始）。走 MainWindow._open_url_fetch_from_auto()，與導覽列
-        # 「🌐 網址記錄」鈕同一個入口——返回時回到本面板，並把選定的網址帶回
-        # 「起始網址」（`return_from_url_fetch` → `refresh_from_main`）。
-        self.btn_url_fetch = QPushButton("🌐 網址讀取")
-        self.btn_url_fetch.setToolTip(
-            "開啟網址讀取面板（與首頁「🌐 網址讀取」相同功能）：" + chr(10) +
-            "可貼上網址抓取、查看關聯記事，挑選要從哪一話開始。" + chr(10) +
-            "按「← 返回」會回到自動翻譯，並把選定的網址帶回「起始網址」。")
-        self.btn_url_fetch.clicked.connect(self._main._open_url_fetch_from_auto)
-        url_hl.addWidget(self.btn_url_fetch)
         # 手動網址清單：關聯記事尚未支援的站台，可自行貼上整批網址（一行一個）。
         # 清單非空時整批完全照清單跑，本欄位（起始網址）本次忽略。
         self._url_list_text = ""
@@ -989,7 +978,7 @@ class AutoTranslatePanel(QWidget):
         for w in (self.url_edit, self.count_spin, self.until_last,
                   self.gem_edit, self.model_combo, self.max_session_spin,
                   self.doc_title_edit, self.out_edit, self.skip_existing_cb,
-                  self.btn_url_fetch, self.btn_url_list, self.group_by_series_cb,
+                  self.btn_url_list, self.group_by_series_cb,
                   *self._backend_btns.values()):
             w.setEnabled(not running)
         # 作品資料夾欄位：執行中一律鎖；結束後回到「依勾選狀態」

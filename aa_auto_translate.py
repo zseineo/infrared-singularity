@@ -132,6 +132,7 @@ class AutoResult:
     stopped: bool = False                           # 是否被使用者手動停止
     reached_end: bool = False                       # 是否因為沒有下一話而結束
     model_mismatch: bool = False                    # 是否因模型與要求不符而中止
+    titles: dict = field(default_factory=dict)      # {網址: 該網址讀取到的名稱（頁面標題）}
 
 
 # ── URL 快取（沿用 aa_main_qt 的 %TEMP%/aa_url_cache/<md5>.html 格式）──
@@ -510,15 +511,48 @@ def _record_url_history(sm, url: str, page_title: str, nav_links: list,
         log(f"  ⚠️ 寫入網址讀取紀錄失敗（不影響翻譯）：{e}")
 
 
-def _next_chapter_url(nav_links: list) -> str:
-    """從關聯連結找「下一話」的 URL（邏輯同 aa_main_qt._fetch_adjacent_chapter）。"""
+def format_url_with_title(url: str, titles: 'dict | None') -> str:
+    """總結行用的「網址（名稱）」格式；沒有名稱時只回網址。
+
+    `titles` 為 `AutoResult.titles`（網址 → 該網址讀取到的頁面標題）。總結列出的是
+    「沒有被翻譯的網址」，光看網址（如 `?p=8210`）分不出是哪一話，故一併帶出名稱。
+    """
+    title = ((titles or {}).get(url) or "").strip()
+    return f"{url}（{title}）" if title and title != url else url
+
+
+def _next_chapter_url(nav_links: list) -> 'tuple[str, str]':
+    """從關聯連結找「下一話」，回傳 `(URL, 標題)`（邏輯同 aa_main_qt._fetch_adjacent_chapter）。
+
+    標題取自關聯連結本身，讓「還沒抓過的下一話」在總結裡也顯示得出名稱。
+    """
     if not nav_links:
-        return ""
+        return "", ""
     cur = next((i for i, lk in enumerate(nav_links)
                 if lk.get("is_current")), -1)
     if cur < 0 or cur + 1 >= len(nav_links):
-        return ""
-    return nav_links[cur + 1].get("url") or ""
+        return "", ""
+    nxt = nav_links[cur + 1]
+    return (nxt.get("url") or ""), (nxt.get("title") or "")
+
+
+def _fill_titles_from_history(result: AutoResult, url_history: list) -> None:
+    """總結前補上仍然缺名稱的網址：從讀取紀錄（本次啟動時載入的快照）回查。
+
+    涵蓋「這次根本沒抓成功（抓取階段就 ChapterError）」或清單模式中未跑到的網址 ——
+    只要以前讀過就有名稱可顯示；沒讀過就維持只顯示網址。
+    """
+    wanted = {u for u, _ in result.failed} | {u for u, _ in result.skipped}
+    wanted |= {result.pending_url, result.next_url}
+    wanted = {u for u in wanted if u and u not in result.titles}
+    if not wanted:
+        return
+    for entry in url_history or []:
+        u = entry.get("url")
+        if u in wanted:
+            title = (entry.get("title") or "").strip()
+            if title:
+                result.titles[u] = title
 
 
 # ── 主流程 ──
@@ -741,6 +775,9 @@ def run_auto_translate(
                 break
             # 讀過的網址寫入讀取紀錄（與手動流程一致）
             _record_url_history(sm, url, page_title, nav_links, source, log)
+            # 記下這一話的名稱，供總結顯示（失敗／跳過／接續的網址才分得出是哪一話）
+            if page_title:
+                result.titles[url] = page_title
             # 1.4) 依作品名分資料夾：用第一話的標題定一次，之後各話沿用。
             #      放在跳過判定之前，確保「已存在同名檔」看的是子資料夾。
             _decide_series_dir(page_title)
@@ -748,7 +785,9 @@ def run_auto_translate(
             if urls:
                 next_url = urls[i] if i < len(urls) else ""
             else:
-                next_url = _next_chapter_url(nav_links)
+                next_url, next_title = _next_chapter_url(nav_links)
+                if next_url and next_title:
+                    result.titles.setdefault(next_url, next_title)
 
             # 1.5) 若已有同名檔則跳過（重跑批次時略過已完成的話、省 API 額度）。
             #      檢查用「不含碰撞序號」的檔名主體，因此判定的是「這一話本身」是否
@@ -855,6 +894,7 @@ def run_auto_translate(
 
     processed = len(result.done) + len(result.failed) + len(result.skipped)
     result.remaining = 0 if until_last else max(0, total - processed)
+    _fill_titles_from_history(result, cache.url_history)
     if print_summary:
         _print_summary(result, log)
     return result
@@ -868,20 +908,22 @@ def _print_summary(result: AutoResult, log: Callable[[str], None]) -> None:
     if result.failed:
         log(f"失敗：{len(result.failed)} 話")
         for u, reason in result.failed:
-            log(f"  ❌ {u} — {reason}")
+            log(f"  ❌ {format_url_with_title(u, result.titles)} — {reason}")
     if result.skipped:
         log(f"跳過（已存在同名檔）：{len(result.skipped)} 話")
         for u, fn in result.skipped:
-            log(f"  ⏭️ {u} — {fn}")
+            log(f"  ⏭️ {format_url_with_title(u, result.titles)} — {fn}")
     if result.quota_paused:
         log("⏸️ 因 Gemini 額度上限暫停。")
-        log(f"   待額度恢復後，用此網址當 --url 接續：{result.pending_url}")
+        log("   待額度恢復後，用此網址當 --url 接續："
+            + format_url_with_title(result.pending_url, result.titles))
         if result.remaining > 0:
             log(f"   尚餘約 {result.remaining} 話未翻。")
     if result.stopped:
         log("⏹️ 已被手動停止。")
         if result.pending_url:
-            log(f"   要接續，可用此網址當 --url：{result.pending_url}")
+            log("   要接續，可用此網址當 --url："
+                + format_url_with_title(result.pending_url, result.titles))
     if result.reached_end:
         log("🏁 已翻到最後一話。")
     if result.model_mismatch:

@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.24"
+APP_VERSION = "2.25"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -814,7 +814,7 @@ class MainWindow(QMainWindow):
         self._pad_space_count: int = 2
         self._save_timer: QTimer | None = None
         self._url_fetch_win = None  # UrlFetchWindow lazy-init（in-process）
-        self._url_fetch_from_auto = False  # 網址讀取是否由自動翻譯「網址記錄」鈕進入
+        self._url_fetch_from_auto = False  # 網址讀取是否由自動翻譯「網址讀取」鈕進入
         self._saved_glossary_lines = 0
         self._saved_glossary_temp_lines = 0
         self._saved_filter_lines = 0
@@ -959,16 +959,16 @@ class MainWindow(QMainWindow):
         self._nav_conn_btn.hide()
         hl.addWidget(self._nav_conn_btn)
 
-        # 網址記錄鈕：僅自動翻譯面板顯示，切到網址讀取面板挑/換網址，返回回到自動翻譯。
-        self._nav_history_btn = _make_btn("🌐 網址記錄", "#0d6efd", "#0b5ed7",
-                                          font=_ui_font(11), width=100)
-        self._nav_history_btn.setFixedHeight(28)
-        self._nav_history_btn.setToolTip(
-            "切到網址讀取面板挑選／切換網址；按返回會回到自動翻譯，"
-            "並把選定的網址帶回「起始網址」")
-        self._nav_history_btn.clicked.connect(self._open_url_fetch_from_auto)
-        self._nav_history_btn.hide()
-        hl.addWidget(self._nav_history_btn)
+        # 網址讀取鈕：僅自動翻譯面板顯示，切到網址讀取面板挑/換網址，返回回到自動翻譯。
+        self._nav_url_fetch_btn = _make_btn("🌐 網址讀取", "#0d6efd", "#0b5ed7",
+                                            font=_ui_font(11), width=100)
+        self._nav_url_fetch_btn.setFixedHeight(28)
+        self._nav_url_fetch_btn.setToolTip(
+            "開啟網址讀取面板（與首頁「🌐 網址讀取」相同）挑選／切換網址；"
+            "按返回會回到自動翻譯，並把選定的網址帶回「起始網址」")
+        self._nav_url_fetch_btn.clicked.connect(self._open_url_fetch_from_auto)
+        self._nav_url_fetch_btn.hide()
+        hl.addWidget(self._nav_url_fetch_btn)
 
         hl.addStretch()
         return w
@@ -998,7 +998,7 @@ class MainWindow(QMainWindow):
             self.show_translate_panel()
 
     def _open_url_fetch_from_auto(self) -> None:
-        """自動翻譯「網址記錄」鈕：進入網址讀取面板，並記住返回時要回自動翻譯。"""
+        """自動翻譯「網址讀取」鈕：進入網址讀取面板，並記住返回時要回自動翻譯。"""
         self.open_url_fetch_qt()
         self._url_fetch_from_auto = True
 
@@ -1225,7 +1225,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(2)
         self._nav_bar.show()
         self._nav_conn_btn.hide()
-        self._nav_history_btn.hide()
+        self._nav_url_fetch_btn.hide()
         self._action_bar.hide()
 
     def _on_batch_open_file(self, file_path: str, line: int, folder: str) -> None:
@@ -1780,7 +1780,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(4)
         self._nav_bar.show()
         self._nav_conn_btn.show()
-        self._nav_history_btn.show()
+        self._nav_url_fetch_btn.show()
         self._action_bar.hide()
 
     def _toggle_auto_conn_panel(self) -> None:
@@ -1975,34 +1975,39 @@ class MainWindow(QMainWindow):
                     or getattr(result, "next_url", ""))
         if self._auto_window is not None and fill_url:
             self._auto_window.set_start_url(fill_url)
+        # 未翻譯的網址一併顯示「該網址讀取到的名稱」（頁面標題），
+        # 否則只看 `?p=8210` 這類網址分不出是哪一話。
+        from aa_auto_translate import format_url_with_title as _url_name
+        titles = getattr(result, "titles", {})
         lines = [f"成功翻譯 {len(result.done)} 話。"]
         for p in result.done:
             lines.append(f"  ✅ {p}")
         if result.failed:
             lines.append(f"失敗／跳過 {len(result.failed)} 話：")
-            lines += [f"  ❌ {u} — {why}" for u, why in result.failed]
+            lines += [f"  ❌ {_url_name(u, titles)} — {why}"
+                      for u, why in result.failed]
         skipped = getattr(result, "skipped", [])
         if skipped:
             lines.append(f"跳過（已存在同名檔）{len(skipped)} 話：")
-            lines += [f"  ⏭️ {u} — {fn}" for u, fn in skipped]
+            lines += [f"  ⏭️ {_url_name(u, titles)} — {fn}" for u, fn in skipped]
         if result.reached_end:
             lines.append("")
             lines.append("🏁 已翻到最後一話。")
         if getattr(result, "next_url", ""):
             lines.append("")
             lines.append("▶ 已達設定話數；下一話網址已帶入「起始網址」，可直接按開始接續：")
-            lines.append(result.next_url)
+            lines.append(_url_name(result.next_url, titles))
         if result.quota_paused:
             lines.append("")
             lines.append("⏸️ 因撞到 Gemini 額度上限而暫停。")
             lines.append("待額度恢復後，用下列網址當起始網址接續：")
-            lines.append(result.pending_url)
+            lines.append(_url_name(result.pending_url, titles))
         if result.stopped:
             lines.append("")
             lines.append("⏹️ 已手動停止。")
             if result.pending_url:
                 lines.append("要接續，用下列網址當起始網址：")
-                lines.append(result.pending_url)
+                lines.append(_url_name(result.pending_url, titles))
         if result.model_mismatch:
             lines.append("")
             lines.append("🛑 偵測到 Gemini 模型與要求不符，已中止整批。")
@@ -2064,7 +2069,7 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(3)
         self._nav_bar.show()
         self._nav_conn_btn.hide()
-        self._nav_history_btn.hide()
+        self._nav_url_fetch_btn.hide()
         self._action_bar.hide()
 
     def _url_fetch_win_visible(self) -> bool:

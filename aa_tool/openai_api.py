@@ -87,7 +87,7 @@ _MAX_WAIT_ROUNDS = 3
 
 # 伺服器暫時性錯誤（5xx）：等待後重試整輪，不視為金鑰問題、不進冷卻
 _TRANSIENT_HTTP = {500, 502, 503, 504}
-_BUSY_RETRY_WAIT = 120.0
+_BUSY_RETRY_WAIT = 90.0
 _MAX_BUSY_RETRIES = 5
 
 

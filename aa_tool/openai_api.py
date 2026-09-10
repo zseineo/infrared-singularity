@@ -77,7 +77,8 @@ API_PROVIDERS: dict[str, dict] = {
 
 # 單次 API 請求的讀取逾時（秒）。此為未設定時的預設值；使用者可在「連線設定」
 # 調整（cache.api_timeout），慢速／長輸出的模型（如 LongCat 這類大型模型跑
-# 數百行 AA 翻譯）常需要更長時間，逾時會讓整話被跳過。
+# 數百行 AA 翻譯）常需要更長時間；逾時會比照 5xx 等待後重試（v2.29），
+# 但若這一話太長而每次都逾時，就會一直重試，須調高此值。
 _TIMEOUT = 600
 _ANTHROPIC_VERSION = "2023-06-01"
 _ANTHROPIC_MAX_TOKENS = 32000  # Anthropic 必填的輸出上限（避免長章節被截斷）
@@ -87,7 +88,7 @@ _RPM_COOLDOWN = 60.0
 _ALL_COOLDOWN_MAX_WAIT = 120.0
 _MAX_WAIT_ROUNDS = 3
 
-# 伺服器暫時性錯誤（5xx）：等待後重試整輪，不視為金鑰問題、不進冷卻
+# 伺服器暫時性錯誤（5xx）與請求逾時：等待後重試整輪，不視為金鑰問題、不進冷卻
 _TRANSIENT_HTTP = {500, 502, 503, 504}
 _BUSY_RETRY_WAIT = 90.0
 # 與 gemini_api 對齊：暫時性錯誤不放棄該話，無限重試；每滿 N 次多等一段長時間。
@@ -96,7 +97,7 @@ _BUSY_LONG_WAIT_EVERY = 5
 
 
 class _ServerBusy(GeminiWebError):
-    """伺服器暫時無法服務（HTTP 5xx）——可等待後重試（僅內部使用）。"""
+    """伺服器暫時無法服務（HTTP 5xx）或請求逾時——可等待後重試（僅內部使用）。"""
 
 
 def provider_scheme(provider: str) -> str:
@@ -207,10 +208,9 @@ class ChatApiSession:
                     extra = (f"，已連續 {busy_retries} 次 → 多等 "
                              f"{int(_BUSY_LONG_WAIT / 60)} 分鐘" if long_wait else "")
                     self._log(
-                        f"  伺服器忙碌/暫時無法服務（{e}）→ {int(wait)}s "
-                        f"後重試（第 {busy_retries} 次{extra}）…")
+                        f"  {e} → {int(wait)}s 後重試（第 {busy_retries} 次{extra}）…")
                     if not self._sleep_with_stop(wait):
-                        raise GeminiAborted("等待伺服器恢復(5xx)時收到停止指令")
+                        raise GeminiAborted("等待伺服器恢復(5xx／逾時)時收到停止指令")
                     busy_wait = True
                     break
             if busy_wait:
@@ -238,11 +238,12 @@ class ChatApiSession:
                                    proxy=self._proxy) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except TimeoutError as e:
-            # socket 讀取逾時（"The read operation timed out"）。原訊息看不出可調整，
-            # 這裡明說目前值與調整位置，避免使用者以為是模型壞掉。
-            raise GeminiWebError(
-                f"API 回應逾時（超過 {self._timeout} 秒未收到完整回覆）。"
-                f"模型較慢或這一話很長時可到「連線設定 → API 逾時」調高") from e
+            # socket 讀取逾時（"The read operation timed out"）。多半是伺服器高負載時
+            # 排隊變慢 → 比照 5xx 等待後重試，不中斷整批。原訊息看不出可調整，
+            # 這裡明說目前值與調整位置：若這一話太長而每次都逾時，要調高設定。
+            raise _ServerBusy(
+                f"API 回應逾時（超過 {self._timeout} 秒未收到完整回覆；"
+                f"若每次都逾時，可到「連線設定 → API 逾時」調高）") from e
         except urllib.error.HTTPError as e:
             err_body = ""
             try:
@@ -258,6 +259,9 @@ class ChatApiSession:
                     f"HTTP {e.code}（伺服器忙碌/暫時無法服務）：{err_body[:200]}") from e
             raise GeminiWebError(f"API 錯誤 HTTP {e.code}：{err_body[:300]}") from e
         except urllib.error.URLError as e:
+            if isinstance(e.reason, TimeoutError):
+                # 連線／TLS 握手逾時（urllib 包成 URLError）→ 同上，等待後重試
+                raise _ServerBusy(f"API 連線逾時：{e.reason}") from e
             raise GeminiWebError(f"API 連線失敗：{e}") from e
         return self._extract_text(payload)
 

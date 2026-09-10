@@ -81,7 +81,7 @@ _RPM_COOLDOWN = 60.0          # 每分鐘速率上限的預設冷卻（無伺服
 _ALL_COOLDOWN_MAX_WAIT = 120.0
 _MAX_WAIT_ROUNDS = 3          # 「全部冷卻→等待→重試」最多幾輪，避免反覆 ping-pong
 
-# 伺服器暫時性錯誤（5xx，如 503 高負載）：等待後重試，不視為金鑰問題、不進冷卻
+# 伺服器暫時性錯誤（5xx，如 503 高負載）與請求逾時：等待後重試，不視為金鑰問題、不進冷卻
 _TRANSIENT_HTTP = {500, 502, 503, 504}
 _BUSY_RETRY_WAIT = 90.0      # 503 等暫時性錯誤的重試間隔（1.5 分鐘）
 # 暫時性錯誤**不放棄該話**（伺服器高負載是外部狀況，跳過只會平白少一話）：
@@ -156,7 +156,7 @@ def _prune_quota(data: dict[str, dict[str, str]],
 
 
 class GeminiServerBusy(GeminiWebError):
-    """伺服器暫時無法服務（HTTP 5xx，如 503 高負載）——可等待後重試。"""
+    """伺服器暫時無法服務（HTTP 5xx，如 503 高負載）或請求逾時——可等待後重試。"""
 
 
 class GeminiApiSession:
@@ -258,7 +258,7 @@ class GeminiApiSession:
                             f"冷卻約 {int(cooldown)}s，換下一把…")
                     continue
                 except GeminiServerBusy as e:
-                    # 503 等暫時性錯誤：伺服器高負載，非金鑰問題、不進冷卻。
+                    # 503 等暫時性錯誤／請求逾時：伺服器高負載，非金鑰問題、不進冷卻。
                     # 不設重試上限、不跳過該話；每滿 _BUSY_LONG_WAIT_EVERY 次多等
                     # 一段長時間。要中止就按停止（等待期間會檢查 stop_event）。
                     busy_retries += 1
@@ -267,10 +267,9 @@ class GeminiApiSession:
                     extra = (f"，已連續 {busy_retries} 次 → 多等 "
                              f"{int(_BUSY_LONG_WAIT / 60)} 分鐘" if long_wait else "")
                     self._log(
-                        f"  伺服器忙碌/暫時無法服務（{e}）→ {int(wait)}s "
-                        f"後重試（第 {busy_retries} 次{extra}）…")
+                        f"  {e} → {int(wait)}s 後重試（第 {busy_retries} 次{extra}）…")
                     if not self._sleep_with_stop(wait):
-                        raise GeminiAborted("等待伺服器恢復(5xx)時收到停止指令")
+                        raise GeminiAborted("等待伺服器恢復(5xx／逾時)時收到停止指令")
                     busy_wait = True
                     break  # 跳出 for，重新繞一圈重試
             if busy_wait:
@@ -312,9 +311,11 @@ class GeminiApiSession:
                                    proxy=self._proxy) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except TimeoutError as e:
-            raise GeminiWebError(
-                f"API 回應逾時（超過 {self._timeout} 秒未收到完整回覆）。"
-                f"模型較慢或這一話很長時可到「連線設定 → API 逾時」調高") from e
+            # 讀取逾時：多半是伺服器高負載時排隊變慢 → 比照 5xx 等待後重試，
+            # 不中斷整批。訊息保留調整位置：若這一話太長而每次都逾時，要調高設定。
+            raise GeminiServerBusy(
+                f"API 回應逾時（超過 {self._timeout} 秒未收到完整回覆；"
+                f"若每次都逾時，可到「連線設定 → API 逾時」調高）") from e
         except urllib.error.HTTPError as e:
             body = ""
             try:
@@ -333,6 +334,9 @@ class GeminiApiSession:
                     f"HTTP {e.code}（伺服器忙碌/暫時無法服務）：{body[:200]}") from e
             raise GeminiWebError(f"API 錯誤 HTTP {e.code}：{body[:300]}") from e
         except urllib.error.URLError as e:
+            if isinstance(e.reason, TimeoutError):
+                # 連線／TLS 握手逾時（urllib 包成 URLError）→ 同上，等待後重試
+                raise GeminiServerBusy(f"API 連線逾時：{e.reason}") from e
             raise GeminiWebError(f"API 連線失敗：{e}") from e
         return self._extract_text(payload)
 

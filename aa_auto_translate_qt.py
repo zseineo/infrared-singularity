@@ -437,8 +437,8 @@ class AutoTranslatePanel(QWidget):
         self.api_timeout_spin.setSuffix(" 秒")
         self.api_timeout_spin.setToolTip(
             "單次 API 請求最多等多久才判定失敗（預設 600 秒）。\n"
-            "Log 出現「API 回應逾時」或「The read operation timed out」\n"
-            "→ 代表模型還在跑就被判定失敗、整話被跳過，請把此值調高。\n"
+            "逾時會自動等待後重試（與伺服器忙碌相同）；但若 Log 每次都出現\n"
+            "「API 回應逾時」→ 代表這一話太長、模型跑不完，請把此值調高。\n"
             "慢速／長輸出的模型翻長篇 AA 時可能需要 1200 秒以上。")
         form.addRow("API 逾時：", self.api_timeout_spin)
 

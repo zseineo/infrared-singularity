@@ -211,7 +211,8 @@ class AppCache:
     # ChatApiSession（OpenAI／Anthropic 相容）。
     api_provider: str = "gemini"
     # 單次 API 請求的讀取逾時（秒）。慢速／長輸出的模型（大型模型翻數百行 AA）
-    # 常會超過預設值而被判定失敗、整話跳過；由「連線設定 → API 逾時」調整。
+    # 常會超過預設值而逾時（逾時會等待後重試，每次都逾時就得調高）；
+    # 由「連線設定 → API 逾時」調整。
     # 0 或缺值時各後端沿用自己的預設（openai_api/gemini_api 的 _TIMEOUT）。
     api_timeout: int = 600
     # API 模式用的 Gemini 模型 id（見 aa_tool.gemini_api.API_MODELS）。

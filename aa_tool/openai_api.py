@@ -32,7 +32,9 @@ import urllib.request
 from . import net_proxy
 from typing import Callable
 
-from .gemini_web import GeminiAborted, GeminiQuotaExceeded, GeminiWebError
+from .gemini_web import (
+    GeminiAborted, GeminiContentBlocked, GeminiQuotaExceeded, GeminiWebError,
+)
 
 # ── 供應商註冊表 ──
 # scheme：請求／回應格式；base_url：預設端點（custom 由使用者填）；
@@ -299,6 +301,9 @@ class ChatApiSession:
                 if isinstance(b, dict) and b.get("type", "text") == "text").strip()
             if not text:
                 stop = payload.get("stop_reason", "")
+                if stop == "refusal":
+                    # 模型依安全政策拒答 → 視同被審查
+                    raise GeminiContentBlocked(f"API 拒絕回應（stop_reason={stop}）")
                 raise GeminiWebError(f"API 回應為空（stop_reason={stop}）")
             return text
         # openai
@@ -309,6 +314,10 @@ class ChatApiSession:
         text = (msg.get("content") or "").strip()
         if not text:
             finish = choices[0].get("finish_reason", "")
+            if finish == "content_filter":
+                # 供應商的內容過濾擋下回應 → 視同被審查
+                raise GeminiContentBlocked(
+                    f"API 回應被內容過濾擋下（finish_reason={finish}）")
             raise GeminiWebError(f"API 回應為空（finish_reason={finish}）")
         return text
 

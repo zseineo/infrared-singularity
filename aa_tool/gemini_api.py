@@ -39,7 +39,9 @@ from . import net_proxy
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from .gemini_web import GeminiAborted, GeminiQuotaExceeded, GeminiWebError
+from .gemini_web import (
+    GeminiAborted, GeminiContentBlocked, GeminiQuotaExceeded, GeminiWebError,
+)
 
 # 可選模型（依使用者指定）。下拉選單與此清單一致。
 API_MODELS = [
@@ -88,6 +90,9 @@ _BUSY_RETRY_WAIT = 90.0      # 503 等暫時性錯誤的重試間隔（1.5 分�
 # 每 90s 空敲一次。
 _BUSY_LONG_WAIT = 600.0      # 每滿 N 次重試後額外等待（10 分鐘）
 _BUSY_LONG_WAIT_EVERY = 5    # 每幾次重試觸發一次上面的額外等待
+
+# 候選回覆因安全政策被擋時的 finishReason（此時 parts 為空）→ 視同被審查
+_BLOCKED_FINISH_REASONS = frozenset({"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"})
 
 # 從 retryDelay（"30s" / "1.5s"）抽秒數
 _DURATION_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE)
@@ -499,9 +504,18 @@ class GeminiApiSession:
         cands = payload.get("candidates", [])
         if not cands:
             fb = payload.get("promptFeedback", {})
+            if fb.get("blockReason"):
+                # 請求本身被安全過濾擋下（如 PROHIBITED_CONTENT）→ 視同被審查
+                raise GeminiContentBlocked(f"API 無回應內容（可能被安全過濾：{fb}）")
             raise GeminiWebError(f"API 無回應內容（可能被安全過濾：{fb}）")
-        parts = cands[0].get("content", {}).get("parts", [])
+        cand = cands[0]
+        parts = cand.get("content", {}).get("parts", [])
         text = "".join(p.get("text", "") for p in parts).strip()
         if not text:
+            finish = cand.get("finishReason", "")
+            if finish in _BLOCKED_FINISH_REASONS:
+                # 回應在輸出階段被安全過濾擋下 → 視同被審查
+                raise GeminiContentBlocked(
+                    f"API 回應被安全過濾擋下（finishReason={finish}）")
             raise GeminiWebError("API 回應為空")
         return text

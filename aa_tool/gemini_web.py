@@ -43,6 +43,16 @@ class GeminiAborted(GeminiWebError):
     """等待過程中收到外部 stop_event，使用者主動中止。"""
 
 
+class GeminiContentBlocked(GeminiWebError):
+    """API 端的內容安全過濾擋下了這次請求或回應。
+
+    例：Gemini `promptFeedback.blockReason: PROHIBITED_CONTENT`、候選回覆
+    `finishReason: SAFETY`；OpenAI 相容 `finish_reason: content_filter`；
+    Anthropic `stop_reason: refusal`。本質上等同「被審查」——重送同樣內容幾乎
+    一定再被擋，協調器比照 `CensoredResponse` 跳過該話、續下一話，不中斷整批。
+    """
+
+
 def model_matches(detected: str, required: str) -> bool:
     """判斷讀到的模型字串是否符合要求。
 

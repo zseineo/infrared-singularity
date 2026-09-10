@@ -31,8 +31,8 @@ from aa_tool import app_paths, constants, html_io, original_cache
 from aa_tool import settings_manager
 from aa_tool import text_extraction, translation_engine, url_fetcher
 from aa_tool.gemini_web import (
-    GeminiAborted, GeminiModelMismatch, GeminiQuotaExceeded, GeminiWebError,
-    GeminiWebSession,
+    GeminiAborted, GeminiContentBlocked, GeminiModelMismatch, GeminiQuotaExceeded,
+    GeminiWebError, GeminiWebSession,
 )
 
 # 單次送給 Gemini 的最大提取行數；超過則分段送出後合併。
@@ -871,6 +871,12 @@ def run_auto_translate(
                 result.failed.append((url, f"可能被審查：{e}"))
                 log(f"  🚫 {e} → 跳過此話，繼續下一話。")
                 url = next_url
+            except GeminiContentBlocked as e:
+                # API 端安全過濾擋下（如 blockReason: PROHIBITED_CONTENT）＝被審查，
+                # 重送幾乎一定再被擋 → 比照 CensoredResponse 跳過該話、續下一話。
+                result.failed.append((url, f"可能被審查：{e}"))
+                log(f"  🚫 {e} → 跳過此話，繼續下一話。")
+                url = next_url
             except UntranslatedResponse as e:
                 result.failed.append((url, f"疑似未翻譯：{e}"))
                 log(f"  ⚠️ {e} → 跳過此話（不存檔），繼續下一話。")
@@ -887,9 +893,10 @@ def run_auto_translate(
                 log("  撞到 Gemini 額度上限，暫停。已完成的話皆已存檔。")
                 break
             except Exception as e:  # noqa: BLE001 — 未預期錯誤：記錄後中斷整批
-                # v2.27：原本是「跳過此話續跑」，改為中斷。非 5xx 的 API 錯誤
-                # （安全過濾／空回應）、寫檔失敗、程式錯誤等都走這裡，繼續跑下去
+                # v2.27：原本是「跳過此話續跑」，改為中斷。非 5xx、非安全過濾的
+                # API 錯誤（空回應等）、寫檔失敗、程式錯誤等都走這裡，繼續跑下去
                 # 往往整批都失敗，停下來讓使用者處理比默默漏話好。
+                # （安全過濾擋下另走上面的 GeminiContentBlocked，比照審查跳過。）
                 result.failed.append((url, str(e)))
                 result.pending_url = url
                 log(f"  ❌ 失敗：{e} → 中斷整批（此話未完成，可用它當起始網址接續）。")

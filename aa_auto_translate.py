@@ -604,8 +604,8 @@ def run_auto_translate(
     url_list：手動網址清單（一行一個）。非空時**整批完全照清單跑**——第一行即第一話，
         `start_url` 參數本次忽略，下一話也不再從關聯記事推導。供「關聯記事尚未支援」
         的站台臨時使用。話數仍受 count 限制（取 min(count, 清單長度)）；until_last
-        為 True 時跑完整份清單。清單模式下單話抓取失敗不會中斷整批（下一話網址已知），
-        改為跳過該話續下一話。
+        為 True 時跑完整份清單。單話抓取失敗時與一般模式相同，中斷整批並設
+        pending_url（v2.27 前會跳過該話續跑）。
     stop_event：threading.Event；設定後會在話與話之間（及分段之間）中止。
     progress：進度回呼（單一字串參數）；None 時印到 stdout。
     print_summary：是否在結束時透過 `log` 印出 `_print_summary` 總結；
@@ -763,15 +763,16 @@ def run_auto_translate(
                 source, nav_links, page_title, display_title = _fetch_and_parse(
                     url, cfg)
             except ChapterError as e:
-                # 訊息可能含多行診斷：Log 印完整版，失敗清單／總結只留第一行
+                # 抓取／解析失敗一律中斷整批（v2.27：清單模式原本會跳過續跑，現在也
+                # 中斷——「跳過某一話」只保留給 AI 端的疑似審查／疑似未翻譯，抓取層
+                # 的失敗不默默漏話）。訊息可能含多行診斷：Log 印完整版，失敗清單／
+                # 總結只留第一行。
                 result.failed.append((url, str(e).split(chr(10))[0]))
-                if urls:
-                    # 清單模式：下一話網址已知（不靠這一話的關聯記事），可續跑
-                    log(f"  ❌ {e} → 跳過此話，繼續下一話。")
-                    url = urls[i] if i < len(urls) else ""
-                    continue
                 result.pending_url = url  # 這一話未完成 → 供 GUI 回填起始網址接續
-                log(f"  ❌ {e} → 無法取得下一話，中斷。")
+                log(f"  ❌ {e} → 中斷整批（此話未完成，可用它當起始網址接續）。")
+                if urls:
+                    log("  （網址清單模式：清單中這一話之後的網址都還沒處理；"
+                        "要接續請把清單改成從這一話開始。）")
                 break
             # 讀過的網址寫入讀取紀錄（與手動流程一致）
             _record_url_history(sm, url, page_title, nav_links, source, log)
@@ -850,6 +851,12 @@ def run_auto_translate(
                 result.done.append(out_path)
                 log(f"  ✅ 已存檔：{out_path}")
                 url = next_url
+            except ChapterError as e:
+                # 只會是 `_extract` 的「提取結果為空」＝這一話沒有可翻譯的文字
+                # （純 AA／圖片話）。不是工具故障，記錄後跳過續跑，不中斷整批。
+                result.failed.append((url, str(e).split(chr(10))[0]))
+                log(f"  ⏭️ {e} → 跳過此話，繼續下一話。")
+                url = next_url
             except GeminiModelMismatch as e:
                 result.model_mismatch = True
                 result.pending_url = url
@@ -879,10 +886,14 @@ def run_auto_translate(
                 log(f"  ⏸️ {e}")
                 log("  撞到 Gemini 額度上限，暫停。已完成的話皆已存檔。")
                 break
-            except Exception as e:  # noqa: BLE001 — 單話任何錯誤都不該中斷整批
+            except Exception as e:  # noqa: BLE001 — 未預期錯誤：記錄後中斷整批
+                # v2.27：原本是「跳過此話續跑」，改為中斷。非 5xx 的 API 錯誤
+                # （安全過濾／空回應）、寫檔失敗、程式錯誤等都走這裡，繼續跑下去
+                # 往往整批都失敗，停下來讓使用者處理比默默漏話好。
                 result.failed.append((url, str(e)))
-                log(f"  ❌ 失敗：{e} → 跳過此話，繼續下一話。")
-                url = next_url
+                result.pending_url = url
+                log(f"  ❌ 失敗：{e} → 中斷整批（此話未完成，可用它當起始網址接續）。")
+                break
         else:
             # 迴圈跑滿設定話數而自然結束（非 break）→ url 為下一話續接網址，
             # 供 GUI 把它帶回「起始網址」直接接續下一批（已是最後一話時 url 為空）。

@@ -88,7 +88,9 @@ _MAX_WAIT_ROUNDS = 3
 # 伺服器暫時性錯誤（5xx）：等待後重試整輪，不視為金鑰問題、不進冷卻
 _TRANSIENT_HTTP = {500, 502, 503, 504}
 _BUSY_RETRY_WAIT = 90.0
-_MAX_BUSY_RETRIES = 5
+# 與 gemini_api 對齊：暫時性錯誤不放棄該話，無限重試；每滿 N 次多等一段長時間。
+_BUSY_LONG_WAIT = 600.0
+_BUSY_LONG_WAIT_EVERY = 5
 
 
 class _ServerBusy(GeminiWebError):
@@ -198,14 +200,14 @@ class ChatApiSession:
                     continue
                 except _ServerBusy as e:
                     busy_retries += 1
-                    if busy_retries > _MAX_BUSY_RETRIES:
-                        raise GeminiWebError(
-                            f"伺服器暫時性錯誤重試 {_MAX_BUSY_RETRIES} 次仍失敗，"
-                            f"跳過此話：{e}") from e
+                    long_wait = busy_retries % _BUSY_LONG_WAIT_EVERY == 0
+                    wait = _BUSY_RETRY_WAIT + (_BUSY_LONG_WAIT if long_wait else 0.0)
+                    extra = (f"，已連續 {busy_retries} 次 → 多等 "
+                             f"{int(_BUSY_LONG_WAIT / 60)} 分鐘" if long_wait else "")
                     self._log(
-                        f"  伺服器忙碌/暫時無法服務（{e}）→ {int(_BUSY_RETRY_WAIT)}s "
-                        f"後重試（第 {busy_retries}/{_MAX_BUSY_RETRIES} 次）…")
-                    if not self._sleep_with_stop(_BUSY_RETRY_WAIT):
+                        f"  伺服器忙碌/暫時無法服務（{e}）→ {int(wait)}s "
+                        f"後重試（第 {busy_retries} 次{extra}）…")
+                    if not self._sleep_with_stop(wait):
                         raise GeminiAborted("等待伺服器恢復(5xx)時收到停止指令")
                     busy_wait = True
                     break

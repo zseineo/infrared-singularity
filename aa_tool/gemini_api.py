@@ -82,7 +82,12 @@ _MAX_WAIT_ROUNDS = 3          # 「全部冷卻→等待→重試」最多幾輪
 # 伺服器暫時性錯誤（5xx，如 503 高負載）：等待後重試，不視為金鑰問題、不進冷卻
 _TRANSIENT_HTTP = {500, 502, 503, 504}
 _BUSY_RETRY_WAIT = 90.0      # 503 等暫時性錯誤的重試間隔（1.5 分鐘）
-_MAX_BUSY_RETRIES = 5        # 暫時性錯誤最多重試幾次，仍失敗才跳過該話
+# 暫時性錯誤**不放棄該話**（伺服器高負載是外部狀況，跳過只會平白少一話）：
+# 一直等到成功，使用者要中止就按停止（`_sleep_with_stop` 每 0.5s 檢查 stop_event）。
+# 但每累積 _BUSY_LONG_WAIT_EVERY 次就多等 _BUSY_LONG_WAIT，避免長時間高負載時
+# 每 90s 空敲一次。
+_BUSY_LONG_WAIT = 600.0      # 每滿 N 次重試後額外等待（10 分鐘）
+_BUSY_LONG_WAIT_EVERY = 5    # 每幾次重試觸發一次上面的額外等待
 
 # 從 retryDelay（"30s" / "1.5s"）抽秒數
 _DURATION_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE)
@@ -248,17 +253,18 @@ class GeminiApiSession:
                             f"冷卻約 {int(cooldown)}s，換下一把…")
                     continue
                 except GeminiServerBusy as e:
-                    # 503 等暫時性錯誤：伺服器高負載，非金鑰問題、不進冷卻；
-                    # 等待後重試整輪，超過上限才放棄（往外拋 → 協調器跳過該話）。
+                    # 503 等暫時性錯誤：伺服器高負載，非金鑰問題、不進冷卻。
+                    # 不設重試上限、不跳過該話；每滿 _BUSY_LONG_WAIT_EVERY 次多等
+                    # 一段長時間。要中止就按停止（等待期間會檢查 stop_event）。
                     busy_retries += 1
-                    if busy_retries > _MAX_BUSY_RETRIES:
-                        raise GeminiWebError(
-                            f"伺服器暫時性錯誤重試 {_MAX_BUSY_RETRIES} 次仍失敗，"
-                            f"跳過此話：{e}") from e
+                    long_wait = busy_retries % _BUSY_LONG_WAIT_EVERY == 0
+                    wait = _BUSY_RETRY_WAIT + (_BUSY_LONG_WAIT if long_wait else 0.0)
+                    extra = (f"，已連續 {busy_retries} 次 → 多等 "
+                             f"{int(_BUSY_LONG_WAIT / 60)} 分鐘" if long_wait else "")
                     self._log(
-                        f"  伺服器忙碌/暫時無法服務（{e}）→ {int(_BUSY_RETRY_WAIT)}s "
-                        f"後重試（第 {busy_retries}/{_MAX_BUSY_RETRIES} 次）…")
-                    if not self._sleep_with_stop(_BUSY_RETRY_WAIT):
+                        f"  伺服器忙碌/暫時無法服務（{e}）→ {int(wait)}s "
+                        f"後重試（第 {busy_retries} 次{extra}）…")
+                    if not self._sleep_with_stop(wait):
                         raise GeminiAborted("等待伺服器恢復(5xx)時收到停止指令")
                     busy_wait = True
                     break  # 跳出 for，重新繞一圈重試

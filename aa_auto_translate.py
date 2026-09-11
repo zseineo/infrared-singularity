@@ -737,7 +737,8 @@ def run_auto_translate(
 
     # 待補翻列表（v2.30）：伺服器忙碌／逾時連續重試達上限（後端丟
     # GeminiBusyRetriesExhausted）的話先暫時跳過、放進這裡，等下一次翻譯成功
-    # （＝伺服器已恢復）後依序補翻；補翻不佔話數。元素為
+    # （＝伺服器已恢復）後依序補翻；新的話都跑完後則持續補翻到清空（v2.31）。
+    # 補翻不佔話數。元素為
     # (網址, source, display_title, page_title, 話序號)，補翻時不必重抓網頁。
     deferred: list = []
 
@@ -760,24 +761,24 @@ def run_auto_translate(
             log(f"⏹️ {e}，未開始翻譯。")
             return result
         retry_ready = False   # 上一話翻譯成功 → 下一輪先補翻待補翻列表
-        final_pass = False    # 新的話跑完後，是否已對待補翻列表補翻過最後一輪
+        drain_logged = False  # 「新的話已跑完、開始清空列表」的提示只印一次
         i = 0                 # 已開始處理的「新」話數（補翻不計）
         while True:
             if _stopping():
                 result.stopped = True
                 log("⏹️ 已收到停止指令，中止。")
                 break
-            # 上一話翻譯成功（伺服器已恢復）且待補翻列表有東西 → 這一輪先補翻
-            retrying = retry_ready and bool(deferred)
+            # 新的話都跑完了（跑滿話數或沒有下一話）
+            no_more_new = i >= total or not url
+            # 這一輪先補翻的時機：上一話翻譯成功（伺服器已恢復），或新的話已跑完
+            # ——後者持續補翻到列表清空為止（v2.31；要中止就按停止）。
+            retrying = bool(deferred) and (retry_ready or no_more_new)
             retry_ready = False
-            if not retrying and (i >= total or not url):
-                # 新的話都跑完了。待補翻列表還有剩 → 最後再補翻一輪（同樣受重試上限；
-                # 仍失敗就結束，剩下的在迴圈外列入失敗）。
-                if deferred and not final_pass:
-                    final_pass = True
-                    retry_ready = True
-                    log(f"🔁 新的話已跑完，再補翻一次先前暫時跳過的 {len(deferred)} 話…")
-                    continue
+            if no_more_new and retrying and not drain_logged:
+                drain_logged = True
+                log(f"🔁 新的話已跑完，繼續補翻待補翻列表剩下的 {len(deferred)} 話，"
+                    "直到全部完成（要中止請按停止）…")
+            if not retrying and no_more_new:
                 if i >= total:
                     # 跑滿設定話數而結束 → url 為下一話續接網址，供 GUI 把它帶回
                     # 「起始網址」直接接續下一批（已是最後一話時 url 為空）。
@@ -927,7 +928,13 @@ def run_auto_translate(
             except GeminiBusyRetriesExhausted as e:
                 # 伺服器忙碌／逾時重試達上限：外部狀況，不中斷整批也不就此放棄 →
                 # 暫時跳過、放進待補翻列表，下一次翻譯成功（伺服器恢復）後再補翻。
-                if retrying:
+                if retrying and no_more_new:
+                    # 清空列表階段：排到列表最後、先補下一話，避免某一話（例如
+                    # 太長而每次都逾時）卡住其他話。只有一話時就是原地再試。
+                    deferred.append(deferred.pop(0))
+                    log(f"  ⏳ {e} → 伺服器仍未恢復，這話排到待補翻列表最後"
+                        f"（共 {len(deferred)} 話），稍後再試。")
+                elif retrying:
                     log(f"  ⏳ {e} → 伺服器仍未恢復，這話留在待補翻列表"
                         f"（共 {len(deferred)} 話），下一次翻譯成功後再試。")
                 else:

@@ -40,7 +40,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from .gemini_web import (
-    GeminiAborted, GeminiContentBlocked, GeminiQuotaExceeded, GeminiWebError,
+    GeminiAborted, GeminiBusyRetriesExhausted, GeminiContentBlocked,
+    GeminiQuotaExceeded, GeminiWebError,
 )
 
 # 可選模型（依使用者指定）。下拉選單與此清單一致。
@@ -84,12 +85,13 @@ _MAX_WAIT_ROUNDS = 3          # 「全部冷卻→等待→重試」最多幾輪
 # 伺服器暫時性錯誤（5xx，如 503 高負載）與請求逾時：等待後重試，不視為金鑰問題、不進冷卻
 _TRANSIENT_HTTP = {500, 502, 503, 504}
 _BUSY_RETRY_WAIT = 90.0      # 503 等暫時性錯誤的重試間隔（1.5 分鐘）
-# 暫時性錯誤**不放棄該話**（伺服器高負載是外部狀況，跳過只會平白少一話）：
-# 一直等到成功，使用者要中止就按停止（`_sleep_with_stop` 每 0.5s 檢查 stop_event）。
-# 但每累積 _BUSY_LONG_WAIT_EVERY 次就多等 _BUSY_LONG_WAIT，避免長時間高負載時
-# 每 90s 空敲一次。
+# 每累積 _BUSY_LONG_WAIT_EVERY 次就多等 _BUSY_LONG_WAIT，避免長時間高負載時
+# 每 90s 空敲一次。等待中可按停止（`_sleep_with_stop` 每 0.5s 檢查 stop_event）。
 _BUSY_LONG_WAIT = 600.0      # 每滿 N 次重試後額外等待（10 分鐘）
 _BUSY_LONG_WAIT_EVERY = 5    # 每幾次重試觸發一次上面的額外等待
+# 同一次請求最多重試幾次；再失敗就丟 GeminiBusyRetriesExhausted，協調器把該話
+# 暫時跳過、放進待補翻列表，等下一次翻譯成功（伺服器恢復）後再補翻（v2.30）。
+_BUSY_MAX_RETRIES = 10
 
 # 候選回覆因安全政策被擋時的 finishReason（此時 parts 為空）→ 視同被審查
 _BLOCKED_FINISH_REASONS = frozenset({"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"})
@@ -259,9 +261,14 @@ class GeminiApiSession:
                     continue
                 except GeminiServerBusy as e:
                     # 503 等暫時性錯誤／請求逾時：伺服器高負載，非金鑰問題、不進冷卻。
-                    # 不設重試上限、不跳過該話；每滿 _BUSY_LONG_WAIT_EVERY 次多等
-                    # 一段長時間。要中止就按停止（等待期間會檢查 stop_event）。
+                    # 每滿 _BUSY_LONG_WAIT_EVERY 次多等一段長時間；重試超過
+                    # _BUSY_MAX_RETRIES 次就放棄這次請求（協調器暫時跳過該話）。
+                    # 要中止就按停止（等待期間會檢查 stop_event）。
                     busy_retries += 1
+                    if busy_retries > _BUSY_MAX_RETRIES:
+                        # 同一次請求重試達上限 → 交給協調器暫時跳過該話、之後再補翻
+                        raise GeminiBusyRetriesExhausted(
+                            f"已重試 {_BUSY_MAX_RETRIES} 次仍失敗（{e}）") from e
                     long_wait = busy_retries % _BUSY_LONG_WAIT_EVERY == 0
                     wait = _BUSY_RETRY_WAIT + (_BUSY_LONG_WAIT if long_wait else 0.0)
                     extra = (f"，已連續 {busy_retries} 次 → 多等 "

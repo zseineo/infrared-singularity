@@ -31,8 +31,8 @@ from aa_tool import app_paths, constants, html_io, original_cache
 from aa_tool import settings_manager
 from aa_tool import text_extraction, translation_engine, url_fetcher
 from aa_tool.gemini_web import (
-    GeminiAborted, GeminiContentBlocked, GeminiModelMismatch, GeminiQuotaExceeded,
-    GeminiWebError, GeminiWebSession,
+    GeminiAborted, GeminiBusyRetriesExhausted, GeminiContentBlocked,
+    GeminiModelMismatch, GeminiQuotaExceeded, GeminiWebError, GeminiWebSession,
 )
 
 # 單次送給 Gemini 的最大提取行數；超過則分段送出後合併。
@@ -735,6 +735,18 @@ def run_auto_translate(
             headless=headless, log=log)
         open_log = "開啟瀏覽器並登入 Gemini…"
 
+    # 待補翻列表（v2.30）：伺服器忙碌／逾時連續重試達上限（後端丟
+    # GeminiBusyRetriesExhausted）的話先暫時跳過、放進這裡，等下一次翻譯成功
+    # （＝伺服器已恢復）後依序補翻；補翻不佔話數。元素為
+    # (網址, source, display_title, page_title, 話序號)，補翻時不必重抓網頁。
+    deferred: list = []
+
+    def _record_failed(ch_url: str, retrying: bool, reason: str) -> None:
+        """記一話失敗；若是補翻中的話，順便移出待補翻列表（已有結論）。"""
+        result.failed.append((ch_url, reason))
+        if retrying:
+            deferred.pop(0)
+
     try:
         log(open_log)
         try:
@@ -747,63 +759,91 @@ def run_auto_translate(
             result.stopped = True
             log(f"⏹️ {e}，未開始翻譯。")
             return result
-        for i in range(1, total + 1):
+        retry_ready = False   # 上一話翻譯成功 → 下一輪先補翻待補翻列表
+        final_pass = False    # 新的話跑完後，是否已對待補翻列表補翻過最後一輪
+        i = 0                 # 已開始處理的「新」話數（補翻不計）
+        while True:
             if _stopping():
                 result.stopped = True
                 log("⏹️ 已收到停止指令，中止。")
                 break
-            if not url:
-                result.reached_end = True
-                log("✅ 沒有下一話了，已翻到最後一話。")
-                break
-            log(f"=== 第 {i}/{total_label} 話：{url} ===")
-
-            # 1) 抓取＋解析（失敗則無法得知下一話 → 中斷整批）
-            try:
-                source, nav_links, page_title, display_title = _fetch_and_parse(
-                    url, cfg)
-            except ChapterError as e:
-                # 抓取／解析失敗一律中斷整批（v2.27：清單模式原本會跳過續跑，現在也
-                # 中斷——「跳過某一話」只保留給 AI 端的疑似審查／疑似未翻譯，抓取層
-                # 的失敗不默默漏話）。訊息可能含多行診斷：Log 印完整版，失敗清單／
-                # 總結只留第一行。
-                result.failed.append((url, str(e).split(chr(10))[0]))
-                result.pending_url = url  # 這一話未完成 → 供 GUI 回填起始網址接續
-                log(f"  ❌ {e} → 中斷整批（此話未完成，可用它當起始網址接續）。")
-                if urls:
-                    log("  （網址清單模式：清單中這一話之後的網址都還沒處理；"
-                        "要接續請把清單改成從這一話開始。）")
-                break
-            # 讀過的網址寫入讀取紀錄（與手動流程一致）
-            _record_url_history(sm, url, page_title, nav_links, source, log)
-            # 記下這一話的名稱，供總結顯示（失敗／跳過／接續的網址才分得出是哪一話）
-            if page_title:
-                result.titles[url] = page_title
-            # 1.4) 依作品名分資料夾：用第一話的標題定一次，之後各話沿用。
-            #      放在跳過判定之前，確保「已存在同名檔」看的是子資料夾。
-            _decide_series_dir(page_title)
-            # 清單模式下一話直接取清單的下一筆（i 為 1-based，故下一筆是 urls[i]）
-            if urls:
-                next_url = urls[i] if i < len(urls) else ""
-            else:
-                next_url, next_title = _next_chapter_url(nav_links)
-                if next_url and next_title:
-                    result.titles.setdefault(next_url, next_title)
-
-            # 1.5) 若已有同名檔則跳過（重跑批次時略過已完成的話、省 API 額度）。
-            #      檢查用「不含碰撞序號」的檔名主體，因此判定的是「這一話本身」是否
-            #      已產出過，而非湊巧撞名的其他話。
-            if skip_existing:
-                name_base = compute_chapter_name_base(
-                    doc_title=doc_title,
-                    fetch_auto_fill_title=fetch_auto_fill_title,
-                    source=source, page_title=page_title, fallback_index=i)
-                existing = os.path.join(effective_out_dir, f"{name_base}.html")
-                if os.path.exists(existing):
-                    result.skipped.append((url, f"{name_base}.html"))
-                    log(f"  ⏭️ 已存在同名檔「{name_base}.html」→ 跳過此話，續下一話。")
-                    url = next_url
+            # 上一話翻譯成功（伺服器已恢復）且待補翻列表有東西 → 這一輪先補翻
+            retrying = retry_ready and bool(deferred)
+            retry_ready = False
+            if not retrying and (i >= total or not url):
+                # 新的話都跑完了。待補翻列表還有剩 → 最後再補翻一輪（同樣受重試上限；
+                # 仍失敗就結束，剩下的在迴圈外列入失敗）。
+                if deferred and not final_pass:
+                    final_pass = True
+                    retry_ready = True
+                    log(f"🔁 新的話已跑完，再補翻一次先前暫時跳過的 {len(deferred)} 話…")
                     continue
+                if i >= total:
+                    # 跑滿設定話數而結束 → url 為下一話續接網址，供 GUI 把它帶回
+                    # 「起始網址」直接接續下一批（已是最後一話時 url 為空）。
+                    if url:
+                        result.next_url = url
+                        log(f"▶ 已達設定話數；下一話接續網址：{url}")
+                else:
+                    result.reached_end = True
+                    log("✅ 沒有下一話了，已翻到最後一話。")
+                break
+            if retrying:
+                ch_url, source, display_title, page_title, ch_index = deferred[0]
+                next_url = url  # 補翻不推進「新的話」：補完照原本進度續跑
+                log("=== 補翻先前暫時跳過的話："
+                    f"{format_url_with_title(ch_url, result.titles)} ===")
+            else:
+                i += 1
+                ch_url, ch_index = url, i
+                log(f"=== 第 {i}/{total_label} 話：{url} ===")
+
+                # 1) 抓取＋解析（失敗則無法得知下一話 → 中斷整批）
+                try:
+                    source, nav_links, page_title, display_title = _fetch_and_parse(
+                        url, cfg)
+                except ChapterError as e:
+                    # 抓取／解析失敗一律中斷整批（v2.27：清單模式原本會跳過續跑，現在也
+                    # 中斷——「跳過某一話」只保留給 AI 端的疑似審查／疑似未翻譯，抓取層
+                    # 的失敗不默默漏話）。訊息可能含多行診斷：Log 印完整版，失敗清單／
+                    # 總結只留第一行。
+                    result.failed.append((url, str(e).split(chr(10))[0]))
+                    result.pending_url = url  # 這一話未完成 → 供 GUI 回填起始網址接續
+                    log(f"  ❌ {e} → 中斷整批（此話未完成，可用它當起始網址接續）。")
+                    if urls:
+                        log("  （網址清單模式：清單中這一話之後的網址都還沒處理；"
+                            "要接續請把清單改成從這一話開始。）")
+                    break
+                # 讀過的網址寫入讀取紀錄（與手動流程一致）
+                _record_url_history(sm, url, page_title, nav_links, source, log)
+                # 記下這一話的名稱，供總結顯示（失敗／跳過／接續的網址才分得出是哪一話）
+                if page_title:
+                    result.titles[url] = page_title
+                # 1.4) 依作品名分資料夾：用第一話的標題定一次，之後各話沿用。
+                #      放在跳過判定之前，確保「已存在同名檔」看的是子資料夾。
+                _decide_series_dir(page_title)
+                # 清單模式下一話直接取清單的下一筆（i 為 1-based，故下一筆是 urls[i]）
+                if urls:
+                    next_url = urls[i] if i < len(urls) else ""
+                else:
+                    next_url, next_title = _next_chapter_url(nav_links)
+                    if next_url and next_title:
+                        result.titles.setdefault(next_url, next_title)
+
+                # 1.5) 若已有同名檔則跳過（重跑批次時略過已完成的話、省 API 額度）。
+                #      檢查用「不含碰撞序號」的檔名主體，因此判定的是「這一話本身」是否
+                #      已產出過，而非湊巧撞名的其他話。
+                if skip_existing:
+                    name_base = compute_chapter_name_base(
+                        doc_title=doc_title,
+                        fetch_auto_fill_title=fetch_auto_fill_title,
+                        source=source, page_title=page_title, fallback_index=i)
+                    existing = os.path.join(effective_out_dir, f"{name_base}.html")
+                    if os.path.exists(existing):
+                        result.skipped.append((url, f"{name_base}.html"))
+                        log(f"  ⏭️ 已存在同名檔「{name_base}.html」→ 跳過此話，續下一話。")
+                        url = next_url
+                        continue
 
             # 2) 提取 → 翻譯 → 替換 → 存檔
             try:
@@ -836,7 +876,7 @@ def run_auto_translate(
                     doc_title=doc_title,
                     fetch_auto_fill_title=fetch_auto_fill_title,
                     source=source, page_title=page_title,
-                    fallback_index=i)
+                    fallback_index=ch_index)
                 html_io.write_html_file(out_path, result_text)
                 # 同步把原文（含 display_title 前綴）以「投稿指紋」存進
                 # aa_original_cache.json — 與手動流程一致，使 EditWindow
@@ -850,11 +890,14 @@ def run_auto_translate(
                     log(f"  ⚠️ 原文暫存寫入失敗（不影響存檔）：{e}")
                 result.done.append(out_path)
                 log(f"  ✅ 已存檔：{out_path}")
+                if retrying:
+                    deferred.pop(0)
+                retry_ready = True  # 翻譯成功＝伺服器正常 → 下一輪先補翻待補翻列表
                 url = next_url
             except ChapterError as e:
                 # 只會是 `_extract` 的「提取結果為空」＝這一話沒有可翻譯的文字
                 # （純 AA／圖片話）。不是工具故障，記錄後跳過續跑，不中斷整批。
-                result.failed.append((url, str(e).split(chr(10))[0]))
+                _record_failed(ch_url, retrying, str(e).split(chr(10))[0])
                 log(f"  ⏭️ {e} → 跳過此話，繼續下一話。")
                 url = next_url
             except GeminiModelMismatch as e:
@@ -868,18 +911,30 @@ def run_auto_translate(
                 log(f"⏹️ {e}，中止整批。")
                 break
             except CensoredResponse as e:
-                result.failed.append((url, f"可能被審查：{e}"))
+                _record_failed(ch_url, retrying, f"可能被審查：{e}")
                 log(f"  🚫 {e} → 跳過此話，繼續下一話。")
                 url = next_url
             except GeminiContentBlocked as e:
                 # API 端安全過濾擋下（如 blockReason: PROHIBITED_CONTENT）＝被審查，
                 # 重送幾乎一定再被擋 → 比照 CensoredResponse 跳過該話、續下一話。
-                result.failed.append((url, f"可能被審查：{e}"))
+                _record_failed(ch_url, retrying, f"可能被審查：{e}")
                 log(f"  🚫 {e} → 跳過此話，繼續下一話。")
                 url = next_url
             except UntranslatedResponse as e:
-                result.failed.append((url, f"疑似未翻譯：{e}"))
+                _record_failed(ch_url, retrying, f"疑似未翻譯：{e}")
                 log(f"  ⚠️ {e} → 跳過此話（不存檔），繼續下一話。")
+                url = next_url
+            except GeminiBusyRetriesExhausted as e:
+                # 伺服器忙碌／逾時重試達上限：外部狀況，不中斷整批也不就此放棄 →
+                # 暫時跳過、放進待補翻列表，下一次翻譯成功（伺服器恢復）後再補翻。
+                if retrying:
+                    log(f"  ⏳ {e} → 伺服器仍未恢復，這話留在待補翻列表"
+                        f"（共 {len(deferred)} 話），下一次翻譯成功後再試。")
+                else:
+                    deferred.append(
+                        (ch_url, source, display_title, page_title, ch_index))
+                    log(f"  ⏳ {e} → 暫時跳過此話，加入待補翻列表"
+                        f"（共 {len(deferred)} 話），下一次翻譯成功後再補翻。")
                 url = next_url
             except StopRequested:
                 result.stopped = True
@@ -897,18 +952,20 @@ def run_auto_translate(
                 # API 錯誤（空回應等）、寫檔失敗、程式錯誤等都走這裡，繼續跑下去
                 # 往往整批都失敗，停下來讓使用者處理比默默漏話好。
                 # （安全過濾擋下另走上面的 GeminiContentBlocked，比照審查跳過。）
-                result.failed.append((url, str(e)))
+                # 補翻中的話出錯時，pending_url 仍是「下一個新的話」（url），
+                # 補翻的那話記在失敗清單。
+                _record_failed(ch_url, retrying, str(e))
                 result.pending_url = url
-                log(f"  ❌ 失敗：{e} → 中斷整批（此話未完成，可用它當起始網址接續）。")
+                log(f"  ❌ 失敗：{e} → 中斷整批"
+                    + ("。" if retrying else "（此話未完成，可用它當起始網址接續）。"))
                 break
-        else:
-            # 迴圈跑滿設定話數而自然結束（非 break）→ url 為下一話續接網址，
-            # 供 GUI 把它帶回「起始網址」直接接續下一批（已是最後一話時 url 為空）。
-            if url:
-                result.next_url = url
-                log(f"▶ 已達設定話數；下一話接續網址：{url}")
     finally:
         session.close()
+
+    # 仍留在待補翻列表的話＝暫時跳過後始終沒補翻成功 → 列入失敗，總結才看得到
+    for d_url, *_ in deferred:
+        result.failed.append(
+            (d_url, "伺服器忙碌／逾時，重試達上限而暫時跳過，之後未能補翻成功"))
 
     processed = len(result.done) + len(result.failed) + len(result.skipped)
     result.remaining = 0 if until_last else max(0, total - processed)

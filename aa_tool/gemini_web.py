@@ -43,6 +43,14 @@ class GeminiAborted(GeminiWebError):
     """等待過程中收到外部 stop_event，使用者主動中止。"""
 
 
+class GeminiBusyRetriesExhausted(GeminiWebError):
+    """伺服器忙碌（5xx）／請求逾時，同一次請求連續重試達上限，這次先放棄。
+
+    由 API 後端（`gemini_api`／`openai_api`）丟出。協調器據此把該話「暫時跳過」、
+    放進待補翻列表，等下一次翻譯成功（伺服器已恢復）後再補翻，不中斷整批。
+    """
+
+
 class GeminiContentBlocked(GeminiWebError):
     """API 端的內容安全過濾擋下了這次請求或回應。
 

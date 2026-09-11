@@ -33,7 +33,8 @@ from . import net_proxy
 from typing import Callable
 
 from .gemini_web import (
-    GeminiAborted, GeminiContentBlocked, GeminiQuotaExceeded, GeminiWebError,
+    GeminiAborted, GeminiBusyRetriesExhausted, GeminiContentBlocked,
+    GeminiQuotaExceeded, GeminiWebError,
 )
 
 # ── 供應商註冊表 ──
@@ -78,7 +79,7 @@ API_PROVIDERS: dict[str, dict] = {
 # 單次 API 請求的讀取逾時（秒）。此為未設定時的預設值；使用者可在「連線設定」
 # 調整（cache.api_timeout），慢速／長輸出的模型（如 LongCat 這類大型模型跑
 # 數百行 AA 翻譯）常需要更長時間；逾時會比照 5xx 等待後重試（v2.29），
-# 但若這一話太長而每次都逾時，就會一直重試，須調高此值。
+# 但若這一話太長而每次都逾時，重試達上限就會被暫時跳過，須調高此值。
 _TIMEOUT = 600
 _ANTHROPIC_VERSION = "2023-06-01"
 _ANTHROPIC_MAX_TOKENS = 32000  # Anthropic 必填的輸出上限（避免長章節被截斷）
@@ -91,9 +92,11 @@ _MAX_WAIT_ROUNDS = 3
 # 伺服器暫時性錯誤（5xx）與請求逾時：等待後重試整輪，不視為金鑰問題、不進冷卻
 _TRANSIENT_HTTP = {500, 502, 503, 504}
 _BUSY_RETRY_WAIT = 90.0
-# 與 gemini_api 對齊：暫時性錯誤不放棄該話，無限重試；每滿 N 次多等一段長時間。
+# 與 gemini_api 對齊：每滿 N 次多等一段長時間；重試超過 _BUSY_MAX_RETRIES 次丟
+# GeminiBusyRetriesExhausted，協調器暫時跳過該話、下一次翻譯成功後補翻。
 _BUSY_LONG_WAIT = 600.0
 _BUSY_LONG_WAIT_EVERY = 5
+_BUSY_MAX_RETRIES = 10
 
 
 class _ServerBusy(GeminiWebError):
@@ -203,6 +206,10 @@ class ChatApiSession:
                     continue
                 except _ServerBusy as e:
                     busy_retries += 1
+                    if busy_retries > _BUSY_MAX_RETRIES:
+                        # 同一次請求重試達上限 → 交給協調器暫時跳過該話、之後再補翻
+                        raise GeminiBusyRetriesExhausted(
+                            f"已重試 {_BUSY_MAX_RETRIES} 次仍失敗（{e}）") from e
                     long_wait = busy_retries % _BUSY_LONG_WAIT_EVERY == 0
                     wait = _BUSY_RETRY_WAIT + (_BUSY_LONG_WAIT if long_wait else 0.0)
                     extra = (f"，已連續 {busy_retries} 次 → 多等 "

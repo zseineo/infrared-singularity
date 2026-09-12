@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.31"
+APP_VERSION = "2.32"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -1194,6 +1194,9 @@ class MainWindow(QMainWindow):
         self._nav_label.setText(f"編輯：{nav_name}")
         self._update_work_title(f"編輯 — {nav_name}")
         self.stack.setCurrentIndex(1)
+        # Alt+4 面板若在開啟中（上次返回時沒關），改讀新檔對應的提取結果／翻譯；
+        # 否則仍顯示上一話。放在切到編輯頁之後，可視範圍才以顯示中的編輯器計算。
+        self._edit_window._reload_translate_side()
         self._nav_bar.hide()
         self._action_bar.hide()
 

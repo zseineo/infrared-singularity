@@ -1977,6 +1977,10 @@ class EditWindow(QMainWindow):
             "其他行維持編輯器現狀（包括使用者直接在編輯器中做的修改）。")
         btn_reapply.clicked.connect(self._reapply_below_visible)
         head.addWidget(btn_reapply)
+        btn_close = _make_button("✕", "#6c757d", "#5a6268", width=30)
+        btn_close.setToolTip("關閉局部重套用面板（Alt+4／Esc）")
+        btn_close.clicked.connect(self._close_translate_side)
+        head.addWidget(btn_close)
         vl.addLayout(head)
 
         hint = QLabel("下方兩欄只顯示當前編輯器可視範圍對應的行；可編輯後按「重新套用」只更新被改到的行")
@@ -2207,25 +2211,10 @@ class EditWindow(QMainWindow):
             return
 
         if self._translate_side.isVisible():
-            self._translate_side.hide()
-            self._active_edit_widget().setFocus()
-            self._restore_side_panel_width()
-            self._set_status("關閉局部重套用面板", "#0f0")
+            self._close_translate_side()
             return
 
-        # 開啟前先用 provider 拉最新內容；保留為 _full，面板顯示由
-        # _refresh_side_panels_to_visible() 依當前編輯器可視範圍過濾。
-        # 同時把這份原始內容存為 baseline，重新套用時與編輯後 _full 比對
-        # 找出真正被側欄編輯影響的行。
-        if self._extracted_provider is not None:
-            self._side_extracted_full = self._extracted_provider() or ""
-        if self._translation_provider is not None:
-            self._side_ai_full = self._translation_provider() or ""
-        self._side_extracted_baseline = self._side_extracted_full
-        self._side_ai_baseline = self._side_ai_full
-        # 強制重設範圍快取，確保 refresh 一定會 setPlainText
-        self._side_visible_range = None
-
+        self._load_translate_side_data()
         self._translate_side.show()
         # 還原使用者上次調整的面板寬度（只在 init 寬度 > 0 時套用，
         # 否則沿用 setStretchFactor 預設）。每次開啟都套，保險起見。
@@ -2240,6 +2229,40 @@ class EditWindow(QMainWindow):
         else:
             self._set_status(
                 "📝 Alt+4：在編輯器選取文字後再按 Alt+4 可對齊到該行", "#17a2b8")
+
+    def _close_translate_side(self) -> None:
+        """關閉 Alt+4 面板（Alt+4／Esc／面板右上角 ✕ 共用）。"""
+        self._translate_side.hide()
+        self._active_edit_widget().setFocus()
+        self._restore_side_panel_width()
+        self._set_status("關閉局部重套用面板", "#0f0")
+
+    def _load_translate_side_data(self) -> None:
+        """用 provider 拉主畫面最新的提取結果／翻譯，存為 _full；面板顯示由
+        _refresh_side_panels_to_visible() 依當前編輯器可視範圍過濾（呼叫端負責）。
+        同時把這份原始內容存為 baseline，重新套用時與編輯後 _full 比對
+        找出真正被側欄編輯影響的行。"""
+        if self._extracted_provider is not None:
+            self._side_extracted_full = self._extracted_provider() or ""
+        if self._translation_provider is not None:
+            self._side_ai_full = self._translation_provider() or ""
+        self._side_extracted_baseline = self._side_extracted_full
+        self._side_ai_baseline = self._side_ai_full
+        # 強制重設範圍快取，確保 refresh 一定會 setPlainText
+        self._side_visible_range = None
+
+    def _reload_translate_side(self) -> None:
+        """換檔後重新載入 Alt+4 面板；由主程式 show_edit_panel 載入新檔後呼叫。
+
+        EditWindow 換檔時是重用同一個視窗、只換內文，面板開啟中返回主畫面
+        再開啟其他檔案，若不重載，面板的 _full／baseline 仍是上一話的內容
+        （須關掉面板重開才會讀到新的一話）。面板關閉中則不必處理——下次開啟
+        本來就會重拉。尚未重新套用的側欄編輯屬於上一份檔，直接捨棄。
+        """
+        if self._translate_side.isHidden():
+            return
+        self._load_translate_side_data()
+        self._refresh_side_panels_to_visible(force=True)
 
     def _get_selection_block_number(self) -> int | None:
         """回傳目前可編輯 widget 中**選取起點**所在的 0-based 行索引；

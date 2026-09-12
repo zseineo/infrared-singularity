@@ -454,7 +454,9 @@ class GeminiWebSession:
     def _switch_model_with_wait(self, req: str) -> None:
         """自動切換到 req；額度滿則長等、選單失效則退回等手動切換。"""
         quota_deadline = time.time() + _QUOTA_WAIT_TIMEOUT
-        manual_deadline = time.time() + _MODEL_WAIT_TIMEOUT
+        # 手動切換的 5 分鐘從「連續 fail 的第一次」起算：額度等待後重整頁面、
+        # 選單一時沒載好而 fail 時，才不會因起點是 10 分鐘前而當場逾時。
+        manual_deadline: float | None = None
         announced_quota = False
         last_remind = 0.0
         while True:
@@ -466,19 +468,27 @@ class GeminiWebSession:
                 self._log(f"✅ 已自動切換到「{cur or req}」，繼續翻譯")
                 return
             if status == "quota":
+                manual_deadline = None
                 if not announced_quota:
                     self._log(
                         f"⏸️ 「{req}」額度已滿（{info}）。將等額度恢復後自動切換，"
                         f"最長等 {_QUOTA_WAIT_TIMEOUT // 3600} 小時；可按停止中止。")
                     announced_quota = True
-                if time.time() >= quota_deadline:
-                    raise GeminiModelMismatch(
-                        f"等待「{req}」額度恢復逾時（超過 "
-                        f"{_QUOTA_WAIT_TIMEOUT // 3600} 小時）")
-                self._sleep_with_stop(_QUOTA_POLL_INTERVAL)
+                while True:
+                    if time.time() >= quota_deadline:
+                        raise GeminiModelMismatch(
+                            f"等待「{req}」額度恢復逾時（超過 "
+                            f"{_QUOTA_WAIT_TIMEOUT // 3600} 小時）")
+                    self._sleep_with_stop(_QUOTA_POLL_INTERVAL)
+                    # 選單上的額度狀態可能只在頁面載入時取得，不重整會一直顯示
+                    # 「額度已滿」。進入等待前一定剛開過新對話，重整不會遺失內容。
+                    if self._reload_for_quota_poll():
+                        break
                 continue
             # status == "fail"：選單操作或選擇器失效 → 退回等使用者手動切換
             now = time.time()
+            if manual_deadline is None:
+                manual_deadline = now + _MODEL_WAIT_TIMEOUT
             if now - last_remind >= _MODEL_REMIND_EVERY:
                 self._log("⚠️ 無法自動切換模型（選單選擇器可能失效），"
                           "請在瀏覽器手動切換到正確模型…")
@@ -491,6 +501,27 @@ class GeminiWebSession:
             if cur and model_matches(cur, req):
                 self._log(f"✅ 偵測到已切換為「{cur}」，繼續翻譯")
                 return
+
+    def _reload_for_quota_poll(self) -> bool:
+        """額度等待中，重試自動切換前重新整理頁面，並等模型選單出現。
+
+        重整失敗（網路中斷等）或 60 秒內模型選單沒出現（例如被登出）回 False，
+        由呼叫端等下一個輪詢間隔再試。
+        """
+        self._log("🔄 重新整理頁面，檢查額度是否已恢復…")
+        try:
+            self._page.reload(wait_until="domcontentloaded")
+        except Exception as e:  # noqa: BLE001 — 任何重整失敗都等下一輪再試
+            self._log(f"⚠️ 重新整理頁面失敗：{e}；下次輪詢再試")
+            return False
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            if self._find("model_indicator") is not None:
+                self._page.wait_for_timeout(400)  # 同 _ensure_model，等選單穩定
+                return True
+            self._sleep_with_stop(1.5)
+        self._log("⚠️ 重新整理後 60 秒內未出現模型選單（可能被登出）；下次輪詢再試")
+        return False
 
     def _sleep_with_stop(self, seconds: float) -> None:
         """可被 stop_event 中斷的睡眠（每秒檢查一次）。"""

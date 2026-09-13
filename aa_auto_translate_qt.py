@@ -2,7 +2,7 @@
 
 對應使用者流程：在主畫面工具列按「⚡ 自動翻譯」→ 切換到本面板（index 4）。
 面板分上下兩部分：
-  上：設定欄位（起始網址、話數＋翻譯到最後一話、作品名稱、檔名預覽、輸出資料夾）。
+  上：設定欄位（起始網址、話數＋翻譯到最後一話、檔名（含作品名稱）、輸出資料夾）。
   下：執行 Log（即時顯示 :func:`aa_auto_translate.run_auto_translate` 的進度）。
 
 「連線設定」（翻譯方式／Gem 網址／要求模型／換新對話次數／API 金鑰與 Prompt）改以
@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import threading
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
@@ -46,6 +46,16 @@ def _provider_models(provider: str) -> list[str]:
     if provider == "gemini":
         return list(API_MODELS)
     return list(API_PROVIDERS.get(provider, {}).get("models", []))
+
+# 自動產生、不能手動修改的欄位（自動模式的檔名、作品資料夾）：刻意挑可辨識的
+# 中灰底色與可編輯欄位（白底）作視覺區隔，避免誤以為可以編輯。
+_READONLY_FIELD_QSS = (
+    "QLineEdit { background:#d6d8db; color:#343a40; border:1px solid #adb5bd; }"
+    "QLineEdit:disabled { background:#e9ecef; color:#adb5bd;"
+    " border:1px solid #dee2e6; }")
+
+# 起始網址等欄位變動後，等使用者停手這麼久才重算檔名／作品資料夾（毫秒）。
+_REFRESH_DEBOUNCE_MS = 600
 
 # 翻譯方式切換鈕樣式：選中（藍底）／未選中（灰底）
 _BACKEND_BTN_SEL = (
@@ -161,35 +171,33 @@ class AutoTranslatePanel(QWidget):
         count_hl.addStretch()
         form.addRow("連續話數：", count_row)
 
+        # 檔名：作品名稱與檔名預覽共用一列，依「自動填入作品名稱」設定切換
+        # （_apply_title_mode）。手動模式＝可編輯的作品名稱＋右側灰字尾碼
+        # （話數／同名序號／副檔名）；自動模式＝整個檔名由頁面標題產生，改顯示
+        # 唯讀欄位。起始網址／清單／輸出資料夾／作品名稱變動時自動重算
+        # （_schedule_refresh），不必另外按鈕。
+        name_row = QWidget()
+        name_hl = QHBoxLayout(name_row)
+        name_hl.setContentsMargins(0, 0, 0, 0)
+        name_hl.setSpacing(4)
         self.doc_title_edit = QLineEdit()
-        self.doc_title_edit.setPlaceholderText("（手動模式必填，作為檔名前綴）")
-        self.doc_title_edit.textChanged.connect(self._update_filename_preview)
-        form.addRow("作品名稱：", self.doc_title_edit)
-
-        preview_row = QWidget()
-        preview_hl = QHBoxLayout(preview_row)
-        preview_hl.setContentsMargins(0, 0, 0, 0)
+        self.doc_title_edit.setPlaceholderText("作品名稱（必填，作為檔名前綴）")
+        self.doc_title_edit.setToolTip(
+            "檔名＝{作品名稱}_{偵測到的話數}.html，右側灰字為起始網址這一話\n"
+            "實際會接上的部分（同名衝突時自動加 -2、-3 等序號）。")
+        self.doc_title_edit.textChanged.connect(self._on_doc_title_changed)
+        self.filename_suffix = QLabel("")
+        self.filename_suffix.setStyleSheet("color:#6c757d;")
         self.filename_preview = QLineEdit()
         self.filename_preview.setReadOnly(True)
-        # 唯讀預覽欄位，刻意挑可辨識的中灰底色與其他欄位（白底）作視覺區隔，
-        # 避免讓使用者誤以為可以編輯。
-        self.filename_preview.setStyleSheet(
-            "QLineEdit { background:#d6d8db; color:#343a40;"
-            " border:1px solid #adb5bd; }")
+        self.filename_preview.setStyleSheet(_READONLY_FIELD_QSS)
         self.filename_preview.setToolTip(
-            "起始網址這一話實際會寫入的檔名。\n"
-            "・「自動填入作品名稱」設定開啟時 → 檔名取自頁面標題\n"
-            "・關閉時 → {作品名稱}_{偵測到的話數}.html\n"
-            "・同名衝突時自動加 -2、-3 等序號\n"
-            "按「🔄 試算」會實際讀取網址解析後顯示真正的檔名。")
-        btn_preview = QPushButton("🔄 試算")
-        btn_preview.setToolTip(
-            "讀取起始網址、解析後顯示這一話實際會寫入的檔名（含同名序號）")
-        btn_preview.clicked.connect(
-            lambda: self._refresh_actual_filename(allow_network=True))
-        preview_hl.addWidget(self.filename_preview, 1)
-        preview_hl.addWidget(btn_preview)
-        form.addRow("檔名預覽：", preview_row)
+            "已開啟「自動填入作品名稱」設定：檔名取自每話的頁面標題，不能手動修改。\n"
+            "這裡顯示起始網址這一話實際會寫入的檔名（同名衝突時自動加 -2、-3 等序號）。")
+        name_hl.addWidget(self.doc_title_edit, 1)
+        name_hl.addWidget(self.filename_suffix)
+        name_hl.addWidget(self.filename_preview, 1)
+        form.addRow("檔名：", name_row)
 
         out_row = QWidget()
         out_hl = QHBoxLayout(out_row)
@@ -198,6 +206,8 @@ class AutoTranslatePanel(QWidget):
         self.out_edit.setPlaceholderText("輸出 HTML 的資料夾")
         # 輸出資料夾即時持久化：手動輸入完成（失焦／Enter）也記住，不必等按「開始」。
         self.out_edit.editingFinished.connect(self._persist_out_dir)
+        # 同名序號（-2／-3）看輸出資料夾裡有沒有同名檔，換資料夾要重算
+        self.out_edit.textChanged.connect(lambda _t: self._schedule_refresh())
         btn_browse = QPushButton("瀏覽…")
         btn_browse.clicked.connect(self._browse_out_dir)
         out_hl.addWidget(self.out_edit, 1)
@@ -212,37 +222,34 @@ class AutoTranslatePanel(QWidget):
             "勾選後在輸出資料夾底下開一層以作品命名的子資料夾，本批各話都存進去。\n"
             "・資料夾名整批只決定一次（依起始網址那一話），不會每話開一個資料夾\n"
             "・自動填入作品名稱模式 → 由頁面標題去掉話數後取得作品名主體\n"
-            "・手動模式 → 直接用上面「作品名稱」欄位的內容\n"
+            "・手動模式 → 直接用上面檔名欄的作品名稱\n"
             "・同名資料夾已存在就直接沿用，不另外建新的\n"
-            "算出的名稱會顯示在下面「作品資料夾」欄，可自行修改。")
-        self.group_by_series_cb.toggled.connect(self._on_group_by_series_toggled)
+            "算出的名稱會顯示在下面「作品資料夾」欄。")
+        self.group_by_series_cb.toggled.connect(self._set_series_row_enabled)
         form.addRow("", self.group_by_series_cb)
 
-        # 作品資料夾名（可編輯）：預覽兼安全閥——切錯名字按開始前一眼就看得到。
-        series_row = QWidget()
-        series_hl = QHBoxLayout(series_row)
-        series_hl.setContentsMargins(0, 0, 0, 0)
+        # 作品資料夾名（唯讀）：跟著檔名欄的模式——手動模式等於作品名稱，
+        # 自動模式由頁面標題去掉話數後產生。要改名就改作品名稱（手動模式）。
         self.series_folder_edit = QLineEdit()
-        self.series_folder_edit.setPlaceholderText(
-            "（依起始網址自動帶入；可自行修改）")
+        self.series_folder_edit.setReadOnly(True)
+        self.series_folder_edit.setStyleSheet(_READONLY_FIELD_QSS)
         self.series_folder_edit.setToolTip(
-            "本批實際會使用的作品資料夾名稱（輸出資料夾底下的一層）。\n"
-            "自動帶入的是去掉話數後的作品名主體；覺得切得不對可直接改，\n"
-            "按「▶ 開始自動翻譯」時以這裡顯示的名稱為準。")
-        # textEdited 只有使用者實際輸入才觸發（setText 不會），用來記住
-        # 「使用者改過了」，避免面板開啟時的自動預覽把手改的名字蓋掉。
-        self.series_folder_edit.textEdited.connect(
-            lambda _t: setattr(self, "_series_folder_dirty", True))
-        self._series_folder_dirty = False
-        btn_series = QPushButton("🔄 試算")
-        btn_series.setToolTip("讀取起始網址、解析標題後重算作品資料夾名（會覆蓋手改的內容）")
-        btn_series.clicked.connect(
-            lambda: self._refresh_series_folder(allow_network=True))
-        series_hl.addWidget(self.series_folder_edit, 1)
-        series_hl.addWidget(btn_series)
-        self._series_folder_row = series_row
-        form.addRow("作品資料夾：", series_row)
-        self._series_folder_label = form.labelForField(series_row)
+            "本批實際會使用的作品資料夾名稱（輸出資料夾底下的一層），不能手動修改。\n"
+            "・手動模式 → 等於檔名欄的作品名稱\n"
+            "・自動填入作品名稱模式 → 起始網址的頁面標題去掉話數後的作品名主體")
+        self._series_folder_value = ""  # 目前起始網址算出的有效名稱（開始時帶給協調器）
+        form.addRow("作品資料夾：", self.series_folder_edit)
+        self._series_folder_label = form.labelForField(self.series_folder_edit)
+
+        # 起始網址等欄位變動後延遲一下再重算檔名／作品資料夾（連續輸入只算一次）
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(_REFRESH_DEBOUNCE_MS)
+        self._refresh_timer.timeout.connect(self._refresh_previews)
+        self._preview_gen = 0      # 重算世代；背景結果回來時不是最新一次就丟掉
+        self._title_auto = False   # 目前是否為「自動填入作品名稱」模式（_apply_title_mode）
+        self._previewed_url = ""  # 最近一次成功算出檔名的網址（換網址才顯示讀取中）
+        self.url_edit.textChanged.connect(lambda _t: self._schedule_refresh())
 
         self.skip_existing_cb = QCheckBox("已存在同名檔則跳過（重跑時略過已完成的話）")
         self.skip_existing_cb.setToolTip(
@@ -595,28 +602,17 @@ class AutoTranslatePanel(QWidget):
         group_series = bool(getattr(m, "_auto_translate_group_by_series", False))
         self.group_by_series_cb.setChecked(group_series)
         self._set_series_row_enabled(group_series)
-        # 資料夾名不持久化（換作品時記住舊值反而會存錯地方），每次開面板重算
-        self._series_folder_dirty = False
-        self.series_folder_edit.clear()
+        # 「自動填入作品名稱」設定決定檔名欄是可編輯的作品名稱還是唯讀檔名
+        self._apply_title_mode(bool(getattr(m, "_fetch_auto_fill_title", False)))
         # 作品名稱：與首頁同步——優先用首頁 doc_title，沒有就空
         try:
             home_title = m._translate_panel.get_doc_title().strip()
         except Exception:
             home_title = ""
         self.doc_title_edit.setText(home_title)
-        # 「自動填入作品名稱」設定為 ON 時，鎖住手動填寫並改顯示自動模式提示
-        auto_fill = bool(getattr(m, "_fetch_auto_fill_title", False))
-        self.doc_title_edit.setEnabled(not auto_fill)
-        if auto_fill:
-            self.doc_title_edit.setPlaceholderText(
-                "（已開啟「自動填入作品名稱」設定 — 由每話 page_title 自動萃取，本欄忽略）")
-        else:
-            self.doc_title_edit.setPlaceholderText("（手動模式必填，作為檔名前綴）")
-        self._update_filename_preview()
-        # 面板開啟時，若起始網址已在本地快取就直接試算實際檔名（不上網、不卡 UI）
-        self._refresh_actual_filename(allow_network=False)
-        if group_series:
-            self._refresh_series_folder(allow_network=False)
+        # 資料夾名不持久化（換作品時記住舊值反而會存錯地方），每次開面板重算。
+        # 上面 setText 觸發的延遲重算改為立即執行一次（值沒變時也要算）。
+        self._refresh_previews()
 
     def refresh_from_main(self) -> None:
         """從主視窗目前狀態重整欄位（每次 show_auto_translate_panel 都呼叫）。"""
@@ -627,10 +623,9 @@ class AutoTranslatePanel(QWidget):
         if not url:
             return
         self.url_edit.setText(url)
-        # 起始網址變了 → 更新檔名預覽（只吃本地快取，不上網、不卡 UI）
-        self._refresh_actual_filename(allow_network=False)
-        if self.group_by_series_cb.isChecked():
-            self._refresh_series_folder(allow_network=False)
+        # 網址沒變時 textChanged 不會觸發，但剛跑完一批、輸出資料夾多了檔案，
+        # 同名序號可能不同 → 一律重算
+        self._schedule_refresh()
 
     def _load_conn_from_main(self) -> None:
         """把主視窗的連線設定載入浮層欄位（翻譯方式在主頁，見 _load_from_main）。"""
@@ -717,13 +712,12 @@ class AutoTranslatePanel(QWidget):
             self._main.show_status("⚠️ 請選擇輸出資料夾", "#f39c12")
             return None
         group_by_series = self.group_by_series_cb.isChecked()
-        series_folder = self.series_folder_edit.text().strip()
-        if series_folder.startswith("⏳"):  # 試算未回來就按開始 → 當作沒填
-            series_folder = ""
+        # 只帶「目前起始網址」算出的有效名稱；還在讀取或讀取失敗時是空的
+        series_folder = self._series_folder_value
         if group_by_series and not series_folder:
             # 名稱留空不擋開始：協調器會在抓到第一話後自行推算（推不出則存回輸出資料夾）
             self._main.show_status(
-                "ℹ️ 作品資料夾未填，將依第一話標題自動判斷", "#3498db")
+                "ℹ️ 作品資料夾尚未算出，將依第一話標題自動判斷", "#3498db")
         return {
             "start_url": url,
             "count": self.count_spin.value(),
@@ -741,129 +735,145 @@ class AutoTranslatePanel(QWidget):
             "url_list": url_list,
         }
 
-    def _update_filename_preview(self) -> None:
-        """顯示靜態檔名模板（不讀網址）。實際檔名請按「🔄 試算」或開啟面板時自動帶。"""
-        auto_fill = bool(getattr(self._main, "_fetch_auto_fill_title", False))
-        if auto_fill:
-            self.filename_preview.setText(
-                "<每話自動取自 page_title>.html  （按 🔄 試算看實際檔名）")
-            return
-        title = self.doc_title_edit.text().strip() or "未命名"
-        import re as _re
-        safe = _re.sub(r'[\\/:*?"<>|]', "_", title)[:80].strip() or "未命名"
-        self.filename_preview.setText(
-            f"{safe}_<話數>.html  （同名時自動加 -2／-3…；按 🔄 試算看實際檔名）")
-        # 手動模式的資料夾名就是作品名稱欄位，跟著一起更新（使用者手改過則不動）
-        if not self._series_folder_dirty:
-            self.series_folder_edit.setText(self.doc_title_edit.text().strip())
+    # ── 檔名／作品資料夾（隨欄位變動自動重算） ──
 
-    def _on_group_by_series_toggled(self, checked: bool) -> None:
-        """勾選狀態切換：連動資料夾名欄位的啟用，並在剛勾選時自動帶入名稱。"""
-        self._set_series_row_enabled(checked)
-        if checked and not self.series_folder_edit.text().strip():
-            self._refresh_series_folder(allow_network=False)
+    def _apply_title_mode(self, auto_fill: bool) -> None:
+        """檔名欄依「自動填入作品名稱」設定切換，作品資料夾的來源也跟著切換。
+
+        手動模式：可編輯的作品名稱＋右側灰字尾碼；作品資料夾＝作品名稱。
+        自動模式：唯讀的完整檔名；作品資料夾＝頁面標題去掉話數。
+        """
+        self._title_auto = auto_fill
+        self.doc_title_edit.setVisible(not auto_fill)
+        self.filename_suffix.setVisible(not auto_fill)
+        self.filename_preview.setVisible(auto_fill)
+        self.series_folder_edit.setPlaceholderText(
+            "（依起始網址的頁面標題自動產生）" if auto_fill else "（等於作品名稱）")
+        self._previewed_url = ""
 
     def _set_series_row_enabled(self, enabled: bool) -> None:
         """作品資料夾欄位（含標籤）僅在勾選「依作品名稱建立資料夾」時可用。"""
-        self._series_folder_row.setEnabled(enabled)
+        self.series_folder_edit.setEnabled(enabled)
         if self._series_folder_label is not None:
             self._series_folder_label.setEnabled(enabled)
 
-    def _refresh_series_folder(self, allow_network: bool) -> None:
-        """算出本批的作品資料夾名並填入欄位（背景執行緒，與檔名試算共用快取）。
+    def _set_series_folder(self, value: str, display: str | None = None) -> None:
+        """設定作品資料夾：value 為開始時帶給協調器的名稱，display 為欄位顯示文字。"""
+        self._series_folder_value = value
+        self.series_folder_edit.setText(value if display is None else display)
 
-        `allow_network=False`（面板開啟／剛勾選時）：只吃本地快取，且**使用者手改
-        過就不覆蓋**。按「🔄 試算」則是明確要求重算，一律覆寫並清掉 dirty 標記。
+    def _on_doc_title_changed(self, _text: str) -> None:
+        """手動模式的作品名稱：資料夾名立即同步；檔名尾碼（同名序號）延遲重算。"""
+        if self._title_auto:
+            return  # 自動模式不看作品名稱（欄位隱藏，只由首頁同步帶入）
+        self._sync_manual_series_folder()
+        self._schedule_refresh()
+
+    def _sync_manual_series_folder(self) -> None:
+        """手動模式：作品資料夾＝作品名稱（與協調器同一套清理規則），不必讀網址。"""
+        import aa_auto_translate as a
+        self._set_series_folder(a.compute_series_folder_name(
+            doc_title=self.doc_title_edit.text(), fetch_auto_fill_title=False,
+            page_title=""))
+
+    def _schedule_refresh(self) -> None:
+        """欄位變動 → 延遲重算（連續輸入只算一次）。
+
+        先作廢進行中的重算，並清掉自動模式下舊網址算出的資料夾名：延遲期間
+        按開始，才不會把上一個網址的資料夾名帶給協調器。
         """
-        if allow_network:
-            self._series_folder_dirty = False
-        elif self._series_folder_dirty:
-            return
-        auto_fill = bool(getattr(self._main, "_fetch_auto_fill_title", False))
+        self._preview_gen += 1
+        if self._title_auto:
+            self._series_folder_value = ""
+        self._refresh_timer.start()
+
+    def _refresh_previews(self) -> None:
+        """依目前起始網址算出實際檔名與作品資料夾（背景執行緒）。
+
+        一律允許上網：抓過的網址會進本地快取，之後只改作品名稱／輸出資料夾時
+        直接讀快取，不會重抓；正式翻譯第一話也會讀到同一份快取。
+        """
+        self._refresh_timer.stop()
+        self._preview_gen += 1
+        gen = self._preview_gen
+        auto_fill = self._title_auto
         doc_title = self.doc_title_edit.text().strip()
+        lines = self._url_list_lines()
+        url = lines[0] if lines else self.url_edit.text().strip()
         if not auto_fill:
-            # 手動模式不必上網：作品名稱欄位就是資料夾名
-            self.series_folder_edit.setText(doc_title)
-            return
-        lines = self._url_list_lines()
-        url = lines[0] if lines else self.url_edit.text().strip()
+            self._sync_manual_series_folder()  # 從自動模式切回來時要補算
         if not url:
-            if allow_network:
-                self._main.show_status(
-                    "⚠️ 請先填入起始網址（或設定手動網址清單）", "#f39c12")
+            self._previewed_url = ""
+            self.filename_suffix.setText("_<話數>.html")
+            self.filename_suffix.setToolTip("")
+            self.filename_preview.clear()
+            self.filename_preview.setPlaceholderText("（填入起始網址後自動顯示）")
+            if auto_fill:
+                self._set_series_folder("")
             return
-        base_dir = getattr(self._main, "_settings_base_dir", None) \
-            or app_paths.data_dir()
-        if allow_network:
-            self.series_folder_edit.setText("⏳ 試算中（讀取網址）…")
-
-        def _bg() -> None:
-            import aa_auto_translate as a
-            try:
-                name = a.preview_series_folder(
-                    url, base_dir=base_dir, doc_title=doc_title,
-                    fetch_auto_fill_title=True,
-                    allow_network=allow_network)
-            except Exception:  # noqa: BLE001 — 預覽失敗只留空，不影響流程
-                name = None
-
-            def _apply(n=name) -> None:
-                if n:
-                    self.series_folder_edit.setText(n)
-                elif allow_network:
-                    self.series_folder_edit.setText("")
-                    self._main.show_status(
-                        "⚠️ 無法從此網址判斷作品名稱，請手動填寫", "#f39c12")
-                elif self.series_folder_edit.text().startswith("⏳"):
-                    self.series_folder_edit.setText("")
-            self._main._invoke_on_main.emit(_apply)
-
-        threading.Thread(target=_bg, daemon=True).start()
-
-    def _refresh_actual_filename(self, allow_network: bool) -> None:
-        """讀取起始網址、解析後在預覽欄顯示真正會寫入的檔名（背景執行緒）。
-
-        `allow_network=False`：只吃本地快取，沒命中就維持靜態模板（不上網、不卡 UI）；
-        面板開啟時用這個。按「🔄 試算」鈕則用 `allow_network=True` 真的上網抓。
-        """
-        lines = self._url_list_lines()
-        url = lines[0] if lines else self.url_edit.text().strip()
-        if not url:
-            if allow_network:
-                self._main.show_status(
-                    "⚠️ 請先填入起始網址（或設定手動網址清單）", "#f39c12")
-            return
+        if url != self._previewed_url:
+            # 換了網址才顯示讀取中；只改作品名稱／輸出資料夾時讀快取很快，不閃爍
+            self.filename_suffix.setText("⏳ 讀取網址中…")
+            self.filename_preview.setText("⏳ 讀取網址中…")
+            if auto_fill:
+                self._set_series_folder("", "⏳ 讀取網址中…")
         out_dir = self.out_edit.text().strip()
-        doc_title = self.doc_title_edit.text().strip()
-        auto_fill = bool(getattr(self._main, "_fetch_auto_fill_title", False))
-        # 與主程式一致（統一為設定資料夾），讓檔名試算讀到正確設定
+        # 與主程式一致（統一為設定資料夾），讓預覽讀到正確設定
         base_dir = getattr(self._main, "_settings_base_dir", None) \
             or app_paths.data_dir()
-        if allow_network:
-            self.filename_preview.setText("⏳ 試算中（讀取網址）…")
 
         def _bg() -> None:
             import aa_auto_translate as a
+            name = folder = None
+            prefix = err = ""
             try:
                 name = a.preview_first_filename(
                     out_dir, url, base_dir=base_dir, doc_title=doc_title,
-                    fetch_auto_fill_title=auto_fill,
-                    allow_network=allow_network)
-            except Exception as e:  # noqa: BLE001 — 預覽失敗只回報，不影響流程
-                self._main._invoke_on_main.emit(
-                    lambda e=e: self.filename_preview.setText(f"⚠️ 試算失敗：{e}"))
-                return
+                    fetch_auto_fill_title=auto_fill, allow_network=True)
+                if name and auto_fill:
+                    # 上面已把網頁寫進快取，這裡不會再上網
+                    folder = a.preview_series_folder(
+                        url, base_dir=base_dir, doc_title=doc_title,
+                        fetch_auto_fill_title=True, allow_network=False)
+                # 手動模式檔名＝{作品名稱清理後}{尾碼}；不給原文就只剩名稱部分
+                prefix = a.compute_chapter_name_base(
+                    doc_title=doc_title, fetch_auto_fill_title=False,
+                    source="", page_title="", fallback_index=1)
+            except Exception as e:  # noqa: BLE001 — 預覽失敗只顯示，不影響流程
+                err = str(e) or type(e).__name__
 
-            def _apply(n=name) -> None:
-                if n:
-                    self.filename_preview.setText(n)
-                elif allow_network:
-                    self.filename_preview.setText(
-                        "⚠️ 無法解析此網址（抓取或解析失敗）")
-                # allow_network=False 且沒命中快取 → 保留靜態模板，不覆蓋
+            def _apply() -> None:
+                if gen != self._preview_gen:
+                    return  # 之後又有欄位變動，這份結果已過期
+                self._apply_preview(url, auto_fill, name, folder, prefix, err)
             self._main._invoke_on_main.emit(_apply)
 
         threading.Thread(target=_bg, daemon=True).start()
+
+    def _apply_preview(self, url: str, auto_fill: bool, name: str | None,
+                       folder: str | None, prefix: str, err: str) -> None:
+        """把背景算出的檔名／資料夾名填回欄位（主執行緒）。"""
+        if not name:
+            self._previewed_url = ""
+            msg = (f"⚠️ 讀取失敗：{err}" if err
+                   else "⚠️ 無法讀取此網址（抓取或解析失敗）")
+            self.filename_suffix.setText("_<話數>.html  ⚠️ 無法讀取網址")
+            self.filename_suffix.setToolTip(msg)
+            self.filename_preview.setText(msg)
+            if auto_fill:
+                self._set_series_folder("", msg)
+            return
+        self._previewed_url = url
+        self.filename_preview.setText(name)
+        suffix = name[len(prefix):] if prefix and name.startswith(prefix) else name
+        self.filename_suffix.setText(suffix)
+        self.filename_suffix.setToolTip(f"實際檔名：{name}")
+        if auto_fill:
+            if folder:
+                self._set_series_folder(folder)
+            else:
+                self._set_series_folder(
+                    "", "⚠️ 無法從標題判斷作品名稱（將直接存進輸出資料夾）")
 
     # ── Slots ──
 
@@ -930,6 +940,7 @@ class AutoTranslatePanel(QWidget):
         self._url_list_text = edit.toPlainText().strip()
         self._update_url_list_btn()
         self._persist_url_list()
+        self._schedule_refresh()  # 清單第一行＝第一話，檔名／資料夾跟著重算
         n = len(self._url_list_lines())
         self._main.show_status(
             f"✅ 已設定 {n} 個網址的手動清單" if n else "✅ 已清空手動網址清單", "#0f0")

@@ -398,7 +398,7 @@ def _preview_fetch_source(
     - fetch/parse 失敗或內文為空皆回 None（預覽不該丟例外）。
 
     `preview_first_filename`（檔名）與 `preview_series_folder`（資料夾名）共用，
-    面板按一次「🔄 試算」兩者走同一份快取、不會抓兩次網頁。
+    面板重算一次時兩者走同一份快取、不會抓兩次網頁。
     """
     if not url:
         return None
@@ -438,7 +438,7 @@ def preview_first_filename(
 ) -> str | None:
     """試算 ``url`` 這一話實際會寫入的檔名（含碰撞序號），不翻譯、不寫檔。
 
-    供面板「檔名預覽」即時顯示真正會落地的檔名用。
+    供面板「檔名」列即時顯示真正會落地的檔名用。
     - `allow_network=False`：只吃本地 URL 快取，沒命中回 None（不卡網路，
       適合面板開啟時的即時預覽）。
     - fetch/parse 失敗或內文為空一律回 None（預覽不該丟例外）。
@@ -470,7 +470,7 @@ def preview_series_folder(
 ) -> str | None:
     """試算「依作品名分資料夾」會用的資料夾名，不翻譯、不建資料夾。
 
-    供面板「作品資料夾」欄位預先帶入用；使用者可在該欄直接改，開始時以欄位為準。
+    供面板「作品資料夾」唯讀欄位顯示用，開始時把算出的名稱帶給協調器。
     手動模式不必抓網頁（直接用 doc_title）；自動模式的取名規則與實跑完全一致
     （同走 ``compute_series_folder_name``）。算不出時回 None。
     """
@@ -597,7 +597,7 @@ def run_auto_translate(
         auto_translate_group_by_series（預設 False）。**資料夾名整批只決定一次**
         （手動模式用 doc_title；自動模式用第一話 page_title 收斂出的作品名主體），
         之後的話一律沿用，故不會發生「一話一個資料夾」。算不出名字時退回 out_dir。
-    series_folder：明確指定的作品資料夾名（GUI 面板算好、且使用者可能改過）。
+    series_folder：明確指定的作品資料夾名（GUI 面板算好的；CLI 可用 --series-folder 指定）。
         非空時直接採用，不再從標題推算——面板顯示什麼就存到哪，所見即所得。
     append_mode：對應主畫面「加入翻譯」（True，保留原文、翻譯附在原文之後）／「替換
         翻譯」（False）。None 時讀 cache 的 auto_translate_append_mode（預設 False）。

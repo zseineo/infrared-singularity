@@ -3262,7 +3262,14 @@ class EditWindow(QMainWindow):
 
     def _set_status(self, msg: str, color: str = "#0f0") -> None:
         bg = self._STATUS_COLOR_MAP.get(color.lower(), color)
-        show_toast(self, msg, color=bg, duration=3000)
+        # 右側面板（Alt+4／Alt+5）開著時，Toast 改顯示在最左側面板的左方，
+        # 避免蓋住面板頂端的按鈕
+        right = None
+        for side in (self._translate_side, self._glossary_side):
+            if side.isVisible():
+                x = side.mapTo(self, QPoint(0, 0)).x()
+                right = x if right is None else min(right, x)
+        show_toast(self, msg, color=bg, duration=3000, right=right)
 
     def showEvent(self, event):
         super().showEvent(event)

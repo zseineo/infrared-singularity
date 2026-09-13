@@ -48,9 +48,13 @@ def show_toast(
     *,
     color: str = "#28a745",
     duration: int = 3000,
+    right: int | None = None,
 ) -> QLabel:
     """在 parent 右上角顯示浮動 Toast 提示，duration 毫秒後自動消失。
-    新 Toast 出現時會清除同一 parent 上尚未消失的舊 Toast，避免重疊。"""
+    新 Toast 出現時會清除同一 parent 上尚未消失的舊 Toast，避免重疊。
+
+    right：Toast 右緣要對齊的 x 座標（parent 座標系，預設 parent 右緣），
+    例如右側有面板時傳面板左緣，讓 Toast 改顯示在面板左方。"""
     # 移除舊 Toast（避免重疊）
     active: list = getattr(parent, "_active_toasts", [])
     for old in active:
@@ -73,8 +77,9 @@ def show_toast(
         }}
     """)
     toast.adjustSize()
-    # 定位到右上角
-    x = parent.width() - toast.width() - 20
+    # 定位到右上角（空間不夠時至少留 10px 左邊界）
+    edge = parent.width() if right is None else right
+    x = max(10, edge - toast.width() - 20)
     y = 55
     toast.move(x, y)
     toast.raise_()

@@ -451,8 +451,8 @@
 *   **目前的最小寬度由誰決定**：翻譯主畫面的中央 splitter（967）→ 主視窗 979。979 已涵蓋所有常見邏輯寬度（最窄的常見值為 1092）；若未來要再往下，得處理 splitter 兩側 `QTextEdit` 的最小寬。
 
 ### 4.8 UI 通知系統
-*   **`show_toast(message, color, duration)`**: 在主視窗右上角顯示浮動提示，`duration` ms 後自動關閉。PyQt6 主視窗的 `MainWindow.show_status()` 已改以此函式呈現（原本位於左下角的「就緒」狀態列已移除），會將常見的 `#0f0` 亮綠自動映射為 toast 風格的 `#28a745`。**防重疊**：以 `parent._active_toasts` 追蹤仍在顯示中的 Toast，新 Toast 出現時會先 `deleteLater()` 清掉舊的再顯示新的；自動消失的 Toast 也會從清單移除。
-*   **編輯器 Toast**：PyQt6 編輯器 (`aa_edit_qt.py`) 的 `EditWindow._set_status()` 亦改為直接呼叫 `show_toast`，顯示於右上角（`MainWindow` 為 parent），與首頁風格一致。先前置於編輯區底部的 `status_label` 已整組移除（含 `_position_status_label`、`_status_hide_timer`、`resizeEvent` 重定位）。顏色映射 `_STATUS_COLOR_MAP` 比照主程式。
+*   **`show_toast(message, color, duration, right=None)`**: 在 parent 右上角（y=55）顯示浮動提示，`duration` ms 後自動關閉。`right` 指定 Toast 右緣對齊的 x（parent 座標，預設 parent 右緣），Toast 右緣＝`right − 20`；空間不足時 x 至少留 10px。PyQt6 主視窗的 `MainWindow.show_status()` 已改以此函式呈現（原本位於左下角的「就緒」狀態列已移除），會將常見的 `#0f0` 亮綠自動映射為 toast 風格的 `#28a745`。**防重疊**：以 `parent._active_toasts` 追蹤仍在顯示中的 Toast，新 Toast 出現時會先 `deleteLater()` 清掉舊的再顯示新的；自動消失的 Toast 也會從清單移除。
+*   **編輯器 Toast**：PyQt6 編輯器 (`aa_edit_qt.py`) 的 `EditWindow._set_status()` 亦改為直接呼叫 `show_toast`，顯示於右上角（`EditWindow` 自身為 parent），與首頁風格一致。**右側面板開啟時避讓**：Alt+4（`_translate_side`）或 Alt+5（`_glossary_side`）可見時，取可見面板中最左者的左緣（`mapTo(self, …)`）當 `right` 傳入，Toast 改顯示在面板左方、同高度，不再蓋住面板頂端的按鈕；面板都關閉時回到視窗右緣。先前置於編輯區底部的 `status_label` 已整組移除（含 `_position_status_label`、`_status_hide_timer`、`resizeEvent` 重定位）。顏色映射 `_STATUS_COLOR_MAP` 比照主程式。
 *   **`show_confirm_toast(message, on_yes, color, duration)`**: 帶有「是/否」按鈕的確認浮動視窗，逾時（預設 8 秒）自動關閉。
 *   **AI 翻譯格式驗證 (`validate_ai_text()`)**: 貼上翻譯文字後自動觸發，掃描每行是否含有多個 ID (`\d{2,4}-\d+\|`)，於 `ai_warn_label` 顯示警告或成功提示。
 

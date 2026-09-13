@@ -52,6 +52,9 @@ _UNTRANSLATED_MIN_IDS = 3
 
 _URL_CACHE_DIR = os.path.join(tempfile.gettempdir(), "aa_url_cache")
 
+# 存檔後的 HTML 小於此大小即視為異常（實際一話不可能這麼小）：刪檔、記失敗、續下一話。
+_MIN_OUTPUT_BYTES = 5 * 1024
+
 
 # ── 例外 ──
 
@@ -69,6 +72,10 @@ class CensoredResponse(RuntimeError):
 
 class UntranslatedResponse(RuntimeError):
     """偵測到回覆與原文幾乎一致（疑似沒翻譯，只是把原文吐回來），該話跳過。"""
+
+
+class OutputTooSmall(RuntimeError):
+    """存檔後檔案小於 `_MIN_OUTPUT_BYTES`（實際一話不可能這麼小）→ 已刪檔，該話跳過。"""
 
 
 # ── 設定載入 ──
@@ -930,6 +937,19 @@ def run_auto_translate(
                     source=source, page_title=page_title,
                     fallback_index=ch_index)
                 html_io.write_html_file(out_path, result_text)
+                size = os.path.getsize(out_path)
+                if size < _MIN_OUTPUT_BYTES:
+                    # 一話的 HTML 實際上不可能這麼小 → 多半是內容缺損，留著反而
+                    # 會讓「已存在同名檔則跳過」把它當成已完成。刪掉後跳過此話。
+                    try:
+                        os.remove(out_path)
+                        removed = "已刪除"
+                    except OSError as e:
+                        removed = f"刪除失敗（{e}），請手動刪除"
+                    raise OutputTooSmall(
+                        f"存檔後只有 {size / 1024:.1f} KB（小於 "
+                        f"{_MIN_OUTPUT_BYTES // 1024} KB），{removed}："
+                        f"{os.path.basename(out_path)}")
                 # 同步把原文（含 display_title 前綴）以「投稿指紋」存進
                 # aa_original_cache.json — 與手動流程一致，使 EditWindow
                 # 的「比對原文」模式能對得回 source。
@@ -975,6 +995,10 @@ def run_auto_translate(
             except UntranslatedResponse as e:
                 _record_failed(ch_url, retrying, f"疑似未翻譯：{e}")
                 log(f"  ⚠️ {e} → 跳過此話（不存檔），繼續下一話。")
+                url = next_url
+            except OutputTooSmall as e:
+                _record_failed(ch_url, retrying, f"檔案過小：{e}")
+                log(f"  🗑️ {e} → 跳過此話，繼續下一話。")
                 url = next_url
             except GeminiBusyRetriesExhausted as e:
                 # 伺服器忙碌／逾時重試達上限：外部狀況，不中斷整批也不就此放棄 →

@@ -200,6 +200,10 @@ class AppCache:
     # 原文之後）／「替換翻譯」（False，以翻譯取代原文）。自動翻譯一律直接存檔、不進
     # 編輯器。預設 False（替換）。
     auto_translate_append_mode: bool = False
+    # auto_translate_mask_words：送給 AI 前把「過濾詞清單」裡的關鍵字換成 ○（每字
+    # 一個），降低被審查擋下的機率；清單為原始文字，一行一個詞（非正則）。預設關閉。
+    auto_translate_mask_words: bool = False
+    auto_translate_mask_word_list: str = ""
     # auto_translate_group_by_series：在輸出資料夾下依作品名開一層子資料夾存放
     # （整批共用同一個、已存在就沿用）。資料夾名本身刻意**不持久化**——它由起始
     # 網址／作品名稱欄位決定，記住舊值會在換作品時把新作品存進舊資料夾。
@@ -471,6 +475,11 @@ class SettingsManager:
             cache.auto_translate_append_mode = bool(data.get(
                 'auto_translate_append_mode',
                 cache.auto_translate_append_mode))
+            cache.auto_translate_mask_words = bool(data.get(
+                'auto_translate_mask_words', cache.auto_translate_mask_words))
+            cache.auto_translate_mask_word_list = str(data.get(
+                'auto_translate_mask_word_list',
+                cache.auto_translate_mask_word_list))
             cache.auto_translate_group_by_series = bool(data.get(
                 'auto_translate_group_by_series',
                 cache.auto_translate_group_by_series))
@@ -595,6 +604,9 @@ class SettingsManager:
                 'auto_translate_until_last': cache.auto_translate_until_last,
                 'auto_translate_skip_existing': cache.auto_translate_skip_existing,
                 'auto_translate_append_mode': cache.auto_translate_append_mode,
+                'auto_translate_mask_words': cache.auto_translate_mask_words,
+                'auto_translate_mask_word_list':
+                    cache.auto_translate_mask_word_list,
                 'auto_translate_group_by_series':
                     cache.auto_translate_group_by_series,
                 'gemini_required_model': cache.gemini_required_model,

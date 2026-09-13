@@ -296,6 +296,10 @@ class EditWindow(QMainWindow):
         glossary_save=None,  # (force_overwrite: bool) -> None；只儲存術語到 AA_Settings.json
         init_glossary_panel_width: int = 0,  # 用語集面板寬度（px，0=預設）
         on_glossary_panel_width_change=None,  # (width: int) -> None
+        # ── 自訂過濾規則（Alt+5 面板上半／Alt+4「加入過濾」）：與主程式雙向同步 ──
+        filter_text_provider=None,  # () -> str；取得主程式「自訂過濾規則」文字
+        filter_text_setter=None,  # (text: str) -> None；把內容同步回主程式
+        filter_save=None,  # (force_overwrite: bool) -> str；只儲存過濾規則到 AA_Settings.json
         init_pad_count: int = 2,  # 「補空白」每字之間插入的全形空白數（1~3）
         on_pad_count_change=None,  # (count: int) -> None
         default_wysiwyg_provider=None,  # () -> bool；對應主程式「進入編輯器時預設 WYSIWYG」設定
@@ -345,8 +349,12 @@ class EditWindow(QMainWindow):
         self._glossary_save = glossary_save
         self._init_glossary_panel_width = int(init_glossary_panel_width or 0)
         self._on_glossary_panel_width_change = on_glossary_panel_width_change
-        # 同步護欄：載入主程式術語到面板時，避免 textChanged 又寫回主程式
+        self._filter_text_provider = filter_text_provider
+        self._filter_text_setter = filter_text_setter
+        self._filter_save = filter_save
+        # 同步護欄：載入主程式術語／過濾規則到面板時，避免 textChanged 又寫回主程式
         self._glossary_syncing = False
+        self._filter_syncing = False
         try:
             ipc = int(init_pad_count)
         except (TypeError, ValueError):
@@ -1989,11 +1997,21 @@ class EditWindow(QMainWindow):
         hint.setWordWrap(True)
         vl.addWidget(hint)
 
-        # 「提取結果（可編輯）」
+        # 「提取結果（可編輯）」＋「加入過濾」
+        ext_head = QHBoxLayout()
         lbl1 = QLabel("提取結果（ID|原文）")
         lbl1.setFont(QFont("MS UI Gothic", 10))
         lbl1.setStyleSheet("color:#9ecbff; font-weight:bold;")
-        vl.addWidget(lbl1)
+        ext_head.addWidget(lbl1)
+        ext_head.addStretch()
+        btn_add_filter = _make_button("加入過濾", "#6f42c1", "#5a34a0", width=80)
+        btn_add_filter.setToolTip(
+            "把下方「提取結果」選取的內容加入自訂過濾規則（整行符合）。\n"
+            "例：選取「テへ」Ｌ」→ 加入 ^テへ」Ｌ+$\n"
+            "選取多行時每行一條；ID| 前綴自動去掉；下次提取生效。")
+        btn_add_filter.clicked.connect(self._add_side_selection_to_filter)
+        ext_head.addWidget(btn_add_filter)
+        vl.addLayout(ext_head)
 
         self.side_extracted = QTextEdit()
         self.side_extracted.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
@@ -2077,15 +2095,28 @@ class EditWindow(QMainWindow):
     # ────────────────────────────────────────────────────────────
 
     def _build_glossary_side_panel(self) -> QWidget:
-        """構建右側「用語集」面板：編輯一般術語表，與主程式雙向同步。"""
+        """構建右側 Alt+5 面板：上半「自訂過濾規則」、下半「用語集」，
+        兩者都與主程式雙向同步；中間可拖動調整比例（預設各一半）。"""
         w = QWidget()
         w.setStyleSheet("background:#262a2f;")
-        vl = QVBoxLayout(w)
+        outer = QVBoxLayout(w)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.setChildrenCollapsible(False)
+        split.addWidget(self._build_filter_section())
+        gloss = QWidget()
+        split.addWidget(gloss)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 1)
+        outer.addWidget(split, 1)
+
+        vl = QVBoxLayout(gloss)
         vl.setContentsMargins(6, 6, 6, 6)
         vl.setSpacing(4)
 
         head = QHBoxLayout()
-        title = QLabel("用語集（Alt+5）")
+        title = QLabel("用語集")
         title.setFont(QFont("MS PGothic", 11))
         title.setStyleSheet("color:#ddd; font-weight:bold;")
         head.addWidget(title)
@@ -2124,6 +2155,130 @@ class EditWindow(QMainWindow):
         vl.addWidget(self.glossary_edit, 1)
 
         return w
+
+    def _build_filter_section(self) -> QWidget:
+        """Alt+5 面板上半：「自訂過濾規則」編輯區，與主程式雙向同步。"""
+        w = QWidget()
+        vl = QVBoxLayout(w)
+        vl.setContentsMargins(6, 6, 6, 6)
+        vl.setSpacing(4)
+
+        head = QHBoxLayout()
+        title = QLabel("自訂過濾規則（Alt+5）")
+        title.setFont(QFont("MS PGothic", 11))
+        title.setStyleSheet("color:#ddd; font-weight:bold;")
+        head.addWidget(title)
+        head.addStretch()
+        btn_save = _make_button("💾 儲存過濾", "#28a745", "#218838", width=95)
+        btn_save.setToolTip(
+            "只把「自訂過濾規則」寫入 AA_Settings.json（不動術語／正則／其他設定）。\n"
+            "左鍵：依設定「僅儲存差異」決定合併或覆蓋\n"
+            "右鍵：強制以覆蓋方式儲存")
+        btn_save.clicked.connect(lambda: self._save_filter_panel(False))
+        btn_save.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        btn_save.customContextMenuRequested.connect(
+            lambda _pos: self._save_filter_panel(True))
+        head.addWidget(btn_save)
+        vl.addLayout(head)
+
+        hint = QLabel("每行一條（支援正則）；編輯內容會即時同步回主畫面，下次提取生效")
+        hint.setFont(QFont("MS UI Gothic", 9))
+        hint.setStyleSheet("color:#888;")
+        hint.setWordWrap(True)
+        vl.addWidget(hint)
+
+        self.filter_edit = QTextEdit()
+        self.filter_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.filter_edit.setAcceptRichText(False)
+        self.filter_edit.setStyleSheet("background:#3c3836; color:#ddd;")
+        self.filter_edit.setFont(QFont(self._font_family, self._font_size))
+        self.filter_edit.textChanged.connect(self._on_filter_panel_changed)
+        vl.addWidget(self.filter_edit, 1)
+        return w
+
+    def _load_filter_into_panel(self) -> None:
+        """從主程式載入最新的自訂過濾規則到 Alt+5 面板（不觸發回寫）。"""
+        if self._filter_text_provider is None:
+            return
+        try:
+            text = self._filter_text_provider() or ""
+        except Exception:
+            text = ""
+        self._filter_syncing = True
+        try:
+            self.filter_edit.setPlainText(text)
+        finally:
+            self._filter_syncing = False
+
+    def _on_filter_panel_changed(self) -> None:
+        """過濾規則面板內容變更 → 即時同步回主程式。"""
+        if self._filter_syncing:
+            return
+        if self._filter_text_setter is not None:
+            try:
+                self._filter_text_setter(self.filter_edit.toPlainText())
+            except Exception:
+                pass
+
+    def _save_filter_panel(self, force_overwrite: bool) -> None:
+        """儲存過濾：只寫入過濾規則部分，依主程式「僅儲存差異」設定決定行為。"""
+        if self._filter_save is None:
+            self._set_status("⚠️ 無法儲存過濾規則（未連接主程式）", "#ffc107")
+            return
+        if self._filter_text_setter is not None:
+            try:
+                self._filter_text_setter(self.filter_edit.toPlainText())
+            except Exception:
+                pass
+        try:
+            tag = self._filter_save(force_overwrite) or ""
+            self._set_status(f"✅ 已儲存過濾規則{tag}", "#0f0")
+        except Exception as e:
+            self._set_status(f"❌ 過濾規則儲存失敗：{e}", "#dc3545")
+
+    def _add_side_selection_to_filter(self) -> None:
+        """Alt+4「加入過濾」：把「提取結果」欄選取的每一行做成整行符合的過濾規則。
+
+        規則格式沿用既有慣例 ``^文字+$``：跳脫正則特殊字元、頭尾錨定整行，
+        最後一個字可重複（例：選取「テへ」Ｌ」→ ``^テへ」Ｌ+$``）。選取範圍
+        含 ``ID|`` 前綴時自動去掉。已存在的規則不重複加入。
+        """
+        if self._filter_text_provider is None or self._filter_text_setter is None:
+            self._set_status("⚠️ 無法加入過濾規則（未連接主程式）", "#ffc107")
+            return
+        selected = self.side_extracted.textCursor().selectedText()
+        selected = selected.replace("\u2029", "\n")  # Qt 選取文字的段落分隔符
+        rules: list[str] = []
+        for raw in selected.split("\n"):
+            text = re.sub(r"^\s*\d+-\d+\|", "", raw).strip()
+            if text:
+                rules.append("^" + re.escape(text) + "+$")
+        if not rules:
+            self._set_status("⚠️ 請先在「提取結果」欄選取要過濾的文字", "#ffc107")
+            return
+        try:
+            existing = (self._filter_text_provider() or "").rstrip("\n")
+        except Exception:
+            existing = ""
+        have = {ln.strip() for ln in existing.split("\n") if ln.strip()}
+        added: list[str] = []
+        for r in rules:
+            if r not in have:
+                have.add(r)
+                added.append(r)
+        if not added:
+            self._set_status("ℹ️ 選取內容的過濾規則已存在", "#17a2b8")
+            return
+        combined = (existing + "\n" if existing else "") + "\n".join(added)
+        try:
+            self._filter_text_setter(combined)
+        except Exception as e:
+            self._set_status(f"❌ 加入過濾規則失敗：{e}", "#dc3545")
+            return
+        if self._glossary_side.isVisible():
+            self._load_filter_into_panel()  # Alt+5 面板開著就同步顯示
+        shown = added[0] if len(added) == 1 else f"{added[0]} 等 {len(added)} 條"
+        self._set_status(f"✅ 已加入過濾規則：{shown}（下次提取生效）", "#0f0")
 
     def _load_glossary_into_panel(self) -> None:
         """從主程式載入最新的一般術語表到面板（不觸發回寫）。"""
@@ -2186,7 +2341,7 @@ class EditWindow(QMainWindow):
         self._on_open_file_list()
 
     def _toggle_glossary_side(self) -> None:
-        """Alt+5：開關右側「用語集」面板。開啟時從主程式載入最新術語。"""
+        """Alt+5：開關右側「自訂過濾規則／用語集」面板。開啟時從主程式載入最新內容。"""
         if self._compare_active:
             self._set_status("⚠️ 請先回到編輯模式（Alt+1）", "#ffc107")
             return
@@ -2194,13 +2349,14 @@ class EditWindow(QMainWindow):
             self._glossary_side.hide()
             self._active_edit_widget().setFocus()
             self._restore_side_panel_width()
-            self._set_status("關閉用語集面板", "#0f0")
+            self._set_status("關閉過濾規則／用語集面板", "#0f0")
             return
+        self._load_filter_into_panel()
         self._load_glossary_into_panel()
         self._glossary_side.show()
         self._restore_side_panel_width()
         self.glossary_edit.setFocus()
-        self._set_status("開啟用語集面板（Alt+5）", "#0f0")
+        self._set_status("開啟過濾規則／用語集面板（Alt+5）", "#0f0")
 
     def _toggle_translate_side(self) -> None:
         """Alt+4：開關右側翻譯面板。開啟時若目前在編輯器有選取文字，

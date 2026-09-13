@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.34"
+APP_VERSION = "2.35"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -771,6 +771,9 @@ class MainWindow(QMainWindow):
         self._auto_translate_group_by_series: bool = False
         # 自動翻譯：加入翻譯（True，保留原文）／替換翻譯（False）。預設替換。
         self._auto_translate_append_mode: bool = False
+        # 自動翻譯：送給 AI 前把過濾詞清單（一行一個）裡的詞換成 ○，降低被審查機率
+        self._auto_translate_mask_words: bool = False
+        self._auto_translate_mask_word_list: str = ""
         # 翻譯後端與 API 設定（金鑰另存於加密檔，不在 cache）
         self._translate_backend: str = "browser"
         self._api_provider: str = "gemini"  # API 供應商（gemini/openai/claude/deepseek/custom）
@@ -1118,6 +1121,10 @@ class MainWindow(QMainWindow):
                 glossary_text_setter=lambda t: (
                     self._translate_panel.glossary_text.setPlainText(t)),
                 glossary_save=self.save_glossary_only,
+                filter_text_provider=self._translate_panel.get_filter_text,
+                filter_text_setter=lambda t: (
+                    self._translate_panel.filter_text.setPlainText(t)),
+                filter_save=self.save_filter_only,
                 init_glossary_panel_width=self._glossary_panel_width,
                 on_glossary_panel_width_change=(
                     self._on_glossary_panel_width_changed),
@@ -1855,6 +1862,7 @@ class MainWindow(QMainWindow):
             self._auto_translate_url_list = '\n'.join(
                 params.get("url_list") or [])
         self._auto_translate_append_mode = params.get("append_mode", False)
+        self._auto_translate_mask_words = params.get("mask_words", False)
         self._gemini_max_per_session = params["max_per_session"]
         self._gemini_required_model = params["required_model"] or "pro"
         # 手動模式下也把使用者填的作品名稱同步回首頁（保持兩邊一致）
@@ -1927,6 +1935,8 @@ class MainWindow(QMainWindow):
                     base_dir=self._settings_base_dir,
                     backend=self._translate_backend,
                     append_mode=self._auto_translate_append_mode,
+                    mask_words_enabled=self._auto_translate_mask_words,
+                    mask_word_list=self._auto_translate_mask_word_list,
                     gem_url=gem_url,
                     profile_dir=self._gemini_profile_dir or None,
                     max_per_session=max_per_session,
@@ -2414,6 +2424,8 @@ class MainWindow(QMainWindow):
             auto_translate_group_by_series=(
                 self._auto_translate_group_by_series),
             auto_translate_append_mode=self._auto_translate_append_mode,
+            auto_translate_mask_words=self._auto_translate_mask_words,
+            auto_translate_mask_word_list=self._auto_translate_mask_word_list,
             translate_backend=self._translate_backend,
             api_provider=self._api_provider,
             gemini_api_model=self._gemini_api_model,
@@ -2525,6 +2537,10 @@ class MainWindow(QMainWindow):
             cache.auto_translate_skip_existing)
         self._auto_translate_append_mode = bool(
             getattr(cache, "auto_translate_append_mode", False))
+        self._auto_translate_mask_words = bool(
+            getattr(cache, "auto_translate_mask_words", False))
+        self._auto_translate_mask_word_list = str(
+            getattr(cache, "auto_translate_mask_word_list", "") or "")
         self._auto_translate_group_by_series = bool(
             getattr(cache, "auto_translate_group_by_series", False))
         self._translate_backend = str(cache.translate_backend or "browser")
@@ -3206,6 +3222,26 @@ class MainWindow(QMainWindow):
         existing.glossary = cur_glossary
         self.settings_mgr.save_settings(existing)
         self._saved_glossary_lines = self._count_nonempty(cur_glossary)
+        if diff_mode:
+            return "（合併差異）"
+        if force_overwrite and self._diff_save_mode:
+            return "（強制覆蓋）"
+        return ""
+
+    def save_filter_only(self, force_overwrite: bool = False) -> str:
+        """只把「自訂過濾規則」寫入 AA_Settings.json，其他設定保留原檔不動。
+
+        比照 save_glossary_only：依「僅儲存差異」設定決定合併或覆蓋
+        （force_overwrite=True 強制覆蓋）。供編輯器 Alt+5 面板「儲存過濾」按鈕呼叫。
+        """
+        existing = self.settings_mgr.load_settings()
+        cur_filter = self._translate_panel.get_filter_text().strip()
+        diff_mode = self._diff_save_mode and not force_overwrite
+        if diff_mode:
+            cur_filter = merge_filter_diff(existing.filter_text, cur_filter)
+        existing.filter_text = cur_filter
+        self.settings_mgr.save_settings(existing)
+        self._saved_filter_lines = self._count_nonempty(cur_filter)
         if diff_mode:
             return "（合併差異）"
         if force_overwrite and self._diff_save_mode:

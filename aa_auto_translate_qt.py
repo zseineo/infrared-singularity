@@ -226,6 +226,8 @@ class AutoTranslatePanel(QWidget):
             "・同名資料夾已存在就直接沿用，不另外建新的\n"
             "算出的名稱會顯示在下面「作品資料夾」欄。")
         self.group_by_series_cb.toggled.connect(self._set_series_row_enabled)
+        # 勾選與否決定存進輸出資料夾還是作品子資料夾，同名序號要重算
+        self.group_by_series_cb.toggled.connect(lambda _c: self._schedule_refresh())
         form.addRow("", self.group_by_series_cb)
 
         # 作品資料夾名（唯讀）：跟著檔名欄的模式——手動模式等於作品名稱，
@@ -284,6 +286,25 @@ class AutoTranslatePanel(QWidget):
             bk_hl.addWidget(b)
         bk_hl.addStretch()
         form.addRow("翻譯方式：", bk_row)
+
+        # 替換過濾詞：送給 AI 前把清單裡的詞換成 ○（兩種翻譯方式都適用）
+        mask_row = QWidget()
+        mask_hl = QHBoxLayout(mask_row)
+        mask_hl.setContentsMargins(0, 0, 0, 0)
+        self.mask_words_cb = QCheckBox("替換過濾詞（送出前把關鍵字換成 ○）")
+        self.mask_words_cb.setToolTip(
+            "勾選後，提取結果送給 AI 前，會把「過濾詞清單」裡的詞換成 ○（每個字一個 ○），\n"
+            "降低整段被 AI 審查擋下的機率。\n"
+            "・只影響送給 AI 的文字；存檔的譯文中，這些詞會以 ○ 呈現\n"
+            "・清單一行一個詞（直接比對文字，不是正則）")
+        mask_hl.addWidget(self.mask_words_cb)
+        self._mask_word_list_text = ""
+        self.btn_mask_list = QPushButton("📝 過濾詞清單")
+        self.btn_mask_list.setToolTip("編輯要換成 ○ 的關鍵字（一行一個）")
+        self.btn_mask_list.clicked.connect(self._open_mask_list_dialog)
+        mask_hl.addWidget(self.btn_mask_list)
+        mask_hl.addStretch()
+        form.addRow("", mask_row)
 
         # 動作按鈕列
         btn_row = QWidget()
@@ -599,6 +620,11 @@ class AutoTranslatePanel(QWidget):
             getattr(m, "_auto_translate_skip_existing", False)))
         self.append_mode_cb.setChecked(bool(
             getattr(m, "_auto_translate_append_mode", False)))
+        self.mask_words_cb.setChecked(bool(
+            getattr(m, "_auto_translate_mask_words", False)))
+        self._mask_word_list_text = str(
+            getattr(m, "_auto_translate_mask_word_list", "") or "")
+        self._update_mask_list_btn()
         group_series = bool(getattr(m, "_auto_translate_group_by_series", False))
         self.group_by_series_cb.setChecked(group_series)
         self._set_series_row_enabled(group_series)
@@ -732,6 +758,7 @@ class AutoTranslatePanel(QWidget):
             "group_by_series": group_by_series,
             "series_folder": series_folder,
             "append_mode": self.append_mode_cb.isChecked(),
+            "mask_words": self.mask_words_cb.isChecked(),
             "url_list": url_list,
         }
 
@@ -818,6 +845,8 @@ class AutoTranslatePanel(QWidget):
             if auto_fill:
                 self._set_series_folder("", "⏳ 讀取網址中…")
         out_dir = self.out_edit.text().strip()
+        group = self.group_by_series_cb.isChecked()
+        manual_folder = self._series_folder_value if not auto_fill else ""
         # 與主程式一致（統一為設定資料夾），讓預覽讀到正確設定
         base_dir = getattr(self._main, "_settings_base_dir", None) \
             or app_paths.data_dir()
@@ -835,6 +864,14 @@ class AutoTranslatePanel(QWidget):
                     folder = a.preview_series_folder(
                         url, base_dir=base_dir, doc_title=doc_title,
                         fetch_auto_fill_title=True, allow_network=False)
+                sub = folder if auto_fill else manual_folder
+                if name and group and sub and out_dir:
+                    # 依作品名稱建立資料夾時實際存進子資料夾，同名序號要看那裡
+                    # （算不出資料夾名時協調器存回輸出資料夾，上面的結果即正確）
+                    name = a.preview_first_filename(
+                        os.path.join(out_dir, sub), url, base_dir=base_dir,
+                        doc_title=doc_title, fetch_auto_fill_title=auto_fill,
+                        allow_network=False) or name
                 # 手動模式檔名＝{作品名稱清理後}{尾碼}；不給原文就只剩名稱部分
                 prefix = a.compute_chapter_name_base(
                     doc_title=doc_title, fetch_auto_fill_title=False,
@@ -945,6 +982,58 @@ class AutoTranslatePanel(QWidget):
         self._main.show_status(
             f"✅ 已設定 {n} 個網址的手動清單" if n else "✅ 已清空手動網址清單", "#0f0")
 
+    # ── 過濾詞清單 ──
+
+    def _update_mask_list_btn(self) -> None:
+        """按鈕文字帶出詞數，一眼看出清單有沒有內容。"""
+        import aa_auto_translate as a
+        n = len(a.parse_mask_words(self._mask_word_list_text))
+        self.btn_mask_list.setText(f"📝 過濾詞清單 ({n})" if n else "📝 過濾詞清單")
+
+    def _open_mask_list_dialog(self) -> None:
+        """開啟過濾詞清單編輯對話框；確定後即時寫回主視窗並存檔。"""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("過濾詞清單")
+        dlg.resize(420, 420)
+        v = QVBoxLayout(dlg)
+        hint = QLabel(
+            "一行一個詞。勾選「替換過濾詞」時，送給 AI 前會把這些詞換成 ○" + chr(10) +
+            "（每個字一個 ○，例如「殺す」→「○○」），降低被審查擋下的機率。" + chr(10) +
+            "・直接比對文字，不是正則；較長的詞優先替換" + chr(10) +
+            "・只影響送給 AI 的文字，存檔的譯文中這些詞會以 ○ 呈現")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+        edit = QPlainTextEdit()
+        edit.setPlainText(self._mask_word_list_text)
+        v.addWidget(edit, 1)
+        count_lbl = QLabel("")
+        v.addWidget(count_lbl)
+
+        def _update_count() -> None:
+            n = len({ln.strip() for ln in edit.toPlainText().splitlines() if ln.strip()})
+            count_lbl.setText(f"目前 {n} 個詞" if n else "目前沒有詞")
+        edit.textChanged.connect(_update_count)
+        _update_count()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        clear_btn = buttons.addButton("清空", QDialogButtonBox.ButtonRole.ResetRole)
+        clear_btn.clicked.connect(edit.clear)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        v.addWidget(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._mask_word_list_text = edit.toPlainText().strip()
+        self._update_mask_list_btn()
+        m = self._main
+        if getattr(m, "_auto_translate_mask_word_list", "") != self._mask_word_list_text:
+            m._auto_translate_mask_word_list = self._mask_word_list_text
+            m.save_cache()
+        self._main.show_status("✅ 已更新過濾詞清單", "#0f0")
+
     def _persist_url_list(self) -> None:
         """把清單即時寫回主視窗並存檔（比照輸出資料夾，不必等按「開始」）。"""
         m = self._main
@@ -990,6 +1079,7 @@ class AutoTranslatePanel(QWidget):
                   self.gem_edit, self.model_combo, self.max_session_spin,
                   self.doc_title_edit, self.out_edit, self.skip_existing_cb,
                   self.btn_url_list, self.group_by_series_cb,
+                  self.mask_words_cb, self.btn_mask_list,
                   *self._backend_btns.values()):
             w.setEnabled(not running)
         # 作品資料夾欄位：執行中一律鎖；結束後回到「依勾選狀態」

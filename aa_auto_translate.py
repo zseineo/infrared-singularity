@@ -265,6 +265,38 @@ def _looks_untranslated(extracted: str, translated: str) -> bool:
     return same / len(common) >= _UNTRANSLATED_RATIO
 
 
+def parse_mask_words(text: str) -> list[str]:
+    """過濾詞清單原始文字 → 詞列表（一行一個、去空白與重複；長的排前面）。
+
+    長詞優先替換，避免短詞先把長詞的一部分換掉而漏換（例如同時有「殺」「殺す」）。
+    """
+    words = {ln.strip() for ln in (text or "").splitlines() if ln.strip()}
+    return sorted(words, key=len, reverse=True)
+
+
+def mask_words(extracted: str, words: list[str]) -> tuple[str, int]:
+    """把 'ID|原文' 各行原文部分出現的過濾詞換成等長的 ○，回傳 (新文字, 替換處數)。
+
+    只動 ``|`` 右側的原文，ID 不動（ID 對齊與未翻譯偵測都靠它）。只影響送給 AI
+    的文字——替換回原文件時仍用未遮蔽的提取結果定位（見 run_auto_translate）。
+    """
+    if not words:
+        return extracted, 0
+    total = 0
+    out: list[str] = []
+    for line in extracted.split("\n"):
+        if "|" in line:
+            head, body = line.split("|", 1)
+            for w in words:
+                n = body.count(w)
+                if n:
+                    body = body.replace(w, "○" * len(w))
+                    total += n
+            line = head + "|" + body
+        out.append(line)
+    return "\n".join(out), total
+
+
 def _translate(session: GeminiWebSession, extracted: str,
                log: Callable[[str], None], stop_event=None) -> str:
     """送 Gemini 翻譯；行數過多時分段送出後合併。
@@ -581,6 +613,8 @@ def run_auto_translate(
     series_folder: str = "",
     url_list: list[str] | None = None,
     append_mode: bool | None = None,
+    mask_words_enabled: bool | None = None,
+    mask_word_list: str | None = None,
     stop_event=None,
     progress: Callable[[str], None] | None = None,
     print_summary: bool = True,
@@ -601,6 +635,10 @@ def run_auto_translate(
         非空時直接採用，不再從標題推算——面板顯示什麼就存到哪，所見即所得。
     append_mode：對應主畫面「加入翻譯」（True，保留原文、翻譯附在原文之後）／「替換
         翻譯」（False）。None 時讀 cache 的 auto_translate_append_mode（預設 False）。
+    mask_words_enabled／mask_word_list：替換過濾詞——送給 AI 前把清單裡的詞（一行
+        一個，非正則）換成等長的 ○，降低被審查擋下的機率；替換回原文件時仍用原本
+        的提取結果定位，所以只有譯文裡會出現 ○。None 時讀 cache 的
+        auto_translate_mask_words／auto_translate_mask_word_list。
     url_list：手動網址清單（一行一個）。非空時**整批完全照清單跑**——第一行即第一話，
         `start_url` 參數本次忽略，下一話也不再從關聯記事推導。供「關聯記事尚未支援」
         的站台臨時使用。話數仍受 count 限制（取 min(count, 清單長度)）；until_last
@@ -629,6 +667,14 @@ def run_auto_translate(
     if group_by_series is None:
         group_by_series = getattr(
             cache, "auto_translate_group_by_series", False)
+    if mask_words_enabled is None:
+        mask_words_enabled = getattr(cache, "auto_translate_mask_words", False)
+    if mask_word_list is None:
+        mask_word_list = getattr(cache, "auto_translate_mask_word_list", "")
+    words_to_mask = parse_mask_words(mask_word_list) if mask_words_enabled else []
+    if mask_words_enabled:
+        log(f"🔒 替換過濾詞：開啟（清單 {len(words_to_mask)} 個詞）"
+            + ("" if words_to_mask else "；清單是空的，本次不會替換任何字"))
     os.makedirs(out_dir, exist_ok=True)
 
     # ── 依作品名分資料夾 ──
@@ -851,9 +897,14 @@ def run_auto_translate(
                 extracted = _extract(source, display_title, cfg)
                 n_lines = len([l for l in extracted.splitlines() if l.strip()])
                 log(f"  提取 {n_lines} 行，開始翻譯…")
-                translated = _translate(session, extracted, log, stop_event)
+                # 送給 AI 的是遮蔽過濾詞後的版本；未翻譯偵測也跟它比（AI 看到的就是
+                # 這份）。替換回原文件仍用未遮蔽的 extracted 定位。
+                to_send, n_masked = mask_words(extracted, words_to_mask)
+                if n_masked:
+                    log(f"  🔒 已把 {n_masked} 處過濾詞換成 ○")
+                translated = _translate(session, to_send, log, stop_event)
                 warnings = text_extraction.validate_ai_text(translated)
-                untranslated = _looks_untranslated(extracted, translated)
+                untranslated = _looks_untranslated(to_send, translated)
                 if warnings or untranslated:
                     reason = ("回覆與原文幾乎一致（疑似未翻譯）" if untranslated
                               else "翻譯驗證警告：" + "  ".join(warnings))
@@ -862,8 +913,8 @@ def run_auto_translate(
                     if untranslated:
                         log("  （未翻譯：先開新對話再重試，避免重複相同結果）")
                         session.start_new_session()
-                    translated = _translate(session, extracted, log, stop_event)
-                    if _looks_untranslated(extracted, translated):
+                    translated = _translate(session, to_send, log, stop_event)
+                    if _looks_untranslated(to_send, translated):
                         raise UntranslatedResponse("重試（已換新對話）後仍與原文幾乎一致")
                 log("  加入翻譯中…" if append_mode else "  替換翻譯中…")
                 result_text = translation_engine.apply_translation(

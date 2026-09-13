@@ -208,6 +208,8 @@ class AutoTranslatePanel(QWidget):
         self.out_edit.editingFinished.connect(self._persist_out_dir)
         # 同名序號（-2／-3）看輸出資料夾裡有沒有同名檔，換資料夾要重算
         self.out_edit.textChanged.connect(lambda _t: self._schedule_refresh())
+        # 作品資料夾「已存在」提示看的是輸出資料夾底下，換資料夾立即重判
+        self.out_edit.textChanged.connect(lambda _t: self._update_series_exists())
         btn_browse = QPushButton("瀏覽…")
         btn_browse.clicked.connect(self._browse_out_dir)
         out_hl.addWidget(self.out_edit, 1)
@@ -240,8 +242,16 @@ class AutoTranslatePanel(QWidget):
             "・手動模式 → 等於檔名欄的作品名稱\n"
             "・自動填入作品名稱模式 → 起始網址的頁面標題去掉話數後的作品名主體")
         self._series_folder_value = ""  # 目前起始網址算出的有效名稱（開始時帶給協調器）
-        form.addRow("作品資料夾：", self.series_folder_edit)
-        self._series_folder_label = form.labelForField(self.series_folder_edit)
+        # 右側提示：輸出資料夾底下是否已有同名資料夾（已存在就直接放進去）
+        self.series_exists_label = QLabel("")
+        series_row = QWidget()
+        series_hl = QHBoxLayout(series_row)
+        series_hl.setContentsMargins(0, 0, 0, 0)
+        series_hl.setSpacing(6)
+        series_hl.addWidget(self.series_folder_edit, 1)
+        series_hl.addWidget(self.series_exists_label)
+        form.addRow("作品資料夾：", series_row)
+        self._series_folder_label = form.labelForField(series_row)
 
         # 起始網址等欄位變動後延遲一下再重算檔名／作品資料夾（連續輸入只算一次）
         self._refresh_timer = QTimer(self)
@@ -781,6 +791,7 @@ class AutoTranslatePanel(QWidget):
     def _set_series_row_enabled(self, enabled: bool) -> None:
         """作品資料夾欄位（含標籤）僅在勾選「依作品名稱建立資料夾」時可用。"""
         self.series_folder_edit.setEnabled(enabled)
+        self.series_exists_label.setVisible(enabled)  # 沒勾選時不建資料夾，不必提示
         if self._series_folder_label is not None:
             self._series_folder_label.setEnabled(enabled)
 
@@ -788,6 +799,25 @@ class AutoTranslatePanel(QWidget):
         """設定作品資料夾：value 為開始時帶給協調器的名稱，display 為欄位顯示文字。"""
         self._series_folder_value = value
         self.series_folder_edit.setText(value if display is None else display)
+        self._update_series_exists()
+
+    def _update_series_exists(self) -> None:
+        """依目前資料夾名與輸出資料夾，提示該作品資料夾是否已存在。"""
+        name = self._series_folder_value
+        out_dir = self.out_edit.text().strip()
+        if not name or not out_dir:
+            self.series_exists_label.setText("")
+            self.series_exists_label.setToolTip("")
+        elif os.path.isdir(os.path.join(out_dir, name)):
+            self.series_exists_label.setText("📂 已存在，直接放進去")
+            self.series_exists_label.setStyleSheet("color:#0d6efd; font-weight:bold;")
+            self.series_exists_label.setToolTip(
+                f"輸出資料夾底下已有「{name}」資料夾，本批會直接存進去（不另建新的）。")
+        else:
+            self.series_exists_label.setText("🆕 將新建")
+            self.series_exists_label.setStyleSheet("color:#6c757d;")
+            self.series_exists_label.setToolTip(
+                f"輸出資料夾底下還沒有「{name}」資料夾，開始翻譯時會建立。")
 
     def _on_doc_title_changed(self, _text: str) -> None:
         """手動模式的作品名稱：資料夾名立即同步；檔名尾碼（同名序號）延遲重算。"""
@@ -812,6 +842,7 @@ class AutoTranslatePanel(QWidget):
         self._preview_gen += 1
         if self._title_auto:
             self._series_folder_value = ""
+            self._update_series_exists()
         self._refresh_timer.start()
 
     def _refresh_previews(self) -> None:

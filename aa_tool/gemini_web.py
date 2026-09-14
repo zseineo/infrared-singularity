@@ -70,6 +70,47 @@ class GeminiResponseTruncated(GeminiWebError):
     """
 
 
+# ── 自動翻譯進階設定：各種錯誤要「中斷」或「重試」（v2.41） ──
+# 值為 "retry"／"stop"；沒設定的項目用這裡的預設（＝v2.40 以前的固定行為）。
+# API 項目由兩個 API 後端（gemini_api／openai_api）套用：重試＝丟各自的「伺服器忙碌」
+# 例外走等待重試、達上限後由協調器放進待補翻列表；中斷＝丟 GeminiWebError。
+# web_stuck／fetch_fail 由協調器（aa_auto_translate）套用。
+ERROR_POLICY_DEFAULTS: dict[str, str] = {
+    "api_5xx": "retry",            # 伺服器忙碌（HTTP 500/502/503/504）
+    "api_timeout": "retry",        # 回應逾時／連線逾時
+    "api_conn_after_ok": "retry",  # 連線失敗／中途斷線／非 JSON（本批已成功翻譯過）
+    "api_conn_first": "stop",      # 同上，但本批還沒成功翻譯過（多半是設定問題）
+    "api_4xx": "stop",             # HTTP 4xx（429 額度另有冷卻邏輯，不在此列）
+    "api_empty": "stop",           # 空回應（非安全過濾、非截斷）
+    "web_stuck": "stop",           # 瀏覽器：Gemini 卡住（開新對話重送後仍無回應）
+    "fetch_fail": "stop",          # 抓取網頁失敗
+}
+
+
+def resolve_error_policy(policy) -> dict[str, str]:
+    """設定值 → 完整的 {項目: "retry"|"stop"}；未知項目／值忽略，缺的補預設。"""
+    out = dict(ERROR_POLICY_DEFAULTS)
+    if isinstance(policy, dict):
+        for k, v in policy.items():
+            if k in out and v in ("retry", "stop"):
+                out[k] = v
+    return out
+
+
+def policy_error(policy: dict, key: str, msg: str, *, busy_cls: type,
+                 default_note: str = "") -> GeminiWebError:
+    """依進階設定決定這個錯誤要丟哪種例外。
+
+    重試 → ``busy_cls``（後端的「伺服器忙碌」例外，會等待重試）；中斷 → GeminiWebError
+    （協調器中斷整批）。選的是預設值時附 ``default_note``（原本的說明），否則附
+    「（進階設定：重試／中斷）」，讓 Log 看得出行為是被設定改過的。
+    """
+    choice = policy.get(key, ERROR_POLICY_DEFAULTS[key])
+    note = (default_note if choice == ERROR_POLICY_DEFAULTS[key]
+            else f"（進階設定：{'重試' if choice == 'retry' else '中斷'}）")
+    return busy_cls(msg + note) if choice == "retry" else GeminiWebError(msg + note)
+
+
 def model_matches(detected: str, required: str) -> bool:
     """判斷讀到的模型字串是否符合要求。
 

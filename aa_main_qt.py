@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.40"
+APP_VERSION = "2.41"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -777,6 +777,8 @@ class MainWindow(QMainWindow):
         # 自動翻譯：譯文關鍵字檢查（出現時依各詞設定暫停／停止／跳過）
         self._auto_translate_output_kw: bool = False
         self._auto_translate_output_kw_rules: list = []  # [{"word", "action"}, ...]
+        # 自動翻譯進階設定：各種錯誤要中斷或重試（{項目: "stop"|"retry"}，連線設定內）
+        self._auto_translate_error_policy: dict = {}
         # 翻譯後端與 API 設定（金鑰另存於加密檔，不在 cache）
         self._translate_backend: str = "browser"
         self._api_provider: str = "gemini"  # API 供應商（gemini/openai/claude/deepseek/custom）
@@ -1843,6 +1845,11 @@ class MainWindow(QMainWindow):
         if "max_per_session" in params:
             self._gemini_max_per_session = max(
                 1, int(params.get("max_per_session") or 3))
+        if "error_policy" in params:
+            ep = params.get("error_policy") or {}
+            self._auto_translate_error_policy = (
+                {str(k): v for k, v in ep.items() if v in ("stop", "retry")}
+                if isinstance(ep, dict) else {})
         self.save_cache()
         try:
             from aa_tool import secure_store
@@ -1969,6 +1976,7 @@ class MainWindow(QMainWindow):
                     output_keyword_rules=list(self._auto_translate_output_kw_rules),
                     on_pause=_on_pause,
                     resume_event=resume_event,
+                    error_policy=dict(self._auto_translate_error_policy),
                     gem_url=gem_url,
                     profile_dir=self._gemini_profile_dir or None,
                     max_per_session=max_per_session,
@@ -2481,6 +2489,7 @@ class MainWindow(QMainWindow):
             auto_translate_mask_word_list=self._auto_translate_mask_word_list,
             auto_translate_output_kw=self._auto_translate_output_kw,
             auto_translate_output_kw_rules=list(self._auto_translate_output_kw_rules),
+            auto_translate_error_policy=dict(self._auto_translate_error_policy),
             translate_backend=self._translate_backend,
             api_provider=self._api_provider,
             gemini_api_model=self._gemini_api_model,
@@ -2600,6 +2609,8 @@ class MainWindow(QMainWindow):
             getattr(cache, "auto_translate_output_kw", False))
         self._auto_translate_output_kw_rules = list(
             getattr(cache, "auto_translate_output_kw_rules", []) or [])
+        self._auto_translate_error_policy = dict(
+            getattr(cache, "auto_translate_error_policy", {}) or {})
         self._auto_translate_group_by_series = bool(
             getattr(cache, "auto_translate_group_by_series", False))
         self._translate_backend = str(cache.translate_backend or "browser")

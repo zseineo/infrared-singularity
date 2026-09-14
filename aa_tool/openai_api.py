@@ -36,6 +36,7 @@ from typing import Callable
 from .gemini_web import (
     GeminiAborted, GeminiBusyRetriesExhausted, GeminiContentBlocked,
     GeminiQuotaExceeded, GeminiResponseTruncated, GeminiWebError,
+    policy_error, resolve_error_policy,
 )
 
 # ── 供應商註冊表 ──
@@ -130,9 +131,12 @@ class ChatApiSession:
         stop_event=None,
         timeout: int = 0,
         proxy: str = "",
+        error_policy: dict | None = None,
     ) -> None:
         self._keys = [k.strip() for k in (api_keys or []) if k.strip()]
         self._model = (model or "").strip()
+        # 進階設定：各種錯誤要中斷或重試（見 gemini_web.ERROR_POLICY_DEFAULTS）
+        self._policy = resolve_error_policy(error_policy)
         self._timeout = int(timeout) if timeout and int(timeout) > 0 else _TIMEOUT
         self._proxy = net_proxy.normalize(proxy)
         self._scheme = scheme if scheme in ("openai", "anthropic") else "openai"
@@ -256,7 +260,8 @@ class ChatApiSession:
             # socket 讀取逾時（"The read operation timed out"）。多半是伺服器高負載時
             # 排隊變慢 → 比照 5xx 等待後重試，不中斷整批。原訊息看不出可調整，
             # 這裡明說目前值與調整位置：若這一話太長而每次都逾時，要調高設定。
-            raise _ServerBusy(
+            raise self._policy_error(
+                "api_timeout",
                 f"API 回應逾時（超過 {self._timeout} 秒未收到完整回覆；"
                 f"若每次都逾時，可到「連線設定 → API 逾時」調高）") from e
         except urllib.error.HTTPError as e:
@@ -270,31 +275,47 @@ class ChatApiSession:
                 exc.retry_after = self._parse_retry_after(e)  # type: ignore[attr-defined]
                 raise exc from e
             if e.code in _TRANSIENT_HTTP:
-                raise _ServerBusy(
+                raise self._policy_error(
+                    "api_5xx",
                     f"HTTP {e.code}（伺服器忙碌/暫時無法服務）：{err_body[:200]}") from e
-            raise GeminiWebError(f"API 錯誤 HTTP {e.code}：{err_body[:300]}") from e
+            raise self._policy_error(
+                "api_4xx", f"API 錯誤 HTTP {e.code}：{err_body[:300]}") from e
         except urllib.error.URLError as e:
             if isinstance(e.reason, TimeoutError):
                 # 連線／TLS 握手逾時（urllib 包成 URLError）→ 同上，等待後重試
-                raise _ServerBusy(f"API 連線逾時：{e.reason}") from e
+                raise self._policy_error(
+                    "api_timeout", f"API 連線逾時：{e.reason}") from e
             raise self._connection_error(f"API 連線失敗：{e}") from e
         except (http.client.HTTPException, ConnectionError) as e:
             # 伺服器中途斷線（RemoteDisconnected／IncompleteRead／連線被重設）：
             # urllib 只包裝送出請求時的錯誤，讀回應時的斷線會原樣拋出
             raise self._connection_error(f"API 連線中途中斷：{e!r}") from e
-        return self._extract_text(payload)
+        try:
+            return self._extract_text(payload)
+        except (GeminiContentBlocked, GeminiResponseTruncated):
+            raise
+        except GeminiWebError as e:  # 空回應（非安全過濾、非截斷）
+            raise self._policy_error("api_empty", str(e)) from e
+
+    def _policy_error(self, key: str, msg: str,
+                      default_note: str = "") -> GeminiWebError:
+        """依進階設定：重試 → _ServerBusy（等待重試）；中斷 → GeminiWebError。"""
+        return policy_error(self._policy, key, msg, busy_cls=_ServerBusy,
+                            default_note=default_note)
 
     def _connection_error(self, msg: str) -> GeminiWebError:
-        """連線失敗／中途斷線／非 JSON 回應 → 依本批是否成功翻譯過決定性質。
+        """連線失敗／中途斷線／非 JSON 回應 → 依本批是否成功翻譯過分成兩個設定項目。
 
-        成功過 → 設定沒問題，多半是網路一時中斷 → 回 _ServerBusy，比照 5xx 等待
-        重試、達上限後暫時跳過並補翻。還沒成功過 → 多半是設定問題（Proxy／
-        端點網址／網路），回一般錯誤讓協調器中斷整批（見 gemini_api 同名方法）。
+        成功過（預設重試）→ 多半是網路一時中斷，比照 5xx 等待重試、達上限後暫時
+        跳過並補翻。還沒成功過（預設中斷）→ 多半是設定問題（Proxy／端點網址／
+        網路），讓協調器中斷整批（見 gemini_api 同名方法）。
         """
         if self._had_success:
-            return _ServerBusy(f"{msg}（先前已成功翻譯過，視為暫時斷線）")
-        return GeminiWebError(
-            f"{msg}；本批還沒成功翻譯過，多半是網路、Proxy 或端點網址設定問題，先中斷")
+            return self._policy_error(
+                "api_conn_after_ok", msg, "（先前已成功翻譯過，視為暫時斷線）")
+        return self._policy_error(
+            "api_conn_first", msg,
+            "；本批還沒成功翻譯過，多半是網路、Proxy 或端點網址設定問題，先中斷")
 
     def _build_request(self, key: str, prompt_text: str) -> tuple[str, dict, dict]:
         """依 scheme 組出 (url, headers, body)。"""

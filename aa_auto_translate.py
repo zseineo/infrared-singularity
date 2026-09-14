@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -31,9 +32,10 @@ from aa_tool import app_paths, constants, html_io, original_cache
 from aa_tool import settings_manager
 from aa_tool import text_extraction, translation_engine, url_fetcher
 from aa_tool.gemini_web import (
-    GeminiAborted, GeminiBusyRetriesExhausted, GeminiContentBlocked,
-    GeminiModelMismatch, GeminiQuotaExceeded, GeminiResponseTruncated,
-    GeminiWebError, GeminiWebSession,
+    ERROR_POLICY_DEFAULTS, GeminiAborted, GeminiBusyRetriesExhausted,
+    GeminiContentBlocked, GeminiModelMismatch, GeminiQuotaExceeded,
+    GeminiResponseTruncated, GeminiStuck, GeminiWebError, GeminiWebSession,
+    resolve_error_policy,
 )
 
 # 單次送給 Gemini 的最大提取行數；超過則分段送出後合併。
@@ -56,11 +58,34 @@ _URL_CACHE_DIR = os.path.join(tempfile.gettempdir(), "aa_url_cache")
 # 存檔後的 HTML 小於此大小即視為異常（實際一話不可能這麼小）：刪檔、記失敗、續下一話。
 _MIN_OUTPUT_BYTES = 5 * 1024
 
+# 進階設定「抓取網頁失敗＝重試」時的重抓節奏（與 API 伺服器忙碌重試一致）：
+# 每次等 90 秒，每滿 5 次多等 10 分鐘，最多 10 次；仍失敗才中斷整批。
+_FETCH_RETRY_WAIT = 90.0
+_FETCH_LONG_WAIT = 600.0
+_FETCH_LONG_WAIT_EVERY = 5
+_FETCH_MAX_RETRIES = 10
+
+# 進階設定各項目的中文名稱（Log 顯示「與預設不同」的項目用；面板另有完整說明）
+ERROR_POLICY_LABELS = {
+    "api_5xx": "API 伺服器忙碌（5xx）",
+    "api_timeout": "API 逾時",
+    "api_conn_after_ok": "API 連線中斷（已成功過）",
+    "api_conn_first": "API 連線失敗（還沒成功過）",
+    "api_4xx": "API HTTP 4xx 錯誤",
+    "api_empty": "API 空回應",
+    "web_stuck": "瀏覽器 Gemini 卡住",
+    "fetch_fail": "抓取網頁失敗",
+}
+
 
 # ── 例外 ──
 
 class ChapterError(RuntimeError):
     """單一話處理失敗（抓取/解析/提取/替換等）。"""
+
+
+class FetchFailed(ChapterError):
+    """抓取網頁本身失敗（連線／HTTP），可依進階設定重抓；解析失敗不在此列。"""
 
 
 class StopRequested(RuntimeError):
@@ -203,7 +228,7 @@ def _fetch_and_parse(url: str, cfg: AutoConfig) -> tuple[str, list, str, str]:
             msg = f"抓取網頁失敗：{e}"
             if detail:
                 msg += chr(10) + chr(10).join(detail)
-            raise ChapterError(msg) from e
+            raise FetchFailed(msg) from e
         _write_url_cache(url, page_html)
     try:
         text_content, nav_links, page_title = url_fetcher.parse_page_html(
@@ -363,11 +388,15 @@ def _keyword_hits_text(hits: list[tuple[str, str, str]]) -> str:
 
 
 def _translate(session: GeminiWebSession, extracted: str,
-               log: Callable[[str], None], stop_event=None) -> str:
+               log: Callable[[str], None], stop_event=None,
+               stuck_retry: bool = False) -> str:
     """送 Gemini 翻譯；行數過多時分段送出後合併。
 
     GeminiQuotaExceeded 直接往外拋（呼叫端暫停整批）。
     每段送出前檢查 stop_event，已設定則丟 StopRequested。
+    stuck_retry：進階設定「瀏覽器 Gemini 卡住＝重試」時為 True——把 GeminiStuck
+    轉成 GeminiBusyRetriesExhausted，讓協調器暫時跳過該話、之後補翻（卡住本身已
+    等過 10 分鐘並開新對話重送過一次）；False 時照舊往外拋（中斷整批）。
     """
     lines = [l for l in extracted.split("\n") if l.strip()]
     chunks = [lines[i:i + MAX_LINES_PER_REQUEST]
@@ -379,7 +408,12 @@ def _translate(session: GeminiWebSession, extracted: str,
         if len(chunks) > 1:
             log(f"  翻譯分段 {idx}/{len(chunks)}（{len(chunk)} 行）")
         chunk_text = "\n".join(chunk)
-        reply = session.translate(chunk_text)
+        try:
+            reply = session.translate(chunk_text)
+        except GeminiStuck as e:
+            if not stuck_retry:
+                raise
+            raise GeminiBusyRetriesExhausted(f"{e}（進階設定：重試）") from e
         if _looks_censored(chunk_text, reply):
             raise CensoredResponse(
                 f"分段 {idx}/{len(chunks)} 回覆極短且非翻譯格式（疑似被審查）")
@@ -684,6 +718,7 @@ def run_auto_translate(
     output_keyword_rules: list | None = None,
     on_pause: Callable[[str], None] | None = None,
     resume_event=None,
+    error_policy: dict | None = None,
     stop_event=None,
     progress: Callable[[str], None] | None = None,
     print_summary: bool = True,
@@ -716,6 +751,11 @@ def run_auto_translate(
         None 時讀 cache 的 auto_translate_output_kw／auto_translate_output_kw_rules。
     on_pause／resume_event：「暫停」用的 UI 回呼與 threading.Event；未提供時（CLI）
         暫停一律視為停止。
+    error_policy：進階設定——各種錯誤要「中斷」或「重試」（{項目: "stop"|"retry"}，
+        項目見 gemini_web.ERROR_POLICY_DEFAULTS；缺的項目用預設＝v2.40 以前的固定
+        行為）。API 項目交給 API 後端套用；web_stuck（重試＝暫時跳過放進待補翻）與
+        fetch_fail（重試＝等待後重抓，達上限仍中斷）由本函式套用。None 時讀 cache 的
+        auto_translate_error_policy。
     url_list：手動網址清單（一行一個）。非空時**整批完全照清單跑**——第一行即第一話，
         `start_url` 參數本次忽略，下一話也不再從關聯記事推導。供「關聯記事尚未支援」
         的站台臨時使用。話數仍受 count 限制（取 min(count, 清單長度)）；until_last
@@ -761,6 +801,13 @@ def run_auto_translate(
     if output_keywords_enabled:
         log(f"🔎 譯文關鍵字檢查：開啟（{len(kw_rules)} 個關鍵字）"
             + ("" if kw_rules else "；沒有設定任何關鍵字，本次不會檢查"))
+    if error_policy is None:
+        error_policy = getattr(cache, "auto_translate_error_policy", {})
+    policy = resolve_error_policy(error_policy)
+    changed = [f"{ERROR_POLICY_LABELS[k]}→{'重試' if v == 'retry' else '中斷'}"
+               for k, v in policy.items() if v != ERROR_POLICY_DEFAULTS[k]]
+    if changed:
+        log("⚙ 進階設定（與預設不同）：" + "、".join(changed))
     os.makedirs(out_dir, exist_ok=True)
 
     # ── 依作品名分資料夾 ──
@@ -832,7 +879,7 @@ def run_auto_translate(
                 keys, cache.gemini_api_model,
                 system_prompt=api_system_prompt, log=log,
                 stop_event=stop_event, base_dir=base_dir,
-                timeout=api_timeout, proxy=api_proxy)
+                timeout=api_timeout, proxy=api_proxy, error_policy=policy)
             open_log = f"使用 Gemini API（模型 {cache.gemini_api_model}）…"
         else:
             meta = openai_api.API_PROVIDERS.get(provider, {})
@@ -844,7 +891,7 @@ def run_auto_translate(
                 keys, model,
                 scheme=meta.get("scheme", "openai"), base_url=base_url,
                 system_prompt=api_system_prompt, log=log, stop_event=stop_event,
-                timeout=api_timeout, proxy=api_proxy)
+                timeout=api_timeout, proxy=api_proxy, error_policy=policy)
             open_log = f"使用 {meta.get('label', provider)} API（模型 {model}）…"
     else:
         gem_url = gem_url or cache.gemini_gem_url
@@ -892,6 +939,36 @@ def run_auto_translate(
                 return False
         log("  ▶ 已按繼續，接著翻譯下一話。")
         return True
+
+    stuck_retry = policy["web_stuck"] == "retry"
+
+    def _fetch_with_retry(ch_url: str) -> tuple[str, list, str, str]:
+        """抓取＋解析；進階設定「抓取網頁失敗＝重試」時等待後重抓（解析失敗不重試）。
+
+        重抓達上限仍失敗 → 丟最後一次的 FetchFailed（呼叫端中斷整批）；等待中按停止
+        → StopRequested。
+        """
+        attempt = 0
+        while True:
+            try:
+                return _fetch_and_parse(ch_url, cfg)
+            except FetchFailed as e:
+                if policy["fetch_fail"] != "retry":
+                    raise
+                if attempt >= _FETCH_MAX_RETRIES:
+                    lines = str(e).split("\n")
+                    lines[0] += f"（已重抓 {attempt} 次仍失敗）"
+                    raise FetchFailed("\n".join(lines)) from e
+                attempt += 1
+                long_wait = attempt % _FETCH_LONG_WAIT_EVERY == 0
+                wait = _FETCH_RETRY_WAIT + (_FETCH_LONG_WAIT if long_wait else 0.0)
+                log(f"  ⏳ {str(e).splitlines()[0]} → {int(wait)}s 後重抓"
+                    f"（第 {attempt}/{_FETCH_MAX_RETRIES} 次，進階設定：重試）…")
+                if stop_event is not None:
+                    if stop_event.wait(wait):
+                        raise StopRequested() from e
+                else:
+                    time.sleep(wait)
 
     try:
         log(open_log)
@@ -946,8 +1023,13 @@ def run_auto_translate(
 
                 # 1) 抓取＋解析（失敗則無法得知下一話 → 中斷整批）
                 try:
-                    source, nav_links, page_title, display_title = _fetch_and_parse(
-                        url, cfg)
+                    source, nav_links, page_title, display_title = _fetch_with_retry(
+                        url)
+                except StopRequested:
+                    result.stopped = True
+                    result.pending_url = url
+                    log("⏹️ 已收到停止指令，中止（此話未完成）。")
+                    break
                 except ChapterError as e:
                     # 抓取／解析失敗一律中斷整批（v2.27：清單模式原本會跳過續跑，現在也
                     # 中斷——「跳過某一話」只保留給 AI 端的疑似審查／疑似未翻譯，抓取層
@@ -1001,7 +1083,8 @@ def run_auto_translate(
                 to_send, n_masked = mask_words(extracted, words_to_mask)
                 if n_masked:
                     log(f"  🔒 已把 {n_masked} 處過濾詞換成 ○")
-                translated = _translate(session, to_send, log, stop_event)
+                translated = _translate(session, to_send, log, stop_event,
+                                        stuck_retry=stuck_retry)
                 warnings = text_extraction.validate_ai_text(translated)
                 untranslated = _looks_untranslated(to_send, translated)
                 if warnings or untranslated:
@@ -1012,7 +1095,8 @@ def run_auto_translate(
                     if untranslated:
                         log("  （未翻譯：先開新對話再重試，避免重複相同結果）")
                         session.start_new_session()
-                    translated = _translate(session, to_send, log, stop_event)
+                    translated = _translate(session, to_send, log, stop_event,
+                                            stuck_retry=stuck_retry)
                     if _looks_untranslated(to_send, translated):
                         raise UntranslatedResponse("重試（已換新對話）後仍與原文幾乎一致")
                 # 譯文關鍵字檢查：停止／跳過在存檔前處理（不存檔），暫停等存檔後再等

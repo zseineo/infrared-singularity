@@ -36,6 +36,39 @@ _BACKEND_OPTIONS: list[tuple[str, str]] = [
     ("API", "api"),
 ]
 
+# 連線設定「進階設定」的項目：(分組, [(項目 key, 顯示文字, 說明), ...])。
+# key 與預設值見 aa_tool.gemini_web.ERROR_POLICY_DEFAULTS。
+_ERROR_POLICY_UI: list[tuple[str, list[tuple[str, str, str]]]] = [
+    ("API 模式", [
+        ("api_5xx", "伺服器忙碌（HTTP 5xx）",
+         "API 回 500／502／503／504，多半是伺服器高負載。"),
+        ("api_timeout", "回應逾時／連線逾時",
+         "超過「API 逾時」秒數沒收到完整回覆，或連線握手逾時。\n"
+         "每次都逾時代表這一話太長，請調高「API 逾時」。"),
+        ("api_conn_after_ok", "連線中斷（這批已成功翻譯過）",
+         "連不上、伺服器中途斷線、回應不是 JSON——且這批已經成功翻譯過，\n"
+         "設定沒問題，多半是網路一時中斷（Wi-Fi、睡眠喚醒、VPN 重連）。"),
+        ("api_conn_first", "連線失敗（這批還沒成功翻譯過）",
+         "同上，但第一次送出就失敗——多半是網路、Proxy 或端點網址設定有問題。\n"
+         "改成重試的話，設定錯誤時每一話都要空等整輪重試才看得出來。"),
+        ("api_4xx", "HTTP 4xx 錯誤（429 除外）",
+         "例如 400 請求格式錯、401／403 金鑰無效、404 模型不存在。\n"
+         "額度上限（429）另有金鑰冷卻邏輯，不受此項影響。"),
+        ("api_empty", "空回應",
+         "API 回應成功但沒有內容，且不是被安全過濾擋下、也不是輸出被截斷。"),
+    ]),
+    ("瀏覽器模式", [
+        ("web_stuck", "Gemini 卡住",
+         "送出後超過 10 分鐘沒有回應，開新對話重送一次仍沒有回應。\n"
+         "重試＝暫時跳過這一話、放進待補翻列表，下一話翻譯成功後再補翻。"),
+    ]),
+    ("兩種模式", [
+        ("fetch_fail", "抓取網頁失敗",
+         "讀取作品網頁時連線失敗或 HTTP 錯誤（解析失敗、找不到內文不在此列）。\n"
+         "重試＝每 90 秒重抓一次，最多 10 次；仍失敗才中斷（不知道下一話，無法跳過）。"),
+    ]),
+]
+
 # API 供應商選項：(顯示文字, 內部值)；順序沿用 API_PROVIDERS 宣告順序。
 _PROVIDER_OPTIONS: list[tuple[str, str]] = [
     (meta["label"], pid) for pid, meta in API_PROVIDERS.items()
@@ -518,6 +551,9 @@ class AutoTranslatePanel(QWidget):
         self.api_prompt_edit.setFixedHeight(120)
         form.addRow("翻譯 Prompt 2：", self.api_prompt_edit)
 
+        # 進階設定：各種錯誤要中斷或重試（預設收合）
+        self._build_error_policy_section(v)
+
         # 動作列
         btn_row = QWidget()
         bh = QHBoxLayout(btn_row)
@@ -530,6 +566,89 @@ class AutoTranslatePanel(QWidget):
         bh.addWidget(btn_close)
         bh.addStretch()
         v.addWidget(btn_row)
+
+    def _build_error_policy_section(self, v: QVBoxLayout) -> None:
+        """連線設定浮層底部的「進階設定」：每種中斷／重試狀況一個下拉（重試／中斷）。
+
+        預設收合；展開後重新計算浮層高度。選項值存 `self._policy_combos`
+        （{項目: QComboBox}，data 為 "retry"／"stop"），儲存時只記與預設不同的項目。
+        """
+        from aa_tool.gemini_web import ERROR_POLICY_DEFAULTS
+        self.btn_policy_toggle = QPushButton("▸ 進階設定：遇到錯誤要中斷或重試")
+        self.btn_policy_toggle.setCheckable(True)
+        self.btn_policy_toggle.setFlat(True)
+        self.btn_policy_toggle.setStyleSheet(
+            "QPushButton { text-align:left; font-weight:bold; color:#495057; }")
+        v.addWidget(self.btn_policy_toggle)
+
+        box = QFrame()
+        box.setObjectName("policyBox")
+        box.setStyleSheet("#policyBox { border:1px solid #ced4da; border-radius:4px; }")
+        bv = QVBoxLayout(box)
+        bv.setContentsMargins(10, 8, 10, 8)
+        bv.setSpacing(6)
+        hint = QLabel(
+            "「重試」：API 錯誤每 90 秒重試一次（每 5 次多等 10 分鐘），同一次請求重試 10 次"
+            "仍失敗就暫時跳過、放進待補翻列表；瀏覽器 Gemini 卡住直接放進待補翻列表；"
+            "抓取網頁每 90 秒重抓，最多 10 次，仍失敗才中斷。" + chr(10) +
+            "「中斷」：第一次遇到就停止整批，起始網址會回填這一話。" + chr(10) +
+            "找不到頁面元素、登入逾時、存檔失敗等重試也沒用的錯誤一律中斷；"
+            "額度上限（429）另有冷卻與暫停邏輯，不在此列。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#6c757d;")
+        bv.addWidget(hint)
+
+        pf = QFormLayout()
+        pf.setHorizontalSpacing(10)
+        pf.setVerticalSpacing(4)
+        bv.addLayout(pf)
+        self._policy_combos: dict[str, QComboBox] = {}
+        for group, items in _ERROR_POLICY_UI:
+            head = QLabel(group)
+            head.setStyleSheet("font-weight:bold; color:#495057;")
+            pf.addRow(head)
+            for key, label, tip in items:
+                combo = QComboBox()
+                default = ERROR_POLICY_DEFAULTS[key]
+                for val, text in (("retry", "重試"), ("stop", "中斷")):
+                    combo.addItem(text + ("（預設）" if val == default else ""), val)
+                combo.setToolTip(tip)
+                lbl = QLabel(label + "：")
+                lbl.setToolTip(tip)
+                pf.addRow(lbl, combo)
+                self._policy_combos[key] = combo
+
+        btn_reset = QPushButton("恢復預設")
+        btn_reset.clicked.connect(lambda: self._apply_error_policy({}))
+        rh = QHBoxLayout()
+        rh.addWidget(btn_reset)
+        rh.addStretch()
+        bv.addLayout(rh)
+        box.hide()
+        v.addWidget(box)
+        self._policy_box = box
+
+        def _toggle(checked: bool) -> None:
+            box.setVisible(checked)
+            self.btn_policy_toggle.setText(
+                ("▾" if checked else "▸") + " 進階設定：遇到錯誤要中斷或重試")
+            # 內容高度變了 → 重新計算浮層高度（等版面更新後）
+            QTimer.singleShot(0, self._position_conn_panel)
+        self.btn_policy_toggle.toggled.connect(_toggle)
+
+    def _apply_error_policy(self, policy: dict) -> None:
+        """把設定值（缺的補預設）套到進階設定的各個下拉。"""
+        from aa_tool.gemini_web import resolve_error_policy
+        for key, val in resolve_error_policy(policy).items():
+            combo = self._policy_combos.get(key)
+            if combo is not None:
+                combo.setCurrentIndex(max(0, combo.findData(val)))
+
+    def _collect_error_policy(self) -> dict:
+        """目前下拉的選擇中，與預設不同的項目 → {項目: 值}。"""
+        from aa_tool.gemini_web import ERROR_POLICY_DEFAULTS
+        return {k: c.currentData() for k, c in self._policy_combos.items()
+                if c.currentData() != ERROR_POLICY_DEFAULTS[k]}
 
     def toggle_conn_panel(self) -> None:
         """開合連線設定浮層（由主視窗導覽列「⚙ 連線設定」鈕呼叫）。"""
@@ -719,6 +838,7 @@ class AutoTranslatePanel(QWidget):
         self.api_provider_combo.blockSignals(False)
         self._apply_provider_to_fields(provider)
         self._on_backend_changed()
+        self._apply_error_policy(getattr(m, "_auto_translate_error_policy", {}) or {})
 
     def _save_conn_settings(self) -> None:
         self._flush_current_provider()  # 存回目前顯示中的供應商欄位
@@ -743,6 +863,8 @@ class AutoTranslatePanel(QWidget):
             "gem_url": self.gem_edit.text().strip(),
             "required_model": self.model_combo.currentData(),
             "max_per_session": self.max_session_spin.value(),
+            # 進階設定：只記與預設不同的項目（預設日後調整時，未改過的項目跟著走）
+            "error_policy": self._collect_error_policy(),
         }
         self._main.save_connection_settings(params)
         kn = len(provider_keys.get(provider, []))

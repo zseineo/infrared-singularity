@@ -209,6 +209,10 @@ class AppCache:
     # 文字，非正則）。預設關閉。
     auto_translate_output_kw: bool = False
     auto_translate_output_kw_rules: list = field(default_factory=list)
+    # auto_translate_error_policy：連線設定「進階設定」——各種錯誤要中斷或重試，
+    # {項目: "stop"|"retry"}（項目見 gemini_web.ERROR_POLICY_DEFAULTS）。面板只存
+    # 與預設不同的項目；缺的項目用預設（＝v2.40 以前的固定行為）。
+    auto_translate_error_policy: dict = field(default_factory=dict)
     # auto_translate_group_by_series：在輸出資料夾下依作品名開一層子資料夾存放
     # （整批共用同一個、已存在就沿用）。資料夾名本身刻意**不持久化**——它由起始
     # 網址／作品名稱欄位決定，記住舊值會在換作品時把新作品存進舊資料夾。
@@ -494,6 +498,11 @@ class SettingsManager:
                      'action': str(r.get('action', 'pause'))}
                     for r in raw_kw
                     if isinstance(r, dict) and str(r.get('word', '')).strip()]
+            raw_policy = data.get('auto_translate_error_policy', {})
+            if isinstance(raw_policy, dict):
+                cache.auto_translate_error_policy = {
+                    str(k): v for k, v in raw_policy.items()
+                    if v in ('stop', 'retry')}
             cache.auto_translate_group_by_series = bool(data.get(
                 'auto_translate_group_by_series',
                 cache.auto_translate_group_by_series))
@@ -624,6 +633,8 @@ class SettingsManager:
                 'auto_translate_output_kw': cache.auto_translate_output_kw,
                 'auto_translate_output_kw_rules':
                     cache.auto_translate_output_kw_rules,
+                'auto_translate_error_policy':
+                    cache.auto_translate_error_policy,
                 'auto_translate_group_by_series':
                     cache.auto_translate_group_by_series,
                 'gemini_required_model': cache.gemini_required_model,

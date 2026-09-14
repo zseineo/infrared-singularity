@@ -169,6 +169,8 @@ class AutoResult:
     done: list = field(default_factory=list)        # [輸出檔路徑, ...]
     failed: list = field(default_factory=list)      # [(url, 原因), ...]
     skipped: list = field(default_factory=list)     # [(url, 檔名), ...] 已存在同名檔而跳過
+    filtered: list = field(default_factory=list)    # [(url, 頁面標題), ...] 標題不含過濾文字而跳過
+    title_filter_stop: str = ""                     # 連續太多話不符標題過濾而中止時的說明
     quota_paused: bool = False                      # 是否因額度上限暫停
     pending_url: str = ""                           # 暫停／停止時未完成的話網址
     next_url: str = ""                              # 自然跑滿話數後的下一話續接網址
@@ -691,6 +693,16 @@ def _fill_titles_from_history(result: AutoResult, url_history: list) -> None:
 # until_last 模式下的安全上限，避免關聯連結異常時無限迴圈。
 _UNTIL_LAST_CAP = 9999
 
+# 標題過濾：連續這麼多話都不符就中止（跳過的話不計話數，過濾文字打錯時才不會
+# 一路抓到最後，關聯連結成環時也不會無限迴圈）。
+_TITLE_FILTER_MAX_CONSECUTIVE = 50
+
+
+def title_matches(page_title: str, title_filter: str) -> bool:
+    """標題過濾：頁面標題含過濾文字（不分大小寫）才算符合；過濾文字空白＝不過濾。"""
+    needle = (title_filter or "").strip().casefold()
+    return not needle or needle in (page_title or "").casefold()
+
 
 def run_auto_translate(
     start_url: str,
@@ -708,6 +720,7 @@ def run_auto_translate(
     fetch_auto_fill_title: bool | None = None,
     until_last: bool = False,
     skip_existing: bool = False,
+    title_filter: str = "",
     group_by_series: bool | None = None,
     series_folder: str = "",
     url_list: list[str] | None = None,
@@ -730,6 +743,10 @@ def run_auto_translate(
     until_last：為 True 時忽略 count，一路翻到沒有下一話為止。
     skip_existing：為 True 時，翻譯前先算好這一話的檔名，若輸出資料夾已有同名檔
         （不計碰撞序號）就跳過該話、直接抓下一話——適合批次中斷後重跑略過已完成的話。
+    title_filter：標題過濾文字。非空時，抓到的頁面標題（page_title）不含此文字
+        （不分大小寫）的話直接跳過、讀下一話；跳過的話**不計入 count**，也不參與
+        作品資料夾名的決定。連續 `_TITLE_FILTER_MAX_CONSECUTIVE` 話都不符就中止整批
+        （`title_filter_stop`、`pending_url`）。
     group_by_series：為 True 時在 ``out_dir`` 底下依作品名開一層子資料夾，整批的
         HTML 都寫進去（已存在就直接沿用）。None 時讀 cache 的
         auto_translate_group_by_series（預設 False）。**資料夾名整批只決定一次**
@@ -801,6 +818,9 @@ def run_auto_translate(
     if output_keywords_enabled:
         log(f"🔎 譯文關鍵字檢查：開啟（{len(kw_rules)} 個關鍵字）"
             + ("" if kw_rules else "；沒有設定任何關鍵字，本次不會檢查"))
+    title_filter = (title_filter or "").strip()
+    if title_filter:
+        log(f"🔤 標題過濾：只翻標題含「{title_filter}」的話（不符的跳過，不計話數）")
     if error_policy is None:
         error_policy = getattr(cache, "auto_translate_error_policy", {})
     policy = resolve_error_policy(error_policy)
@@ -984,7 +1004,9 @@ def run_auto_translate(
             return result
         retry_ready = False   # 上一話翻譯成功 → 下一輪先補翻待補翻列表
         drain_logged = False  # 「新的話已跑完、開始清空列表」的提示只印一次
-        i = 0                 # 已開始處理的「新」話數（補翻不計）
+        i = 0                 # 已開始處理的「新」話數（補翻、標題過濾跳過的不計）
+        list_pos = 0          # 清單模式：已讀到清單第幾個網址（標題過濾跳過的也算）
+        filtered_run = 0      # 連續幾話不符標題過濾
         while True:
             if _stopping():
                 result.stopped = True
@@ -1047,16 +1069,37 @@ def run_auto_translate(
                 # 記下這一話的名稱，供總結顯示（失敗／跳過／接續的網址才分得出是哪一話）
                 if page_title:
                     result.titles[url] = page_title
-                # 1.4) 依作品名分資料夾：用第一話的標題定一次，之後各話沿用。
-                #      放在跳過判定之前，確保「已存在同名檔」看的是子資料夾。
-                _decide_series_dir(page_title)
-                # 清單模式下一話直接取清單的下一筆（i 為 1-based，故下一筆是 urls[i]）
+                # 清單模式下一話直接取清單的下一筆（list_pos 為已讀網址數，故下一筆
+                # 是 urls[list_pos]；標題過濾跳過的話不計 i，所以不能用 i 當索引）
                 if urls:
-                    next_url = urls[i] if i < len(urls) else ""
+                    list_pos += 1
+                    next_url = urls[list_pos] if list_pos < len(urls) else ""
                 else:
                     next_url, next_title = _next_chapter_url(nav_links)
                     if next_url and next_title:
                         result.titles.setdefault(next_url, next_title)
+
+                # 1.3) 標題過濾：標題不含過濾文字 → 跳過、讀下一話，不計話數。
+                #      放在決定作品資料夾之前，別的作品的標題才不會被拿去當資料夾名。
+                if not title_matches(page_title, title_filter):
+                    i -= 1
+                    filtered_run += 1
+                    result.filtered.append((url, page_title))
+                    log(f"  ⏭️ 標題「{page_title or '（讀不到標題）'}」不含"
+                        f"「{title_filter}」→ 跳過此話（不計話數），讀下一話。")
+                    url = next_url
+                    if url and filtered_run >= _TITLE_FILTER_MAX_CONSECUTIVE:
+                        result.title_filter_stop = (
+                            f"連續 {filtered_run} 話標題都不含「{title_filter}」")
+                        result.pending_url = url
+                        log(f"  🛑 {result.title_filter_stop} → 中止整批"
+                            "（請確認標題過濾文字；下一話可用來當起始網址接續）。")
+                        break
+                    continue
+                filtered_run = 0
+                # 1.4) 依作品名分資料夾：用第一話的標題定一次，之後各話沿用。
+                #      放在跳過判定之前，確保「已存在同名檔」看的是子資料夾。
+                _decide_series_dir(page_title)
 
                 # 1.5) 若已有同名檔則跳過（重跑批次時略過已完成的話、省 API 額度）。
                 #      檢查用「不含碰撞序號」的檔名主體，因此判定的是「這一話本身」是否
@@ -1292,6 +1335,15 @@ def _print_summary(result: AutoResult, log: Callable[[str], None]) -> None:
         log(f"跳過（已存在同名檔）：{len(result.skipped)} 話")
         for u, fn in result.skipped:
             log(f"  ⏭️ {format_url_with_title(u, result.titles)} — {fn}")
+    if result.filtered:
+        log(f"跳過（標題不符過濾）：{len(result.filtered)} 話")
+        for u, _t in result.filtered:
+            log(f"  ⏭️ {format_url_with_title(u, result.titles)}")
+    if result.title_filter_stop:
+        log(f"🛑 {result.title_filter_stop}，已中止整批。")
+        if result.pending_url:
+            log("   要接續，可用此網址當 --url："
+                + format_url_with_title(result.pending_url, result.titles))
     if result.quota_paused:
         log("⏸️ 因 Gemini 額度上限暫停。")
         log("   待額度恢復後，用此網址當 --url 接續："
@@ -1326,6 +1378,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="忽略 --count，一路翻到沒有下一話為止")
     parser.add_argument("--skip-existing", action="store_true",
                         help="輸出資料夾已有同名檔時跳過該話（重跑批次略過已完成的話）")
+    parser.add_argument("--title-filter", default="",
+                        help="只翻頁面標題含此文字的話（不符的跳過、不計話數）")
     parser.add_argument("--append", action="store_true",
                         help="加入翻譯模式（保留原文、翻譯附在原文之後）；預設為替換翻譯")
     parser.add_argument("--group-by-series", action="store_true",
@@ -1359,6 +1413,7 @@ def main(argv: list[str] | None = None) -> int:
             gem_url=args.gem_url, profile_dir=args.profile_dir,
             headless=args.headless, until_last=args.until_last,
             skip_existing=args.skip_existing,
+            title_filter=args.title_filter,
             group_by_series=(True if args.group_by_series else None),
             series_folder=args.series_folder,
             append_mode=(True if args.append else None),

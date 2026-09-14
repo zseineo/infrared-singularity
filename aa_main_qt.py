@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.43"
+APP_VERSION = "2.44"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -1901,7 +1901,8 @@ class MainWindow(QMainWindow):
             params.get("doc_title", ""),
             params.get("skip_existing", False),
             params.get("url_list") or [],
-            params.get("series_folder", ""))
+            params.get("series_folder", ""),
+            params.get("title_filter", ""))
 
     def _start_auto_translate(self, start_url: str, count: int,
                                out_dir: str, gem_url: str,
@@ -1911,7 +1912,8 @@ class MainWindow(QMainWindow):
                                doc_title: str = "",
                                skip_existing: bool = False,
                                url_list: list[str] | None = None,
-                               series_folder: str = "") -> None:
+                               series_folder: str = "",
+                               title_filter: str = "") -> None:
         """在背景執行緒跑自動翻譯，進度同步至橫幅、狀態列與面板 Log。"""
         self._auto_translate_running = True
         self._auto_stop_event = threading.Event()
@@ -1930,6 +1932,7 @@ class MainWindow(QMainWindow):
             self._auto_window.append_log(
                 f"=== 啟動自動翻譯：count={count} until_last={until_last} "
                 f"skip_existing={skip_existing} "
+                f"{('title_filter=「' + title_filter + '」 ') if title_filter else ''}"
                 f"group_by_series={self._auto_translate_group_by_series}"
                 f"{('（' + series_folder + '）') if series_folder else ''} "
                 f"url_list={len(url_list or [])} "
@@ -1985,6 +1988,7 @@ class MainWindow(QMainWindow):
                     fetch_auto_fill_title=self._fetch_auto_fill_title,
                     until_last=until_last,
                     skip_existing=skip_existing,
+                    title_filter=title_filter,
                     group_by_series=self._auto_translate_group_by_series,
                     series_folder=series_folder,
                     url_list=url_list,
@@ -2054,6 +2058,17 @@ class MainWindow(QMainWindow):
         if skipped:
             lines.append(f"跳過（已存在同名檔）{len(skipped)} 話：")
             lines += [f"  ⏭️ {_url_name(u, titles)} — {fn}" for u, fn in skipped]
+        filtered = getattr(result, "filtered", [])
+        if filtered:
+            lines.append(f"跳過（標題不符過濾）{len(filtered)} 話：")
+            lines += [f"  ⏭️ {_url_name(u, titles)}" for u, _t in filtered]
+        title_filter_stop = getattr(result, "title_filter_stop", "")
+        if title_filter_stop:
+            lines.append("")
+            lines.append(f"🛑 {title_filter_stop}，已中止整批（請確認標題過濾文字）。")
+            if result.pending_url:
+                lines.append("要接續，用下列網址當起始網址：")
+                lines.append(_url_name(result.pending_url, titles))
         if result.reached_end:
             lines.append("")
             lines.append("🏁 已翻到最後一話。")
@@ -2084,7 +2099,8 @@ class MainWindow(QMainWindow):
                 lines.append("要接續，用下列網址當起始網址：")
                 lines.append(_url_name(result.pending_url, titles))
         ok = (not result.failed and not result.quota_paused
-              and not result.stopped and not result.model_mismatch)
+              and not result.stopped and not result.model_mismatch
+              and not title_filter_stop)
         if result.model_mismatch:
             color = "#dc3545"
             head = "🛑 模型不符已中止"

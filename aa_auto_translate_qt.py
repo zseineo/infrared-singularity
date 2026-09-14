@@ -205,6 +205,18 @@ class AutoTranslatePanel(QWidget):
         count_hl.addStretch()
         form.addRow("連續話數：", count_row)
 
+        # 標題過濾：讀到的頁面標題不含這段文字就跳過該話、讀下一話（不計話數）。
+        # 不持久化——換作品時沿用舊值會把整批都跳過。
+        self.title_filter_edit = QLineEdit()
+        self.title_filter_edit.setPlaceholderText(
+            "留空＝不過濾；填入後只翻標題含此文字的話")
+        self.title_filter_edit.setToolTip(
+            "讀取網址時讀到的標題若不含這段文字（不分大小寫），就跳過該話、讀下一話。\n"
+            "・跳過的話不計入「連續話數」，也不存檔\n"
+            "・連續多話（50 話）都不符會自動中止，避免過濾文字打錯時一路抓到最後\n"
+            "・直接比對文字，不是正則")
+        form.addRow("標題過濾：", self.title_filter_edit)
+
         # 檔名：作品名稱與檔名預覽共用一列，依「自動填入作品名稱」設定切換
         # （_apply_title_mode）。手動模式＝可編輯的作品名稱＋右側灰字尾碼
         # （話數／同名序號／副檔名）；自動模式＝整個檔名由頁面標題產生，改顯示
@@ -911,6 +923,7 @@ class AutoTranslatePanel(QWidget):
             "start_url": url,
             "count": self.count_spin.value(),
             "until_last": self.until_last.isChecked(),
+            "title_filter": self.title_filter_edit.text().strip(),
             "backend": backend,
             "gem_url": gem,
             "required_model": self.model_combo.currentData(),
@@ -1386,7 +1399,7 @@ class AutoTranslatePanel(QWidget):
         self.btn_stop.setEnabled(running)
         # 執行中鎖住設定欄位，避免使用者中途改值造成混亂
         for w in (self.url_edit, self.count_spin, self.until_last,
-                  self.gem_edit, self.model_combo, self.max_session_spin,
+                  self.title_filter_edit, self.gem_edit, self.model_combo, self.max_session_spin,
                   self.doc_title_edit, self.out_edit, self.skip_existing_cb,
                   self.btn_url_list, self.group_by_series_cb,
                   self.mask_words_cb, self.btn_mask_list,

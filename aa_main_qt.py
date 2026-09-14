@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.39"
+APP_VERSION = "2.40"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -774,6 +774,9 @@ class MainWindow(QMainWindow):
         # 自動翻譯：送給 AI 前把過濾詞清單（一行一個）裡的詞換成 ○，降低被審查機率
         self._auto_translate_mask_words: bool = False
         self._auto_translate_mask_word_list: str = ""
+        # 自動翻譯：譯文關鍵字檢查（出現時依各詞設定暫停／停止／跳過）
+        self._auto_translate_output_kw: bool = False
+        self._auto_translate_output_kw_rules: list = []  # [{"word", "action"}, ...]
         # 翻譯後端與 API 設定（金鑰另存於加密檔，不在 cache）
         self._translate_backend: str = "browser"
         self._api_provider: str = "gemini"  # API 供應商（gemini/openai/claude/deepseek/custom）
@@ -786,6 +789,7 @@ class MainWindow(QMainWindow):
         self._browser_use_gem: bool = True
         self._auto_translate_running: bool = False
         self._auto_stop_event = None  # threading.Event，執行中時設定
+        self._auto_resume_event = None  # threading.Event，關鍵字暫停後按「繼續」時設定
         self._author_only: bool = False
         self._author_name: str = ""
         # URL 讀取後暫存的標題（line 1），供「提取日文」時跳過標題行之用
@@ -923,6 +927,16 @@ class MainWindow(QMainWindow):
         self._auto_banner_label.setFont(_ui_font(12, bold=True))
         self._auto_banner_label.setStyleSheet("color:white;")
         hl.addWidget(self._auto_banner_label, 1)
+
+        # 譯文關鍵字「暫停」時才出現：按下後接著翻下一話
+        btn_resume = _make_btn("▶ 繼續", "#198754", "#146c43",
+                               font=_ui_font(11, bold=True), width=80)
+        btn_resume.setFixedHeight(28)
+        btn_resume.setToolTip("譯文出現關鍵字而暫停：確認後按這裡接著翻下一話")
+        btn_resume.clicked.connect(self._resume_auto_translate)
+        btn_resume.hide()
+        hl.addWidget(btn_resume)
+        self._auto_banner_resume_btn = btn_resume
 
         btn_stop = _make_btn("■ 停止", "#dc3545", "#b02a37",
                              font=_ui_font(11, bold=True), width=80)
@@ -1863,6 +1877,7 @@ class MainWindow(QMainWindow):
                 params.get("url_list") or [])
         self._auto_translate_append_mode = params.get("append_mode", False)
         self._auto_translate_mask_words = params.get("mask_words", False)
+        self._auto_translate_output_kw = params.get("output_kw", False)
         self._gemini_max_per_session = params["max_per_session"]
         self._gemini_required_model = params["required_model"] or "pro"
         # 手動模式下也把使用者填的作品名稱同步回首頁（保持兩邊一致）
@@ -1893,8 +1908,10 @@ class MainWindow(QMainWindow):
         """在背景執行緒跑自動翻譯，進度同步至橫幅、狀態列與面板 Log。"""
         self._auto_translate_running = True
         self._auto_stop_event = threading.Event()
+        self._auto_resume_event = threading.Event()
         self._auto_banner_stop_btn.setEnabled(True)
         self._auto_banner_stop_btn.setText("■ 停止")
+        self._auto_banner_resume_btn.hide()
         if self._translate_backend == "api":
             self._auto_banner_label.setText("⚡ 自動翻譯啟動中（API 模式）…")
         else:
@@ -1925,7 +1942,18 @@ class MainWindow(QMainWindow):
                     self._auto_window.append_log(m)
             self._invoke_on_main.emit(_apply)
 
+        def _on_pause(msg: str) -> None:
+            """譯文關鍵字暫停（背景執行緒呼叫）：橫幅顯示「繼續」鈕並提醒使用者。"""
+            def _apply(m=msg) -> None:
+                if self._auto_banner_label is not None:
+                    self._auto_banner_label.setText(f"⏸️ {m}")
+                self._auto_banner_resume_btn.show()
+                self.show_status(f"⏸️ {m}", "#f39c12")
+                QApplication.alert(self)  # 工作列閃爍，人不在畫面前也看得到
+            self._invoke_on_main.emit(_apply)
+
         stop_event = self._auto_stop_event
+        resume_event = self._auto_resume_event
 
         def _bg() -> None:
             from aa_auto_translate import run_auto_translate
@@ -1937,6 +1965,10 @@ class MainWindow(QMainWindow):
                     append_mode=self._auto_translate_append_mode,
                     mask_words_enabled=self._auto_translate_mask_words,
                     mask_word_list=self._auto_translate_mask_word_list,
+                    output_keywords_enabled=self._auto_translate_output_kw,
+                    output_keyword_rules=list(self._auto_translate_output_kw_rules),
+                    on_pause=_on_pause,
+                    resume_event=resume_event,
                     gem_url=gem_url,
                     profile_dir=self._gemini_profile_dir or None,
                     max_per_session=max_per_session,
@@ -1966,13 +1998,24 @@ class MainWindow(QMainWindow):
             return
         if self._auto_stop_event is not None:
             self._auto_stop_event.set()
+        self._auto_banner_resume_btn.hide()
         self._auto_banner_stop_btn.setEnabled(False)
         self._auto_banner_stop_btn.setText("停止中…")
         self._auto_banner_label.setText("⏹️ 停止指令已送出，等待當前動作結束…")
 
+    def _resume_auto_translate(self) -> None:
+        """橫幅「▶ 繼續」：譯文關鍵字暫停後，通知背景執行緒接著翻下一話。"""
+        if not self._auto_translate_running or self._auto_resume_event is None:
+            return
+        self._auto_resume_event.set()
+        self._auto_banner_resume_btn.hide()
+        self._auto_banner_label.setText("⚡ 繼續自動翻譯…")
+
     def _auto_translate_done(self, result, error: 'str | None') -> None:
         self._auto_translate_running = False
         self._auto_stop_event = None
+        self._auto_resume_event = None
+        self._auto_banner_resume_btn.hide()
         self._auto_banner.hide()
         if self._auto_window is not None:
             self._auto_window.set_running(False)
@@ -2025,11 +2068,21 @@ class MainWindow(QMainWindow):
             lines.append("")
             lines.append("🛑 偵測到 Gemini 模型與要求不符，已中止整批。")
             lines.append("請在瀏覽器切換到正確模型後重跑。")
+        keyword_stop = getattr(result, "keyword_stop", "")
+        if keyword_stop:
+            lines.append("")
+            lines.append(f"🛑 {keyword_stop}（停止），已中止整批，這一話沒有存檔。")
+            if result.pending_url:
+                lines.append("要接續，用下列網址當起始網址：")
+                lines.append(_url_name(result.pending_url, titles))
         ok = (not result.failed and not result.quota_paused
               and not result.stopped and not result.model_mismatch)
         if result.model_mismatch:
             color = "#dc3545"
             head = "🛑 模型不符已中止"
+        elif keyword_stop:
+            color = "#dc3545"
+            head = "🛑 譯文出現關鍵字已中止"
         elif result.stopped:
             color = "#6c757d"
             head = "⏹️ 已停止"
@@ -2426,6 +2479,8 @@ class MainWindow(QMainWindow):
             auto_translate_append_mode=self._auto_translate_append_mode,
             auto_translate_mask_words=self._auto_translate_mask_words,
             auto_translate_mask_word_list=self._auto_translate_mask_word_list,
+            auto_translate_output_kw=self._auto_translate_output_kw,
+            auto_translate_output_kw_rules=list(self._auto_translate_output_kw_rules),
             translate_backend=self._translate_backend,
             api_provider=self._api_provider,
             gemini_api_model=self._gemini_api_model,
@@ -2541,6 +2596,10 @@ class MainWindow(QMainWindow):
             getattr(cache, "auto_translate_mask_words", False))
         self._auto_translate_mask_word_list = str(
             getattr(cache, "auto_translate_mask_word_list", "") or "")
+        self._auto_translate_output_kw = bool(
+            getattr(cache, "auto_translate_output_kw", False))
+        self._auto_translate_output_kw_rules = list(
+            getattr(cache, "auto_translate_output_kw_rules", []) or [])
         self._auto_translate_group_by_series = bool(
             getattr(cache, "auto_translate_group_by_series", False))
         self._translate_backend = str(cache.translate_backend or "browser")

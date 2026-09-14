@@ -79,6 +79,17 @@ class OutputTooSmall(RuntimeError):
     """存檔後檔案小於 `_MIN_OUTPUT_BYTES`（實際一話不可能這麼小）→ 已刪檔，該話跳過。"""
 
 
+class OutputKeywordHit(RuntimeError):
+    """譯文出現使用者設定的關鍵字，且動作為「停止」或「跳過」（皆不存檔）。
+
+    `action` 為 "stop"／"skip"；「暫停」不丟例外（先存檔再原地等使用者按繼續）。
+    """
+
+    def __init__(self, action: str, message: str) -> None:
+        super().__init__(message)
+        self.action = action
+
+
 # ── 設定載入 ──
 
 @dataclass
@@ -140,6 +151,7 @@ class AutoResult:
     stopped: bool = False                           # 是否被使用者手動停止
     reached_end: bool = False                       # 是否因為沒有下一話而結束
     model_mismatch: bool = False                    # 是否因模型與要求不符而中止
+    keyword_stop: str = ""                          # 譯文出現「停止」關鍵字而中止時的說明
     titles: dict = field(default_factory=dict)      # {網址: 該網址讀取到的名稱（頁面標題）}
 
 
@@ -303,6 +315,51 @@ def mask_words(extracted: str, words: list[str]) -> tuple[str, int]:
             line = head + "|" + body
         out.append(line)
     return "\n".join(out), total
+
+
+# 譯文關鍵字檢查的動作：pause＝先存檔、原地等使用者按繼續；stop＝不存檔、結束整批；
+# skip＝不存檔、記入失敗、續下一話。
+OUTPUT_KEYWORD_ACTIONS = {"pause": "暫停", "stop": "停止", "skip": "跳過"}
+# 同一話命中多個動作時的優先順序：停止 > 跳過 > 暫停（跳過＝「這話不要存」，
+# 必須優先於會先存檔的暫停）。
+_OUTPUT_KEYWORD_PRIORITY = ("stop", "skip", "pause")
+
+
+def parse_output_keyword_rules(rules) -> list[tuple[str, str]]:
+    """設定值 [{"word": 詞, "action": 動作}, ...] → [(詞, 動作), ...]。
+
+    去掉空詞與首尾空白；同一個詞重複時以後面的設定為準；未知動作視為 pause。
+    """
+    out: dict[str, str] = {}
+    for r in rules or []:
+        if not isinstance(r, dict):
+            continue
+        word = str(r.get("word", "")).strip()
+        if not word:
+            continue
+        action = str(r.get("action", "pause"))
+        out[word] = action if action in OUTPUT_KEYWORD_ACTIONS else "pause"
+    return list(out.items())
+
+
+def find_output_keywords(translated: str,
+                         rules: list[tuple[str, str]]) -> list[tuple[str, str, str]]:
+    """找出譯文中出現的關鍵字，回傳 [(詞, 動作, 第一個命中的那一行), ...]。
+
+    直接比對文字（非正則），整份回覆逐行找（含 AI 回的拒絕語等非 ID 行）。
+    """
+    lines = translated.split("\n")
+    hits: list[tuple[str, str, str]] = []
+    for word, action in rules:
+        line = next((ln for ln in lines if word in ln), None)
+        if line is not None:
+            hits.append((word, action, line.strip()))
+    return hits
+
+
+def _keyword_hits_text(hits: list[tuple[str, str, str]]) -> str:
+    """命中清單 → 「「詞」（動作）」以頓號串接。"""
+    return "、".join(f"「{w}」（{OUTPUT_KEYWORD_ACTIONS[a]}）" for w, a, _ in hits)
 
 
 def _translate(session: GeminiWebSession, extracted: str,
@@ -623,6 +680,10 @@ def run_auto_translate(
     append_mode: bool | None = None,
     mask_words_enabled: bool | None = None,
     mask_word_list: str | None = None,
+    output_keywords_enabled: bool | None = None,
+    output_keyword_rules: list | None = None,
+    on_pause: Callable[[str], None] | None = None,
+    resume_event=None,
     stop_event=None,
     progress: Callable[[str], None] | None = None,
     print_summary: bool = True,
@@ -647,6 +708,14 @@ def run_auto_translate(
         一個，非正則）換成等長的 ○，降低被審查擋下的機率；替換回原文件時仍用原本
         的提取結果定位，所以只有譯文裡會出現 ○。None 時讀 cache 的
         auto_translate_mask_words／auto_translate_mask_word_list。
+    output_keywords_enabled／output_keyword_rules：譯文關鍵字檢查——翻譯回來的譯文
+        出現規則裡的詞（直接比對文字）時，依該詞設定的動作處理：「停止」＝不存檔、
+        中止整批（`keyword_stop`、`pending_url`）；「跳過」＝不存檔、記入失敗、續下一話；
+        「暫停」＝照常存檔後呼叫 `on_pause(說明)`，再等 `resume_event` 被設定才繼續
+        （等待中按停止＝手動停止）。規則格式 [{"word": 詞, "action": pause|stop|skip}]。
+        None 時讀 cache 的 auto_translate_output_kw／auto_translate_output_kw_rules。
+    on_pause／resume_event：「暫停」用的 UI 回呼與 threading.Event；未提供時（CLI）
+        暫停一律視為停止。
     url_list：手動網址清單（一行一個）。非空時**整批完全照清單跑**——第一行即第一話，
         `start_url` 參數本次忽略，下一話也不再從關聯記事推導。供「關聯記事尚未支援」
         的站台臨時使用。話數仍受 count 限制（取 min(count, 清單長度)）；until_last
@@ -683,6 +752,15 @@ def run_auto_translate(
     if mask_words_enabled:
         log(f"🔒 替換過濾詞：開啟（清單 {len(words_to_mask)} 個詞）"
             + ("" if words_to_mask else "；清單是空的，本次不會替換任何字"))
+    if output_keywords_enabled is None:
+        output_keywords_enabled = getattr(cache, "auto_translate_output_kw", False)
+    if output_keyword_rules is None:
+        output_keyword_rules = getattr(cache, "auto_translate_output_kw_rules", [])
+    kw_rules = (parse_output_keyword_rules(output_keyword_rules)
+                if output_keywords_enabled else [])
+    if output_keywords_enabled:
+        log(f"🔎 譯文關鍵字檢查：開啟（{len(kw_rules)} 個關鍵字）"
+            + ("" if kw_rules else "；沒有設定任何關鍵字，本次不會檢查"))
     os.makedirs(out_dir, exist_ok=True)
 
     # ── 依作品名分資料夾 ──
@@ -801,6 +879,19 @@ def run_auto_translate(
         result.failed.append((ch_url, reason))
         if retrying:
             deferred.pop(0)
+
+    def _wait_for_resume(message: str) -> bool:
+        """譯文關鍵字「暫停」：通知 UI 後原地等使用者按繼續。回 False＝按了停止。"""
+        if on_pause is None or resume_event is None:
+            log("  （目前的執行方式無法暫停等待 → 視為停止）")
+            return False
+        resume_event.clear()
+        on_pause(message)
+        while not resume_event.wait(0.5):
+            if _stopping():
+                return False
+        log("  ▶ 已按繼續，接著翻譯下一話。")
+        return True
 
     try:
         log(open_log)
@@ -924,6 +1015,17 @@ def run_auto_translate(
                     translated = _translate(session, to_send, log, stop_event)
                     if _looks_untranslated(to_send, translated):
                         raise UntranslatedResponse("重試（已換新對話）後仍與原文幾乎一致")
+                # 譯文關鍵字檢查：停止／跳過在存檔前處理（不存檔），暫停等存檔後再等
+                kw_hits = find_output_keywords(translated, kw_rules) if kw_rules else []
+                kw_action = next((a for a in _OUTPUT_KEYWORD_PRIORITY
+                                  if any(h[1] == a for h in kw_hits)), None)
+                if kw_hits:
+                    log(f"  🔎 譯文出現關鍵字：{_keyword_hits_text(kw_hits)}")
+                    for w, _a, line in kw_hits:
+                        log(f"      「{w}」：{line[:100]}")
+                if kw_action in ("stop", "skip"):
+                    words = "、".join(f"「{w}」" for w, a, _ in kw_hits if a == kw_action)
+                    raise OutputKeywordHit(kw_action, f"譯文出現關鍵字{words}")
                 log("  加入翻譯中…" if append_mode else "  替換翻譯中…")
                 result_text = translation_engine.apply_translation(
                     source, extracted, translated, cfg.glossary,
@@ -967,6 +1069,18 @@ def run_auto_translate(
                     deferred.pop(0)
                 retry_ready = True  # 翻譯成功＝伺服器正常 → 下一輪先補翻待補翻列表
                 url = next_url
+                if kw_action == "pause":
+                    words = "、".join(f"「{w}」" for w, a, _ in kw_hits if a == "pause")
+                    log(f"  ⏸️ 譯文出現關鍵字{words} → 已存檔並暫停，"
+                        "確認後按上方橫幅的「▶ 繼續」翻下一話（或按停止結束）。")
+                    if not _wait_for_resume(
+                            f"譯文出現關鍵字{words}，已存檔並暫停："
+                            f"{os.path.basename(out_path)}"):
+                        # 這話已存檔 → 接續網址是下一話（補翻中則是下一個新話）
+                        result.stopped = True
+                        result.pending_url = url
+                        log("⏹️ 暫停中按了停止，中止整批（此話已存檔）。")
+                        break
             except ChapterError as e:
                 # 只會是 `_extract` 的「提取結果為空」＝這一話沒有可翻譯的文字
                 # （純 AA／圖片話）。不是工具故障，記錄後跳過續跑，不中斷整批。
@@ -1007,6 +1121,20 @@ def run_auto_translate(
                 _record_failed(ch_url, retrying, f"檔案過小：{e}")
                 log(f"  🗑️ {e} → 跳過此話，繼續下一話。")
                 url = next_url
+            except OutputKeywordHit as e:
+                if e.action == "skip":
+                    _record_failed(ch_url, retrying, f"{e}（跳過，不存檔）")
+                    log(f"  ⏭️ {e} → 跳過此話（不存檔），繼續下一話。")
+                    url = next_url
+                else:  # stop
+                    # 補翻中的話也移出列表並記失敗（原因寫明關鍵字，不會被誤列成
+                    # 「伺服器忙碌未能補翻」）；pending_url 同其他中斷類錯誤
+                    _record_failed(ch_url, retrying, f"{e}（停止，不存檔）")
+                    result.keyword_stop = str(e)
+                    result.pending_url = url
+                    log(f"  🛑 {e} → 不存檔，中止整批"
+                        + ("。" if retrying else "（此話未完成，可用它當起始網址接續）。"))
+                    break
             except GeminiBusyRetriesExhausted as e:
                 # 伺服器忙碌／逾時重試達上限：外部狀況，不中斷整批也不就此放棄 →
                 # 暫時跳過、放進待補翻列表，下一次翻譯成功（伺服器恢復）後再補翻。
@@ -1095,6 +1223,11 @@ def _print_summary(result: AutoResult, log: Callable[[str], None]) -> None:
         log("🏁 已翻到最後一話。")
     if result.model_mismatch:
         log("🛑 因模型與要求不符而中止整批。請在 Gemini 切換到正確模型後重跑。")
+    if result.keyword_stop:
+        log(f"🛑 {result.keyword_stop}（停止），已中止整批。")
+        if result.pending_url:
+            log("   要接續，可用此網址當 --url："
+                + format_url_with_title(result.pending_url, result.titles))
 
 
 # ── CLI ──

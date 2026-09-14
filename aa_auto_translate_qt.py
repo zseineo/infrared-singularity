@@ -20,9 +20,10 @@ import threading
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
-    QScrollArea, QSpinBox, QSplitter, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel,
+    QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QSplitter,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from aa_tool.gemini_api import API_MODELS
@@ -315,6 +316,26 @@ class AutoTranslatePanel(QWidget):
         mask_hl.addWidget(self.btn_mask_list)
         mask_hl.addStretch()
         form.addRow("", mask_row)
+
+        # 譯文關鍵字檢查：譯文出現關鍵字時，依各詞設定暫停／停止／跳過（兩種翻譯方式都適用）
+        kw_row = QWidget()
+        kw_hl = QHBoxLayout(kw_row)
+        kw_hl.setContentsMargins(0, 0, 0, 0)
+        self.output_kw_cb = QCheckBox("譯文關鍵字檢查（出現時暫停／停止／跳過）")
+        self.output_kw_cb.setToolTip(
+            "勾選後，每一話翻譯回來的譯文若出現「關鍵字設定」裡的詞，依該詞設定的動作處理：\n"
+            "・暫停：照常存檔後原地暫停，按上方橫幅的「▶ 繼續」才翻下一話\n"
+            "・停止：這一話不存檔，結束整批（起始網址會回填這一話）\n"
+            "・跳過：這一話不存檔，列入失敗清單，繼續翻下一話\n"
+            "同一話同時命中多種動作時：停止 > 跳過 > 暫停。直接比對文字，不是正則。")
+        kw_hl.addWidget(self.output_kw_cb)
+        self._output_kw_rules: list[dict] = []
+        self.btn_output_kw = QPushButton("📝 關鍵字設定")
+        self.btn_output_kw.setToolTip("設定要檢查的關鍵字，以及各自要暫停／停止／跳過")
+        self.btn_output_kw.clicked.connect(self._open_output_kw_dialog)
+        kw_hl.addWidget(self.btn_output_kw)
+        kw_hl.addStretch()
+        form.addRow("", kw_row)
 
         # 動作按鈕列
         btn_row = QWidget()
@@ -635,6 +656,11 @@ class AutoTranslatePanel(QWidget):
         self._mask_word_list_text = str(
             getattr(m, "_auto_translate_mask_word_list", "") or "")
         self._update_mask_list_btn()
+        self.output_kw_cb.setChecked(bool(
+            getattr(m, "_auto_translate_output_kw", False)))
+        self._output_kw_rules = [dict(r) for r in (
+            getattr(m, "_auto_translate_output_kw_rules", []) or [])]
+        self._update_output_kw_btn()
         group_series = bool(getattr(m, "_auto_translate_group_by_series", False))
         self.group_by_series_cb.setChecked(group_series)
         self._set_series_row_enabled(group_series)
@@ -769,6 +795,7 @@ class AutoTranslatePanel(QWidget):
             "series_folder": series_folder,
             "append_mode": self.append_mode_cb.isChecked(),
             "mask_words": self.mask_words_cb.isChecked(),
+            "output_kw": self.output_kw_cb.isChecked(),
             "url_list": url_list,
         }
 
@@ -1065,6 +1092,112 @@ class AutoTranslatePanel(QWidget):
             m.save_cache()
         self._main.show_status("✅ 已更新過濾詞清單", "#0f0")
 
+    # ── 譯文關鍵字設定 ──
+
+    def _update_output_kw_btn(self) -> None:
+        """按鈕文字帶出關鍵字數。"""
+        import aa_auto_translate as a
+        n = len(a.parse_output_keyword_rules(self._output_kw_rules))
+        self.btn_output_kw.setText(f"📝 關鍵字設定 ({n})" if n else "📝 關鍵字設定")
+
+    def _open_output_kw_dialog(self) -> None:
+        """開啟譯文關鍵字設定（表格：關鍵字＋動作）；確定後即時寫回主視窗並存檔。"""
+        import aa_auto_translate as a
+        actions = list(a.OUTPUT_KEYWORD_ACTIONS.items())  # [(值, 顯示文字), ...]
+        action_desc = {
+            "pause": "暫停（存檔後等我按繼續）",
+            "stop": "停止（不存檔，結束整批）",
+            "skip": "跳過（不存檔，續下一話）",
+        }
+        dlg = QDialog(self)
+        dlg.setWindowTitle("譯文關鍵字設定")
+        dlg.resize(520, 440)
+        v = QVBoxLayout(dlg)
+        hint = QLabel(
+            "勾選「譯文關鍵字檢查」時，每一話翻譯回來的譯文若出現下列關鍵字，"
+            "依設定的動作處理（直接比對文字，不是正則）：" + chr(10) +
+            "・暫停：照常存檔後原地暫停，按上方橫幅的「▶ 繼續」才翻下一話" + chr(10) +
+            "・停止：這一話不存檔，結束整批（起始網址會回填這一話）" + chr(10) +
+            "・跳過：這一話不存檔，列入失敗清單，繼續翻下一話" + chr(10) +
+            "同一話命中多種動作時：停止 > 跳過 > 暫停。")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+
+        table = QTableWidget(0, 2)
+        table.setHorizontalHeaderLabels(["關鍵字", "動作"])
+        table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents)
+        table.verticalHeader().setVisible(False)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        v.addWidget(table, 1)
+
+        def _add_row(word: str = "", action: str = "pause") -> None:
+            r = table.rowCount()
+            table.insertRow(r)
+            table.setItem(r, 0, QTableWidgetItem(word))
+            combo = QComboBox()
+            for val, _label in actions:
+                combo.addItem(action_desc[val], val)
+            idx = combo.findData(action)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            table.setCellWidget(r, 1, combo)
+
+        for word, action in a.parse_output_keyword_rules(self._output_kw_rules):
+            _add_row(word, action)
+
+        row_btns = QHBoxLayout()
+        btn_add = QPushButton("＋ 新增")
+
+        def _on_add() -> None:
+            _add_row()
+            r = table.rowCount() - 1
+            table.setCurrentCell(r, 0)
+            table.editItem(table.item(r, 0))
+        btn_add.clicked.connect(_on_add)
+        row_btns.addWidget(btn_add)
+        btn_del = QPushButton("－ 刪除選取")
+
+        def _on_del() -> None:
+            rows = {i.row() for i in table.selectedIndexes()}
+            if not rows and table.currentRow() >= 0:
+                rows = {table.currentRow()}
+            for r in sorted(rows, reverse=True):
+                table.removeRow(r)
+        btn_del.clicked.connect(_on_del)
+        row_btns.addWidget(btn_del)
+        row_btns.addStretch()
+        v.addLayout(row_btns)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        v.addWidget(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        rules: list[dict] = []
+        for r in range(table.rowCount()):
+            item = table.item(r, 0)
+            word = item.text().strip() if item is not None else ""
+            if not word:
+                continue
+            combo = table.cellWidget(r, 1)
+            action = combo.currentData() if combo is not None else "pause"
+            rules.append({"word": word, "action": action})
+        # 同詞重複時以後面的為準（與協調器 parse_output_keyword_rules 一致）
+        self._output_kw_rules = [{"word": w, "action": act}
+                                 for w, act in a.parse_output_keyword_rules(rules)]
+        self._update_output_kw_btn()
+        m = self._main
+        if getattr(m, "_auto_translate_output_kw_rules", []) != self._output_kw_rules:
+            m._auto_translate_output_kw_rules = [dict(r) for r in self._output_kw_rules]
+            m.save_cache()
+        self._main.show_status("✅ 已更新譯文關鍵字設定", "#0f0")
+
     def _persist_url_list(self) -> None:
         """把清單即時寫回主視窗並存檔（比照輸出資料夾，不必等按「開始」）。"""
         m = self._main
@@ -1111,6 +1244,7 @@ class AutoTranslatePanel(QWidget):
                   self.doc_title_edit, self.out_edit, self.skip_existing_cb,
                   self.btn_url_list, self.group_by_series_cb,
                   self.mask_words_cb, self.btn_mask_list,
+                  self.output_kw_cb, self.btn_output_kw,
                   *self._backend_btns.values()):
             w.setEnabled(not running)
         # 作品資料夾欄位：執行中一律鎖；結束後回到「依勾選狀態」

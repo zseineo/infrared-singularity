@@ -204,6 +204,11 @@ class AppCache:
     # 一個），降低被審查擋下的機率；清單為原始文字，一行一個詞（非正則）。預設關閉。
     auto_translate_mask_words: bool = False
     auto_translate_mask_word_list: str = ""
+    # auto_translate_output_kw：譯文關鍵字檢查——譯文出現關鍵字時依各詞設定暫停／
+    # 停止／跳過。規則為 [{"word": 詞, "action": "pause"|"stop"|"skip"}]（直接比對
+    # 文字，非正則）。預設關閉。
+    auto_translate_output_kw: bool = False
+    auto_translate_output_kw_rules: list = field(default_factory=list)
     # auto_translate_group_by_series：在輸出資料夾下依作品名開一層子資料夾存放
     # （整批共用同一個、已存在就沿用）。資料夾名本身刻意**不持久化**——它由起始
     # 網址／作品名稱欄位決定，記住舊值會在換作品時把新作品存進舊資料夾。
@@ -480,6 +485,15 @@ class SettingsManager:
             cache.auto_translate_mask_word_list = str(data.get(
                 'auto_translate_mask_word_list',
                 cache.auto_translate_mask_word_list))
+            cache.auto_translate_output_kw = bool(data.get(
+                'auto_translate_output_kw', cache.auto_translate_output_kw))
+            raw_kw = data.get('auto_translate_output_kw_rules', [])
+            if isinstance(raw_kw, list):
+                cache.auto_translate_output_kw_rules = [
+                    {'word': str(r.get('word', '')),
+                     'action': str(r.get('action', 'pause'))}
+                    for r in raw_kw
+                    if isinstance(r, dict) and str(r.get('word', '')).strip()]
             cache.auto_translate_group_by_series = bool(data.get(
                 'auto_translate_group_by_series',
                 cache.auto_translate_group_by_series))
@@ -607,6 +621,9 @@ class SettingsManager:
                 'auto_translate_mask_words': cache.auto_translate_mask_words,
                 'auto_translate_mask_word_list':
                     cache.auto_translate_mask_word_list,
+                'auto_translate_output_kw': cache.auto_translate_output_kw,
+                'auto_translate_output_kw_rules':
+                    cache.auto_translate_output_kw_rules,
                 'auto_translate_group_by_series':
                     cache.auto_translate_group_by_series,
                 'gemini_required_model': cache.gemini_required_model,

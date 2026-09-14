@@ -577,9 +577,13 @@ class AutoTranslatePanel(QWidget):
         self.btn_policy_toggle = QPushButton("▸ 進階設定：遇到錯誤要中斷或重試")
         self.btn_policy_toggle.setCheckable(True)
         self.btn_policy_toggle.setFlat(True)
-        # 只改對齊與粗體；底色／字色沿用全域主題（dark_theme.qss：藍底白字）
+        # 與周圍 UI 同底色（透明、無邊框）＋主題白字；只在滑過時淡灰提示可點。
+        # hover 規則放最後，展開（checked）時滑過也有提示。
         self.btn_policy_toggle.setStyleSheet(
-            "QPushButton { text-align:left; font-weight:bold; }")
+            "QPushButton { text-align:left; font-weight:bold; background:transparent;"
+            " border:none; padding:4px 2px; }"
+            "QPushButton:pressed, QPushButton:checked { background:transparent; }"
+            "QPushButton:hover { background:#3c3f41; }")
         v.addWidget(self.btn_policy_toggle)
 
         box = QFrame()

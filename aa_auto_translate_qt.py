@@ -577,8 +577,9 @@ class AutoTranslatePanel(QWidget):
         self.btn_policy_toggle = QPushButton("▸ 進階設定：遇到錯誤要中斷或重試")
         self.btn_policy_toggle.setCheckable(True)
         self.btn_policy_toggle.setFlat(True)
+        # 只改對齊與粗體；底色／字色沿用全域主題（dark_theme.qss：藍底白字）
         self.btn_policy_toggle.setStyleSheet(
-            "QPushButton { text-align:left; font-weight:bold; color:#495057; }")
+            "QPushButton { text-align:left; font-weight:bold; }")
         v.addWidget(self.btn_policy_toggle)
 
         box = QFrame()
@@ -605,7 +606,7 @@ class AutoTranslatePanel(QWidget):
         self._policy_combos: dict[str, QComboBox] = {}
         for group, items in _ERROR_POLICY_UI:
             head = QLabel(group)
-            head.setStyleSheet("font-weight:bold; color:#495057;")
+            head.setStyleSheet("font-weight:bold;")  # 字色沿用主題
             pf.addRow(head)
             for key, label, tip in items:
                 combo = QComboBox()
@@ -1233,7 +1234,7 @@ class AutoTranslatePanel(QWidget):
         }
         dlg = QDialog(self)
         dlg.setWindowTitle("譯文關鍵字設定")
-        dlg.resize(520, 440)
+        dlg.resize(600, 440)
         v = QVBoxLayout(dlg)
         hint = QLabel(
             "勾選「譯文關鍵字檢查」時，每一話翻譯回來的譯文若出現下列關鍵字，"
@@ -1245,12 +1246,36 @@ class AutoTranslatePanel(QWidget):
         hint.setWordWrap(True)
         v.addWidget(hint)
 
+        def _make_combo(action: str = "pause") -> QComboBox:
+            combo = QComboBox()
+            for val, _label in actions:
+                combo.addItem(action_desc[val], val)
+            idx = combo.findData(action)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            return combo
+
         table = QTableWidget(0, 2)
         table.setHorizontalHeaderLabels(["關鍵字", "動作"])
-        table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.Stretch)
-        table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.ResizeToContents)
+        # 深色主題（dark_theme.qss）沒有表頭規則，原生表頭會變成淺藍底＋淺色字
+        # 看不清 → 這裡明確指定表格與表頭配色（沿用主題的深灰底、淺色字）。
+        table.setStyleSheet(
+            "QTableWidget { background:#343638; color:#dce4ee;"
+            " gridline-color:#555555; }"
+            "QHeaderView::section { background:#3c3f41; color:#dce4ee;"
+            " font-weight:bold; padding:4px; border:none;"
+            " border-right:1px solid #555555; border-bottom:1px solid #555555; }")
+        # 動作欄：下拉放在儲存格裡，ResizeToContents 只看文字、不會算進下拉寬度
+        # → 用一個樣本下拉的 sizeHint 固定欄寬與列高，選項文字才完整顯示。
+        probe = _make_combo()
+        probe.ensurePolished()  # 套上主題樣式後再量，寬度才含實際字型與內距
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(1, probe.sizeHint().width() + 12)
+        table.verticalHeader().setDefaultSectionSize(
+            max(table.verticalHeader().defaultSectionSize(),
+                probe.sizeHint().height() + 6))
+        probe.deleteLater()
         table.verticalHeader().setVisible(False)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         v.addWidget(table, 1)
@@ -1259,12 +1284,7 @@ class AutoTranslatePanel(QWidget):
             r = table.rowCount()
             table.insertRow(r)
             table.setItem(r, 0, QTableWidgetItem(word))
-            combo = QComboBox()
-            for val, _label in actions:
-                combo.addItem(action_desc[val], val)
-            idx = combo.findData(action)
-            combo.setCurrentIndex(idx if idx >= 0 else 0)
-            table.setCellWidget(r, 1, combo)
+            table.setCellWidget(r, 1, _make_combo(action))
 
         for word, action in a.parse_output_keyword_rules(self._output_kw_rules):
             _add_row(word, action)

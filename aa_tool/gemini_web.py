@@ -61,6 +61,15 @@ class GeminiContentBlocked(GeminiWebError):
     """
 
 
+class GeminiResponseTruncated(GeminiWebError):
+    """API 回覆因輸出達模型上限而被截斷（不論是否已有部分文字）。
+
+    例：Gemini `finishReason: MAX_TOKENS`、OpenAI 相容 `finish_reason: length`、
+    Anthropic `stop_reason: max_tokens`。原因是這一話的輸出太長，重送同樣內容
+    幾乎一定再被截斷 → 協調器跳過該話（不存半套翻譯）、續下一話，不中斷整批。
+    """
+
+
 def model_matches(detected: str, required: str) -> bool:
     """判斷讀到的模型字串是否符合要求。
 

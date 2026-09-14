@@ -32,7 +32,8 @@ from aa_tool import settings_manager
 from aa_tool import text_extraction, translation_engine, url_fetcher
 from aa_tool.gemini_web import (
     GeminiAborted, GeminiBusyRetriesExhausted, GeminiContentBlocked,
-    GeminiModelMismatch, GeminiQuotaExceeded, GeminiWebError, GeminiWebSession,
+    GeminiModelMismatch, GeminiQuotaExceeded, GeminiResponseTruncated,
+    GeminiWebError, GeminiWebSession,
 )
 
 # 單次送給 Gemini 的最大提取行數；超過則分段送出後合併。
@@ -992,6 +993,12 @@ def run_auto_translate(
                 _record_failed(ch_url, retrying, f"可能被審查：{e}")
                 log(f"  🚫 {e} → 跳過此話，繼續下一話。")
                 url = next_url
+            except GeminiResponseTruncated as e:
+                # API 輸出達模型上限被截斷＝這一話內容太長，重送一樣會被截斷 →
+                # 跳過該話（不存半套翻譯）、續下一話；不放進待補翻列表。
+                _record_failed(ch_url, retrying, f"回應被截斷：{e}")
+                log(f"  ✂️ {e} → 跳過此話（不存檔），繼續下一話。")
+                url = next_url
             except UntranslatedResponse as e:
                 _record_failed(ch_url, retrying, f"疑似未翻譯：{e}")
                 log(f"  ⚠️ {e} → 跳過此話（不存檔），繼續下一話。")
@@ -1031,9 +1038,12 @@ def run_auto_translate(
                 break
             except Exception as e:  # noqa: BLE001 — 未預期錯誤：記錄後中斷整批
                 # v2.27：原本是「跳過此話續跑」，改為中斷。非 5xx、非安全過濾的
-                # API 錯誤（空回應等）、寫檔失敗、程式錯誤等都走這裡，繼續跑下去
-                # 往往整批都失敗，停下來讓使用者處理比默默漏話好。
-                # （安全過濾擋下另走上面的 GeminiContentBlocked，比照審查跳過。）
+                # API 錯誤（4xx、空回應等）、寫檔失敗、程式錯誤等都走這裡，繼續跑
+                # 下去往往整批都失敗，停下來讓使用者處理比默默漏話好。
+                # （安全過濾擋下另走上面的 GeminiContentBlocked，比照審查跳過；
+                # 輸出被截斷走 GeminiResponseTruncated 跳過；連線失敗／中途斷線／
+                # 非 JSON 回應在本批成功翻譯過之後由 API 後端當成暫時性錯誤重試，
+                # 只有第一次送出就失敗〔多半是設定問題〕才會到這裡。）
                 # 補翻中的話出錯時，pending_url 仍是「下一個新的話」（url），
                 # 補翻的那話記在失敗清單。
                 _record_failed(ch_url, retrying, str(e))

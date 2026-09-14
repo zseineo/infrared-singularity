@@ -14,7 +14,8 @@
   - yaruobook.net / yaruobook.com（entry-content div + dt/dd + relatedPostsWrap，早期文章含 HTML 數字字元引用）
   - yaruo-matome.com（entry-content div + nexe-prev-post ul）
   - blog.livedoor.jp（textar-aa / span.aa，無關聯記事、尾端嵌入下一話連結）
-  - asitayaruo.com（entry-content + dt/dd；本身無 prev/next，關聯記事改由分類頁 ?cat=N&paged=K 取得）
+  - asitayaruo.com（entry-content + dt/dd，dd 內 <p> 分段＝空一行；關聯記事取頁面上的 ym-nav／ym-nx，
+    最多 10 話、不另發 HTTP；頁面上沒有時才退回分類頁 ?cat=N&paged=K）
   - yomuaa.r401.net（Nuxt SSR；article.aa > dl.aa-article 的 dt=コマ編號 + dd=內文，
     dd 內無 <br>、換行為字面換行字元；本身無關聯記事，改由作品頁 /series/N?page=K 取得）
   - naitomeazirou.fc2.net（走預設 article div 解析；模板無 relate_dl，關聯記事改由全記事一覽
@@ -1622,15 +1623,22 @@ def _parse_livedoor(page_html: str, base_url: str, *,
 #  解析器：asitayaruo.com
 # ════════════════════════════════════════════════════════════════
 
+# 關聯記事最多顯示幾話（見 _parse_asitayaruo docstring「關聯」）
+_ASITAYARUO_NAV_MAX = 10
+
+
 def _fetch_asitayaruo_category(cat_url: str, current_url: str) -> list[dict]:
     """逐頁抓取 asitayaruo.com 分類頁的所有貼文清單，回傳「舊 → 新」時間順序的 nav。
 
-    分類頁分頁形式為 `?cat=N&paged=K`，每頁列出 50 篇（最新→最舊），
-    `<h3><a href="?p=N">TITLE</a></h3>` 為條目樣式。
+    分類頁分頁形式為 `?cat=N&paged=K`，支援兩種條目樣式：
+    - 現行（2026-09 改版後）：`<ol class="ym-al-list"><li><a href="?p=N" title="TITLE">`，
+      站方已「第1話から順」排列（每頁約 100 篇，第 1 頁最舊），不需反轉。
+    - 舊版：`<h3><a href="?p=N">TITLE</a></h3>`，每頁 50 篇、最新→最舊，需反轉。
     當前 URL 對應條目 `is_current=True`、`url=None`。
     """
     items: list[tuple[str, str]] = []
     seen: set[str] = set()
+    ascending = False
     page_num = 1
     while page_num <= 50:  # 安全閥
         page_url = cat_url if page_num == 1 else f"{cat_url}&paged={page_num}"
@@ -1638,13 +1646,25 @@ def _fetch_asitayaruo_category(cat_url: str, current_url: str) -> list[dict]:
             cat_html = fetch_url(page_url)
         except Exception:
             break
+        found: list[tuple[str, str]] = []
+        list_m = re.search(
+            r'<ol\s+class="ym-al-list"[^>]*>(.*?)</ol>', cat_html, re.DOTALL)
+        if list_m:
+            ascending = True
+            for m in re.finditer(
+                r'<li><a\s+href="([^"]+)"\s+title="([^"]*)"', list_m.group(1),
+            ):
+                found.append((m.group(1), m.group(2)))
+        else:
+            for m in re.finditer(
+                r'<h3><a\s+href="([^"]+)"[^>]*>\s*(.*?)\s*</a></h3>',
+                cat_html, re.DOTALL,
+            ):
+                found.append((m.group(1), m.group(2)))
         page_added = 0
-        for m in re.finditer(
-            r'<h3><a\s+href="([^"]+)"[^>]*>\s*(.*?)\s*</a></h3>',
-            cat_html, re.DOTALL,
-        ):
-            href = html.unescape(m.group(1))
-            title = html.unescape(re.sub(r'\s+', ' ', m.group(2))).strip()
+        for raw_href, raw_title in found:
+            href = html.unescape(raw_href)
+            title = html.unescape(re.sub(r'\s+', ' ', raw_title)).strip()
             if not title or href in seen:
                 continue
             seen.add(href)
@@ -1657,9 +1677,10 @@ def _fetch_asitayaruo_category(cat_url: str, current_url: str) -> list[dict]:
             break
         page_num += 1
 
-    # 來源為「新 → 舊」；反轉為時間順序，讓「下一話」按鈕可以
-    # current_idx + 1 正確取得下一集。
-    items.reverse()
+    # 舊版來源為「新 → 舊」；反轉為時間順序，讓「下一話」按鈕可以
+    # current_idx + 1 正確取得下一集。現行版已是「舊 → 新」。
+    if not ascending:
+        items.reverse()
 
     cur_norm = current_url.split('#')[0].rstrip('/')
     nav: list[dict] = []
@@ -1681,10 +1702,22 @@ def _parse_asitayaruo(page_html: str, base_url: str, *,
     內文：<div class="entry-content"> 內的 <dt>/<dd>，標頭格式為
           「<span>N</span> ： <span ...>AUTHOR</span> ： <span>YYYY/MM/DD(曜) HH:MM:SS</span>
            <span style="color:#ff0000">ID:XXX</span>」。
-    標題：<title>...</title>（去除站名後綴「- 明日やる夫は馬鹿やる夫」）。
-    關聯：本站文章頁面**沒有** prev/next 關聯區塊；分類資訊以 `<p class="tagst">`
-          中的 `?cat=N` 連結指向分類頁，需另發 HTTP 抓取該分類頁（分頁形式
-          `?cat=N&paged=K`）取得同系列文章清單，做為關聯記事。
+    標題：<title>...</title>（去除站名後綴「- 明日やる夫は馬鹿やる夫」／「| 明日やる夫」）。
+    內文換行：2026-09 改版（Cocoon 主題）後 `<dd>` 內以 `<p>` 分段（WordPress 把原帖的
+          空行轉成段落），`.article p` 有 `margin-bottom:1.8em`，瀏覽器上段落間呈現為
+          一個空行 → 抽取前把 `</p><p>` 換成兩個 `<br />`；段內換行仍是 `<br />`。
+          容器 class 也改為 `entry-content cf`，故容器 regex 容許附加 class。
+    關聯：最多 `_ASITAYARUO_NAV_MAX`（10）話，**不讀整部作品**（長篇動輒數百話、
+          分類頁要讀好幾頁，每話都讀會很慢）。優先用頁面本身的 `a.ym-nav-prev`
+          （前の話）＋ 當前 ＋ `a.ym-nav-next`（次の話），不另發 HTTP；`ol.ym-nx-list`
+          第一項＝次の話時為「この作品の続き」（之後 6 話）→ 取代次の話；
+          第一項＝前の話時為最終話附近的「この作品の他の話」（之前的話，新→舊）
+          → 反轉後取代前の話。
+          頁面上完全沒有前後話時才退回抓分類頁（`?cat=N`，分頁 `?cat=N&paged=K`），
+          只保留「前 1 話＋當前＋之後」共 10 話。分類 URL 依序取自舊版
+          `<p class="tagst">`、現行 `<div class="entry-categories">` 的 `cat-link`、
+          「…の話をすべて見る」（`p.ym-nx-more`）；**不用麵包屑**（第一個 `?cat=`
+          是作者分類）。
     """
     # ── 標題 ──
     title_m = re.search(r'<title>([^<]+)</title>', page_html)
@@ -1692,31 +1725,105 @@ def _parse_asitayaruo(page_html: str, base_url: str, *,
     page_title = re.sub(r'\s*[\|｜\-－–—]\s*明日やる夫.*$', '', page_title)
 
     # ── 內文 ──
-    start_m = re.search(r'<div\s+class="entry-content"[^>]*>', page_html)
+    start_m = re.search(
+        r'<div\s+class="entry-content(?:\s[^"]*)?"[^>]*>', page_html)
     if not start_m:
         return None, [], page_title
 
-    # entry-content 之後到 `<p class="tagst">`（分類列）為止為純內文範圍
-    end_m = re.search(r'<p\s+class="tagst"', page_html[start_m.end():])
+    # entry-content 之後到分類列（舊版 `<p class="tagst">`／現行 `<footer>`）為止為純內文範圍
+    end_m = re.search(r'<p\s+class="tagst"|<footer\b', page_html[start_m.end():])
     content_end = start_m.end() + end_m.start() if end_m else len(page_html)
     content_html = page_html[start_m.end():content_end]
+    # 段落分隔 → 空一行（見 docstring「內文換行」）
+    content_html = re.sub(
+        r'</p>\s*<p(?:\s[^>]*)?>', '<br /><br />', content_html)
 
     lines_out = _extract_dt_dd_posts(
         content_html, author_name=author_name, author_only=author_only)
     text_content = '\n\n'.join(lines_out) if lines_out else None
 
-    # ── 關聯記事：從 tagst 取分類 URL，再 HTTP 抓分類頁 ──
+    # ── 關聯記事：優先用頁面本身的前後話（不另發 HTTP） ──
+    # ym-nx-list 的內容依位置而變：一般為「この作品の続き」（之後 6 話，舊→新）；
+    # 接近最終話時是「剩下的後續話＋往前補的話（新→舊）」混排；最終話則全是
+    # 「この作品の他の話」（之前的話，新→舊）。不看標題文字，改以站方的
+    # ym-nav-next／ym-nav-prev 判斷方向：第一項＝次の話 → 往後取，遇到前の話或
+    # 發表時間倒退即停；第一項＝前の話 → 往前取，遇到次の話或時間前進即停。
+    prev_m = re.search(
+        r'<a\s+class="ym-nav-prev"\s+href="([^"]+)"\s+title="([^"]*)"',
+        page_html)
+    next_m = re.search(
+        r'<a\s+class="ym-nav-next"\s+href="([^"]+)"\s+title="([^"]*)"',
+        page_html)
+    nx_m = re.search(r'<ol\s+class="ym-nx-list"[^>]*>(.*?)</ol>',
+                     page_html, re.DOTALL)
+    nx_items: list[tuple[str, str, str]] = []  # (href, title, datetime)
+    for li in re.findall(r'<li>(.*?)</li>', nx_m.group(1) if nx_m else '',
+                         re.DOTALL):
+        a_m = re.search(r'<a\s+href="([^"]+)"\s+title="([^"]*)"', li)
+        if a_m:
+            dt_m = re.search(r'datetime="([^"]*)"', li)
+            nx_items.append((a_m.group(1), a_m.group(2),
+                             dt_m.group(1) if dt_m else ''))
+    prev_href = prev_m.group(1) if prev_m else None
+    next_href = next_m.group(1) if next_m else None
+    preceding = [prev_m.groups()] if prev_m else []
+    following = [next_m.groups()] if next_m else []
+    last_dt = ''
+    if nx_items and next_href and nx_items[0][0] == next_href:
+        following = []
+        for href, title, dt in nx_items:
+            if href == prev_href or (following and dt and dt < last_dt):
+                break
+            following.append((href, title))
+            last_dt = dt
+    elif nx_items and prev_href and nx_items[0][0] == prev_href:
+        preceding = []
+        for href, title, dt in nx_items:
+            if href == next_href or (preceding and dt and dt > last_dt):
+                break
+            preceding.append((href, title))
+            last_dt = dt
+        preceding.reverse()
     nav_links: list[dict] = []
-    tag_m = re.search(r'<p\s+class="tagst"[^>]*>(.*?)</p>', page_html, re.DOTALL)
-    if tag_m:
-        cat_a = re.search(
-            r'<a\s+href="([^"]*\?cat=\d+)"', tag_m.group(1))
-        if cat_a:
-            cat_url = urljoin(base_url, html.unescape(cat_a.group(1)))
+    if preceding or following:
+        for href, title in preceding:
+            nav_links.append({'title': html.unescape(title),
+                              'url': html.unescape(href),
+                              'is_current': False})
+        nav_links.append({'title': page_title, 'url': None,
+                          'is_current': True})
+        for href, title in following:
+            nav_links.append({'title': html.unescape(title),
+                              'url': html.unescape(href),
+                              'is_current': False})
+    else:
+        # 退回：頁面上沒有前後話 → 取分類 URL，HTTP 抓分類頁（整部作品清單）
+        cat_href = None
+        for block_re in (r'<p\s+class="tagst"[^>]*>(.*?)</p>',
+                         r'<div\s+class="entry-categories"[^>]*>(.*?)</div>',
+                         r'<p\s+class="ym-nx-more"[^>]*>(.*?)</p>'):
+            block_m = re.search(block_re, page_html, re.DOTALL)
+            if not block_m:
+                continue
+            cat_a = re.search(r'href="([^"]*\?cat=\d+)"', block_m.group(1))
+            if cat_a:
+                cat_href = cat_a.group(1)
+                break
+        if cat_href:
+            cat_url = urljoin(base_url, html.unescape(cat_href))
             try:
                 nav_links = _fetch_asitayaruo_category(cat_url, base_url)
             except Exception:
                 nav_links = []
+
+    # 只留當前話附近：前 1 話＋當前＋之後，共最多 _ASITAYARUO_NAV_MAX 話
+    # （靠近結尾時往前補滿）
+    cur_idx = next((i for i, x in enumerate(nav_links) if x['is_current']), None)
+    if cur_idx is not None:
+        start = max(0, min(cur_idx - 1, len(nav_links) - _ASITAYARUO_NAV_MAX))
+        nav_links = nav_links[start:start + _ASITAYARUO_NAV_MAX]
+    else:
+        nav_links = nav_links[:_ASITAYARUO_NAV_MAX]
 
     return text_content, nav_links, page_title
 

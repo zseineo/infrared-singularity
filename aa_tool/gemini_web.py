@@ -224,6 +224,8 @@ _POST_GEN_SETTLE = 3.0
 _MODEL_WAIT_TIMEOUT = 300   # 5 分鐘
 _MODEL_WAIT_POLL = 3        # 每 3 秒重讀一次模型字串
 _MODEL_REMIND_EVERY = 30    # 每 30 秒於 Log 提醒一次「請切換模型」
+# 開新對話後模型指示器比輸入框晚出現（實測晚 0.1～0.2 秒），讀不到時最多再等這麼久。
+_MODEL_READ_TIMEOUT = 5.0
 # 要求的模型額度已滿時，長時間等待額度恢復（每隔一段時間重試自動切換）。
 _QUOTA_WAIT_TIMEOUT = 12 * 3600   # 最長等 12 小時
 _QUOTA_POLL_INTERVAL = 600        # 每 10 分鐘重試一次自動切換
@@ -408,6 +410,8 @@ class GeminiWebSession:
         偵測到額度上限時丟 :class:`GeminiQuotaExceeded`。
         若 10 分鐘無回應，自動重開一個新對話再送一次；仍無回應丟
         :class:`GeminiStuck`。
+        回覆後模型已不符 ``required_model``（額度用完被自動降級）→ 捨棄這次回覆，
+        開新對話確認模型後重送一次；仍不符丟 :class:`GeminiModelMismatch`。
         """
         if self._page is None:
             raise GeminiWebError("session 尚未 open()")
@@ -432,7 +436,31 @@ class GeminiWebSession:
                 raise GeminiStuck(
                     f"Gemini 卡住超過 {_GEN_TIMEOUT}s 且重開新對話後仍無回應")
         self._check_quota(reply)
+        # 額度用完時 Gemini 會在對話中途自動降級（例如 Flash → Flash-Lite），而模型
+        # 只在開新對話時確認 → 每次回覆後再讀一次。降級後的這次回覆不採用：開新對話
+        # （_ensure_model 會切回或等額度恢復）後重送。
+        cur = self._downgraded_model()
+        if cur:
+            self._log(f"⚠️ 送出後模型變成「{cur}」，不符需求「{self.required_model}」"
+                      "（可能額度用完被自動降級）→ 這次回覆不採用，開新對話確認模型後重送…")
+            self.start_new_session()
+            reply = self._send_and_collect(prompt_text)
+            if not reply.strip():
+                raise GeminiStuck("模型降級後開新對話重送，仍無回應")
+            self._check_quota(reply)
+            cur = self._downgraded_model()
+            if cur:
+                raise GeminiModelMismatch(
+                    f"重送後模型仍為「{cur}」，不符需求「{self.required_model}」")
         return reply
+
+    def _downgraded_model(self) -> str:
+        """目前模型讀得到且不符 required_model 時回傳模型名，否則回空字串。"""
+        req = self.required_model
+        if not req or req == "any":
+            return ""
+        model = self._read_current_model()
+        return model if model and not model_matches(model, req) else ""
 
     def _send_and_collect(self, prompt_text: str) -> str:
         """填入 → 送出 → 等待生成完成 → 取最新回覆。內部計數已遞增。"""
@@ -489,6 +517,11 @@ class GeminiWebSession:
         except Exception:
             pass
         model = self._read_current_model()
+        deadline = time.time() + _MODEL_READ_TIMEOUT
+        while not model and time.time() < deadline:
+            # 指示器還沒 render 就讀會讀到空、整個 session 略過檢查 → 多等一下
+            self._sleep_with_stop(0.5)
+            model = self._read_current_model()
         if not req or req == "any":
             self._log(f"目前模型：{model or '(讀不到)'}")
             return

@@ -1,7 +1,7 @@
 """網頁抓取與 HTML 解析 — 純 I/O 與純邏輯，不依賴任何 UI 框架。
 
 支援的網域：
-  - 預設格式（article div + relate_dl）
+  - 預設格式（article div + relate_dl；含無 dt/dd 的平面 <br> 變體，例 man001.blog.2nt.com）
   - himanatokiniyaruo.com（dt / dd 結構 + related-entries；舊 <dt id="N"> 與新 <dt><span>N</span> 兩種模板）
   - blog.fc2.com（ently_text / entry_text div + relate_dl，含 web.archive.org 封存版、res_h/res_b 變體、
     yarucha 類 <a name/num> + <dd> 無容器模板）
@@ -768,7 +768,11 @@ def _parse_default(page_html: str, base_url: str, *, author_name: str = "", auth
         flat = re.sub(r'<table\b.*?</table>', '', flat, flags=re.DOTALL | re.IGNORECASE)
         flat = re.sub(r'<a\s[^>]*>.*?</a>', '', flat, flags=re.DOTALL | re.IGNORECASE)
         flat = re.sub(r'<hr\b[^>]*/?>', '\n', flat, flags=re.IGNORECASE)
-        flat = re.sub(r'<br\s*/?>', '\n', flat)
+        # 來源 HTML 每行為 `LINE<br>\r\n`：<br> 才是真正的換行，其後的排版換行
+        # （瀏覽器在一般流中折疊為空白）須一併吸收，否則每行都會多出一個空行
+        # （例：man001.blog.2nt.com）。<br><br> 等連續換行仍各自保留為空行。
+        flat = flat.replace('\r', '')
+        flat = re.sub(r'<br\s*/?>[ \t]*\n?', '\n', flat)
         flat = _strip_tags_keep_color(flat)
         flat = html.unescape(flat)
         if author_name or author_only:

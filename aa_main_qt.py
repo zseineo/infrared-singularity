@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.45"
+APP_VERSION = "2.46"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -794,6 +794,10 @@ class MainWindow(QMainWindow):
         self._auto_resume_event = None  # threading.Event，關鍵字暫停後按「繼續」時設定
         self._author_only: bool = False
         self._author_name: str = ""
+        # 「不讀暫存」（網址讀取面板的開關）：本次執行中**所有**讀取網址的行為
+        # 都強制重新上網抓（網址讀取、上一話／下一話、重找原文、自動翻譯），
+        # 不吃 %TEMP%/aa_url_cache。不寫進設定檔，重開程式即回復預設（讀暫存）。
+        self._skip_url_cache: bool = False
         # URL 讀取後暫存的標題（line 1），供「提取日文」時跳過標題行之用
         self._last_fetched_title: str = ""
         self._batch_folder: str = ""
@@ -1988,6 +1992,7 @@ class MainWindow(QMainWindow):
                     fetch_auto_fill_title=self._fetch_auto_fill_title,
                     until_last=until_last,
                     skip_existing=skip_existing,
+                    skip_cache=self._skip_url_cache,
                     title_filter=title_filter,
                     group_by_series=self._auto_translate_group_by_series,
                     series_folder=series_folder,
@@ -2152,6 +2157,7 @@ class MainWindow(QMainWindow):
             current_url=self.current_url,
             author_only=self._author_only,
             author_name=self._author_name,
+            skip_cache=self._skip_url_cache,
             initial_url=self.current_url,
         )
         self._nav_label.setText("網址讀取")
@@ -2204,20 +2210,28 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
 
+    def _fetch_page_html(self, url: str) -> str:
+        """抓取頁面 HTML：依「不讀暫存」決定是否先吃本機暫存，抓到就回寫暫存。
+
+        所有讀取網址的入口（網址讀取、上一話／下一話、重找原文）都走這裡，
+        避免只有其中一條路徑理會 `_skip_url_cache`。
+        """
+        page_html = None if self._skip_url_cache else self._read_url_cache(url)
+        if page_html is None:
+            page_html = _fetch_url(url)
+            self._write_url_cache(url, page_html)
+        return page_html
+
     def _handle_url_fetch_request(self, raw_url: str, author_only: bool,
                                    skip_cache: bool = False) -> None:
         self._author_only = author_only
+        self._skip_url_cache = skip_cache
         self.schedule_save()
         author = self._author_name
 
         def _bg() -> None:
             try:
-                page_html = None
-                if not skip_cache:
-                    page_html = self._read_url_cache(raw_url)
-                if page_html is None:
-                    page_html = _fetch_url(raw_url)
-                    self._write_url_cache(raw_url, page_html)
+                page_html = self._fetch_page_html(raw_url)
                 text_content, nav_links, page_title = _parse_page_html(
                     page_html, raw_url, author_name=author,
                     author_only=author_only)
@@ -2348,10 +2362,7 @@ class MainWindow(QMainWindow):
 
         def _bg() -> None:
             try:
-                page_html = self._read_url_cache(next_url)
-                if page_html is None:
-                    page_html = _fetch_url(next_url)
-                    self._write_url_cache(next_url, page_html)
+                page_html = self._fetch_page_html(next_url)
                 text_content, nav_links, page_title = _parse_page_html(
                     page_html, next_url, author_name=author,
                     author_only=self._author_only)
@@ -3228,12 +3239,10 @@ class MainWindow(QMainWindow):
             None)
         if not matching_url:
             return None
-        # 4) 抓網頁＋解析（先吃 %TEMP%/aa_url_cache 的內容，沒命中才上網）
+        # 4) 抓網頁＋解析（先吃 %TEMP%/aa_url_cache 的內容，沒命中才上網；
+        #    勾「不讀暫存」時一律重新上網抓）
         try:
-            page_html = self._read_url_cache(matching_url)
-            if page_html is None:
-                page_html = _fetch_url(matching_url)
-                self._write_url_cache(matching_url, page_html)
+            page_html = self._fetch_page_html(matching_url)
             text_content, _nav, page_title = _parse_page_html(
                 page_html, matching_url,
                 author_name=self._author_name,

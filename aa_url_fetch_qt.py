@@ -12,6 +12,8 @@
 
 面板 → 主程式（直接呼叫）：
     main._handle_url_fetch_request(url, author_only, skip_cache)
+    main._skip_url_cache          # 「不讀暫存」勾選狀態（toggled 時即時同步回主程式，
+                                  #   讓主畫面上一話／下一話、重找原文、自動翻譯一併適用）
     main.url_history / main.settings_mgr.clear_url_history()
     main._author_name / main._author_only / main.schedule_save()
     main.return_from_url_fetch()  # 關閉面板（依進入來源返回首頁／自動翻譯）
@@ -192,7 +194,7 @@ class UrlFetchWindow(QWidget):
 
     def sync_state(self, *, url_history: list, url_related_links: list,
                    current_url: str, author_only: bool, author_name: str,
-                   initial_url: str = "") -> None:
+                   skip_cache: bool = False, initial_url: str = "") -> None:
         """主程式在切換到此面板之前呼叫，同步最新狀態。"""
         self._url_history = list(url_history)
         self._url_related_links = list(url_related_links)
@@ -200,6 +202,7 @@ class UrlFetchWindow(QWidget):
         self._author_only = author_only
         self._author_name = author_name
         self.author_only_switch.setChecked(author_only)
+        self.skip_cache_switch.setChecked(skip_cache)
         self.author_name_entry.setText(author_name)
         if initial_url:
             self.url_entry.setText(initial_url)
@@ -214,6 +217,7 @@ class UrlFetchWindow(QWidget):
     def sync_back_to_main(self) -> None:
         """離開面板（返回首頁）時，由主程式呼叫，將狀態同步回去。"""
         self._main._author_only = self.author_only_switch.isChecked()
+        self._main._skip_url_cache = self.skip_cache_switch.isChecked()
         self._main._author_name = self.author_name_entry.text().strip()
         self._main.schedule_save()
 
@@ -290,7 +294,15 @@ class UrlFetchWindow(QWidget):
 
         self.skip_cache_switch = QCheckBox("不讀暫存")
         self.skip_cache_switch.setFont(self.ui_small_font)
-        self.skip_cache_switch.setToolTip("勾選後強制重新從網路抓取，不使用本機暫存")
+        self.skip_cache_switch.setToolTip(
+            "勾選後強制重新從網路抓取，不使用本機暫存。\n"
+            "此設定對「所有」讀取網址的行為生效："
+            "本面板讀取、關聯記事／歷史紀錄、主畫面上一話／下一話、"
+            "編輯器重找原文、自動翻譯。\n"
+            "不會寫進設定檔，重開程式即回復為讀暫存。")
+        # 勾選狀態即時同步回主程式：使用者可能勾完就離開面板去按主畫面的
+        # 「上一話／下一話」，不能等到 sync_back_to_main 才同步。
+        self.skip_cache_switch.toggled.connect(self._on_skip_cache_toggled)
         top.addWidget(self.skip_cache_switch)
 
         self.fetch_btn = make_button("讀取", color="#28a745", hover="#218838",
@@ -793,6 +805,9 @@ class UrlFetchWindow(QWidget):
         self._set_status("✅ 已複製網址到剪貼簿", "#28a745")
 
     # ──────────────────────────── 動作 ────────────────────────────
+
+    def _on_skip_cache_toggled(self, checked: bool) -> None:
+        self._main._skip_url_cache = checked
 
     def _fetch_url(self, url: str):
         self.url_entry.setText(url)

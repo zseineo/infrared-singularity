@@ -211,14 +211,18 @@ def _write_url_cache(url: str, page_html: str) -> None:
 
 # ── 流程步驟 ──
 
-def _fetch_and_parse(url: str, cfg: AutoConfig) -> tuple[str, list, str, str]:
+def _fetch_and_parse(url: str, cfg: AutoConfig, *,
+                     skip_cache: bool = False) -> tuple[str, list, str, str]:
     """抓網頁並解析，回傳 (帶標題前綴的完整 source, 關聯連結, 頁面標題, display_title)。
 
     為使 ID 行號與手動流程一致：手動流程在網址讀取成功後會在文字前面
     prepend ``display_title + "\\n\\n"``（見 aa_main_qt.py 約 1741-1744 行），
     導致所有行號 +2。自動流程也得照辦，否則同一句話會被指派到不同行號的 ID。
+
+    skip_cache：True 時不吃 %TEMP%/aa_url_cache 的內容，一律重新上網抓（抓到仍
+        回寫暫存）。對應主畫面「不讀暫存」開關。
     """
-    page_html = _read_url_cache(url)
+    page_html = None if skip_cache else _read_url_cache(url)
     if page_html is None:
         try:
             page_html = url_fetcher.fetch_url(url)
@@ -720,6 +724,7 @@ def run_auto_translate(
     fetch_auto_fill_title: bool | None = None,
     until_last: bool = False,
     skip_existing: bool = False,
+    skip_cache: bool = False,
     title_filter: str = "",
     group_by_series: bool | None = None,
     series_folder: str = "",
@@ -743,6 +748,8 @@ def run_auto_translate(
     until_last：為 True 時忽略 count，一路翻到沒有下一話為止。
     skip_existing：為 True 時，翻譯前先算好這一話的檔名，若輸出資料夾已有同名檔
         （不計碰撞序號）就跳過該話、直接抓下一話——適合批次中斷後重跑略過已完成的話。
+    skip_cache：為 True 時每一話都重新上網抓，不吃 %TEMP%/aa_url_cache 的內容
+        （抓到仍回寫暫存）。對應主畫面「不讀暫存」開關，GUI 由該開關帶入。
     title_filter：標題過濾文字。非空時，抓到的頁面標題（page_title）不含此文字
         （不分大小寫）的話直接跳過、讀下一話；跳過的話**不計入 count**，也不參與
         作品資料夾名的決定。連續 `_TITLE_FILTER_MAX_CONSECUTIVE` 話都不符就中止整批
@@ -821,6 +828,8 @@ def run_auto_translate(
     title_filter = (title_filter or "").strip()
     if title_filter:
         log(f"🔤 標題過濾：只翻標題含「{title_filter}」的話（不符的跳過，不計話數）")
+    if skip_cache:
+        log("🌐 不讀暫存：每一話都重新上網抓取（不吃本機網頁暫存）")
     if error_policy is None:
         error_policy = getattr(cache, "auto_translate_error_policy", {})
     policy = resolve_error_policy(error_policy)
@@ -971,7 +980,7 @@ def run_auto_translate(
         attempt = 0
         while True:
             try:
-                return _fetch_and_parse(ch_url, cfg)
+                return _fetch_and_parse(ch_url, cfg, skip_cache=skip_cache)
             except FetchFailed as e:
                 if policy["fetch_fail"] != "retry":
                     raise
@@ -1378,6 +1387,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="忽略 --count，一路翻到沒有下一話為止")
     parser.add_argument("--skip-existing", action="store_true",
                         help="輸出資料夾已有同名檔時跳過該話（重跑批次略過已完成的話）")
+    parser.add_argument("--skip-cache", action="store_true",
+                        help="不讀本機網頁暫存，每一話都重新上網抓")
     parser.add_argument("--title-filter", default="",
                         help="只翻頁面標題含此文字的話（不符的跳過、不計話數）")
     parser.add_argument("--append", action="store_true",
@@ -1413,6 +1424,7 @@ def main(argv: list[str] | None = None) -> int:
             gem_url=args.gem_url, profile_dir=args.profile_dir,
             headless=args.headless, until_last=args.until_last,
             skip_existing=args.skip_existing,
+            skip_cache=args.skip_cache,
             title_filter=args.title_filter,
             group_by_series=(True if args.group_by_series else None),
             series_folder=args.series_folder,

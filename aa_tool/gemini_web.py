@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import Callable
 
@@ -152,6 +153,9 @@ DEFAULT_SELECTORS: dict[str, list[str]] = {
         "button[aria-label*='Send']",
         "button[aria-label*='傳送']",
         "button[aria-label*='送出']",
+        # 簡體介面的送出鈕是「发送」，只列繁體會找不到而退回 Enter 送出
+        "button[aria-label*='发送']",
+        "button[aria-label*='發送']",
         "button[mattooltip*='Send']",
     ],
     # 「停止生成」按鈕（出現＝正在生成）
@@ -206,6 +210,12 @@ QUOTA_PHRASES = [
     "已用完",
     "請稍後再試",
     "升級即可繼續",
+    # 簡體介面（使用者可能把 Gemini 語言設為簡體中文；字不同、比對不到會漏判）
+    "已达使用上限",
+    "已达上限",
+    "用量已满",
+    "请稍后再试",
+    "升级即可继续",
 ]
 
 DEFAULT_MAX_PER_SESSION = 3
@@ -224,16 +234,42 @@ _POST_GEN_SETTLE = 3.0
 _MODEL_WAIT_TIMEOUT = 300   # 5 分鐘
 _MODEL_WAIT_POLL = 3        # 每 3 秒重讀一次模型字串
 _MODEL_REMIND_EVERY = 30    # 每 30 秒於 Log 提醒一次「請切換模型」
+# 點選單項目的逾時：停用中的項目若用預設 30 秒會卡很久，縮短後改判為「模型不可用」。
+_MODEL_CLICK_TIMEOUT_MS = 5000
+# 點完之後確認指示器真的換過去的最長等待秒數。
+_MODEL_SWITCH_CONFIRM = 3.0
 # 開新對話後模型指示器比輸入框晚出現（實測晚 0.1～0.2 秒），讀不到時最多再等這麼久。
 _MODEL_READ_TIMEOUT = 5.0
 # 要求的模型額度已滿時，長時間等待額度恢復（每隔一段時間重試自動切換）。
 _QUOTA_WAIT_TIMEOUT = 12 * 3600   # 最長等 12 小時
 _QUOTA_POLL_INTERVAL = 600        # 每 10 分鐘重試一次自動切換
 # 模型選單上「額度已滿／將於某時恢復」的字樣（命中代表該模型暫時不可用）。
+# 繁體／簡體／英文都要涵蓋：使用者的 Gemini 介面語言不一定是繁體，只列繁體字樣
+# 會在簡體介面完全比對不到（「用量額度將於…重設」→「用量额度将于…重置」），
+# 導致額度已滿被誤判成「選單選擇器失效」而中止整批。
 _QUOTA_RESET_PHRASES = [
     "用量額度將於", "額度將於", "額度已滿", "已達上限",
+    "用量额度将于", "额度将于", "额度已满", "已达上限",
     "quota will reset", "available again", "resets ",
 ]
+# 上面列不完的寫法（各語言／改版文案）再用寬鬆規則兜底：同一段文字裡同時出現
+# 「額度／配額／quota／limit」與「將於／重設／恢復／reset」之類的字眼即視為額度訊息。
+_QUOTA_RESET_RE = re.compile(
+    r"(?:[額额]度|配[額额]|quota|limit)[^\n]{0,24}?"
+    r"(?:將於|将于|重[設设置]|恢復|恢复|已[滿满]|用完|reset|renew|available again)"
+    r"|(?:將於|将于)[^\n]{0,16}?重[設设置]",
+    re.IGNORECASE,
+)
+
+
+def looks_quota_note(text: str) -> bool:
+    """模型選單項目的文字看起來是否在說「這個模型額度已滿／某時才恢復」。"""
+    if not text:
+        return False
+    low = text.lower()
+    if any(p.lower() in low for p in _QUOTA_RESET_PHRASES):
+        return True
+    return bool(_QUOTA_RESET_RE.search(text))
 
 # 啟動瀏覽器的候選，依序嘗試第一個能啟動的：
 #   None    → Playwright 自帶的 Chromium（原本唯一的行為，已可用者不受影響）
@@ -554,14 +590,17 @@ class GeminiWebSession:
                 manual_deadline = None
                 if not announced_quota:
                     self._log(
-                        f"⏸️ 「{req}」額度已滿（{info}）。將等額度恢復後自動切換，"
-                        f"最長等 {_QUOTA_WAIT_TIMEOUT // 3600} 小時；可按停止中止。")
+                        f"⏸️ 目前無法切換到「{req}」（{info}），"
+                        f"多半是該模型額度已滿。將每 "
+                        f"{_QUOTA_POLL_INTERVAL // 60} 分鐘重整頁面重試一次，"
+                        f"最長等 {_QUOTA_WAIT_TIMEOUT // 3600} 小時；"
+                        "若選單本來就沒有這個模型，請按停止並改「要求模型」設定。")
                     announced_quota = True
                 while True:
                     if time.time() >= quota_deadline:
                         raise GeminiModelMismatch(
                             f"等待「{req}」額度恢復逾時（超過 "
-                            f"{_QUOTA_WAIT_TIMEOUT // 3600} 小時）")
+                            f"{_QUOTA_WAIT_TIMEOUT // 3600} 小時）：{info}")
                     self._sleep_with_stop(_QUOTA_POLL_INTERVAL)
                     # 選單上的額度狀態可能只在頁面載入時取得，不重整會一直顯示
                     # 「額度已滿」。進入等待前一定剛開過新對話，重整不會遺失內容。
@@ -573,12 +612,13 @@ class GeminiWebSession:
             if manual_deadline is None:
                 manual_deadline = now + _MODEL_WAIT_TIMEOUT
             if now - last_remind >= _MODEL_REMIND_EVERY:
-                self._log("⚠️ 無法自動切換模型（選單選擇器可能失效），"
+                self._log(f"⚠️ 無法自動切換模型（{info or '選單選擇器可能失效'}），"
                           "請在瀏覽器手動切換到正確模型…")
                 last_remind = now
             if now >= manual_deadline:
                 raise GeminiModelMismatch(
-                    f"無法自動切換到「{req}」，且等待手動切換逾時")
+                    f"無法自動切換到「{req}」，且等待手動切換逾時"
+                    f"（{info or '選單選擇器可能失效'}）")
             self._sleep_with_stop(_MODEL_WAIT_POLL)
             cur = self._read_current_model()
             if cur and model_matches(cur, req):
@@ -627,21 +667,30 @@ class GeminiWebSession:
         """點開模型選單、找符合 req 的項目並點選。
 
         回傳 (status, info)：
-          - 'ok'    成功選到（且未顯示額度滿）
-          - 'quota' 找到該模型但顯示額度已滿；info 為額度恢復時間那行
-          - 'fail'  找不到選單／項目，或點選失敗
+          - 'ok'    成功選到，且指示器已確認換成符合的模型
+          - 'quota' 該模型目前不可用（顯示額度已滿／項目被停用／選單裡根本沒有它
+                    ／點了也換不過去）；info 為說明，呼叫端會等額度恢復後重試
+          - 'fail'  選單打不開或讀不到任何項目（多半是選擇器失效）；info 為原因
+
+        **'quota' 與 'fail' 的分野**：讀得到選單項目就代表選擇器沒失效，
+        這時選不到要求的模型幾乎都是「該模型暫時不可用」（額度用完時 Gemini 會把
+        該項目標成停用或直接不列出），要等額度恢復、不是叫使用者手動切換——
+        v2.46 前一律歸成 'fail'，在簡體介面（額度字樣比對不到）會演變成
+        「無法自動切換模型」洗版 5 分鐘後中止整批。
         """
         picker = self._find("model_indicator")
         if picker is None:
-            return "fail", ""
+            return "fail", "找不到模型選單按鈕"
         try:
             picker.click()
             self._page.wait_for_timeout(700)
-        except Exception:
-            return "fail", ""
+        except Exception as e:  # noqa: BLE001 — 點不開就是選擇器／版面問題
+            return "fail", f"點不開模型選單：{e}"
 
         target = None
         target_txt = ""
+        target_name = ""
+        seen: list[str] = []          # 選單上讀到的所有項目首行（診斷用）
         for sel in self.selectors.get("model_menu_item", []):
             try:
                 loc = self._page.locator(sel)
@@ -659,32 +708,54 @@ class GeminiWebSession:
                 if not txt:
                     continue
                 name = txt.splitlines()[0].strip()  # 首行＝模型名
-                if model_matches(name, req):
+                seen.append(name)
+                if target is None and model_matches(name, req):
                     target = item
                     target_txt = txt
-                    break
-            if target is not None:
+                    target_name = name
+            if seen:
                 break
 
+        menu_desc = "／".join(seen[:8]) if seen else ""
         if target is None:
             self._dismiss_menu()
-            return "fail", ""
+            if not seen:
+                return "fail", "選單打開了但讀不到任何模型項目"
+            # 選單有東西、就是沒有要求的那個 → 多半是額度用完被下架
+            return "quota", f"選單中沒有符合「{req}」的模型（目前有：{menu_desc}）"
 
-        low = target_txt.lower()
-        if any(p.lower() in low for p in _QUOTA_RESET_PHRASES):
+        if looks_quota_note(target_txt):
             info = next(
                 (ln.strip() for ln in target_txt.splitlines()
-                 if any(p.lower() in ln.lower() for p in _QUOTA_RESET_PHRASES)),
+                 if looks_quota_note(ln)),
                 "額度已滿")
             self._dismiss_menu()
             return "quota", info
 
+        # 額度用完時該項目常被標成停用；直接點下去會卡到 Playwright 的
+        # actionability 逾時（預設 30 秒）才丟例外，被誤判成選擇器失效。
         try:
-            target.click()
-            self._page.wait_for_timeout(800)
+            if target.is_disabled():
+                self._dismiss_menu()
+                return "quota", f"選單中的「{target_name or req}」目前不可選取"
         except Exception:
+            pass
+
+        try:
+            target.click(timeout=_MODEL_CLICK_TIMEOUT_MS)
+            self._page.wait_for_timeout(800)
+        except Exception as e:  # noqa: BLE001 — 點不下去多半是該模型被停用
             self._dismiss_menu()
-            return "fail", ""
+            return "quota", f"點不下去「{req}」這個項目（{type(e).__name__}）"
+
+        # 點了不代表換得過去：額度用完時 Gemini 會把指示器彈回原本的模型。
+        cur = self._read_current_model()
+        deadline = time.time() + _MODEL_SWITCH_CONFIRM
+        while cur and not model_matches(cur, req) and time.time() < deadline:
+            self._sleep_with_stop(0.5)
+            cur = self._read_current_model()
+        if cur and not model_matches(cur, req):
+            return "quota", f"點選後模型仍是「{cur}」，沒有換成「{req}」"
         return "ok", ""
 
     def _read_current_model(self) -> str:

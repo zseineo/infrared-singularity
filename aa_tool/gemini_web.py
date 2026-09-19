@@ -85,6 +85,8 @@ ERROR_POLICY_DEFAULTS: dict[str, str] = {
     "api_empty": "stop",           # 空回應（非安全過濾、非截斷）
     "web_stuck": "stop",           # 瀏覽器：Gemini 卡住（開新對話重送後仍無回應）
     "web_censored": "stop",        # 回覆被抽換成罐頭拒絕語／極短回覆（疑似被審查）
+    "reply_format": "retry",       # 回覆不是 ID|譯文 格式（AI 沒照 prompt，回了摘要）
+    "reply_lines": "retry",        # 譯文 ID 行數比送出的少太多（漏翻）
     "fetch_fail": "stop",          # 抓取網頁失敗
 }
 
@@ -93,6 +95,9 @@ ERROR_POLICY_CHOICE_LABELS: dict[str, dict[str, str]] = {
     # 這一項的 stop ＝跳過這一話續下一話（不是中斷整批），retry ＝開新對話重送、
     # 再不行就把該段對半拆開送（見 aa_auto_translate._send_chunk）。
     "web_censored": {"retry": "重送＋拆段", "stop": "跳過這一話"},
+    # 這兩項的 retry ＝排進待補翻列表、之後再補翻（不是當場重送）。
+    "reply_format": {"retry": "稍後重試", "stop": "跳過這一話"},
+    "reply_lines": {"retry": "稍後重試", "stop": "跳過這一話"},
 }
 
 

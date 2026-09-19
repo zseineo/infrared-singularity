@@ -74,6 +74,21 @@ _CENSOR_RETRY_WAIT = 20.0      # 重送前先等幾秒（連續送出容易再�
 _CENSOR_HALF_RETRIES = 1       # 對半拆之後，每半段最多再重送幾次
 _CENSOR_SPLIT_MIN_LINES = 40   # 少於這個行數就不再拆（拆了也無濟於事）
 
+# 回覆格式檢查（v2.50）：AI 有時不理會 prompt，改回一篇內容摘要（「やる夫スレの
+# ログデータですね。登場人物…」）。這種回覆 apply_translation 一行也替換不到，會
+# 存出一份沒翻譯的檔案，所以要當成翻譯失敗。
+# ① 格式：回覆中符合 `ID|文` 的行數佔比低於此值 → 視為根本不是譯文。
+_FORMAT_MIN_RATIO = 0.5
+# ② 行數：譯文的 ID 行數 ÷ 送出行數 低於此值 → 視為漏翻太多（少數行被 AI 合併或
+#    漏掉屬常見，抓 0.8 讓正常翻譯不會誤判）。
+_LINE_KEEP_MIN_RATIO = 0.8
+# 兩項檢查的送出行數下限：太短的段落本來就容易整合成幾行，不做判定。
+_REPLY_CHECK_MIN_LINES = 5
+# 選「稍後重試」時，同一話最多排進待補翻列表幾次；超過就認賠跳過。
+# 沒有這個上限的話，若某一話每次都被回摘要，補翻階段（新的話都跑完後）會在
+# 這一話上無限重試——伺服器忙碌那條路每次要等 35 分鐘，這條卻是馬上重送。
+_MALFORMED_MAX_RETRIES = 3
+
 # 未翻譯偵測：可比對的 ID 中，譯文與原文「完全相同」的比例 ≥ 此值 → 視為沒翻譯。
 _UNTRANSLATED_RATIO = 0.9
 # 可比對 ID 數少於此值時不做未翻譯判定（樣本太少容易誤判，交給其他檢查）。
@@ -101,6 +116,8 @@ ERROR_POLICY_LABELS = {
     "api_empty": "API 空回應",
     "web_stuck": "瀏覽器 Gemini 卡住",
     "web_censored": "回覆被換成拒絕語",
+    "reply_format": "回覆格式不符",
+    "reply_lines": "譯文行數少太多",
     "fetch_fail": "抓取網頁失敗",
 }
 
@@ -125,6 +142,15 @@ class CensoredResponse(RuntimeError):
 
 class UntranslatedResponse(RuntimeError):
     """偵測到回覆與原文幾乎一致（疑似沒翻譯，只是把原文吐回來），該話跳過。"""
+
+
+class MalformedResponse(RuntimeError):
+    """回覆不是可用的譯文：格式不符（不是 ``ID|譯文``）或行數少太多。
+
+    典型情況是 AI 不理會 prompt，改成回一篇「這是やる夫スレ的記錄，重點整理如下…」
+    的內容摘要。這種回覆丟進 `apply_translation` 一行也替換不到，會存出一份沒翻譯
+    的檔案，所以必須當成翻譯失敗、不存檔（進階設定可選跳過該話或排進補翻列表）。
+    """
 
 
 class OutputTooSmall(RuntimeError):
@@ -325,6 +351,25 @@ def _looks_censored(extracted_chunk: str, reply: str) -> bool:
     return len(reply_lines) <= _CENSOR_REPLY_MAX_LINES
 
 
+def _count_id_lines(text: str) -> tuple[int, int]:
+    """回傳 (符合 ``ID|文`` 格式的行數, 非空白行數)。"""
+    lines = [l for l in (text or "").split("\n") if l.strip()]
+    return sum(1 for l in lines if _ID_LINE_RE.match(l)), len(lines)
+
+
+def _format_ratio(reply: str) -> float:
+    """回覆中「``ID|譯文`` 格式」的行數佔比（0～1）；沒有任何非空行回 0。"""
+    matched, total = _count_id_lines(reply)
+    return matched / total if total else 0.0
+
+
+def _line_keep_ratio(sent: str, reply: str) -> float:
+    """譯文的 ID 行數 ÷ 送出的行數（0～1）；送出為空回 1（無從判斷，不擋）。"""
+    matched, _ = _count_id_lines(reply)
+    total_sent = len([l for l in (sent or "").split("\n") if l.strip()])
+    return matched / total_sent if total_sent else 1.0
+
+
 def _parse_id_map(text: str) -> dict[str, str]:
     """把 'ID|文字' 每行解析成 {ID: 文字}。"""
     out: dict[str, str] = {}
@@ -488,6 +533,46 @@ def _send_chunk(session: GeminiWebSession, chunk_lines: list[str], label: str,
              + ("＋對半拆開送" if allow_split else "") + "仍相同") if retries else ""
     raise CensoredResponse(
         f"{label} 回覆極短且非翻譯格式（疑似被審查）{tried}")
+
+
+def _check_reply_usable(sent: str, reply: str, policy: dict,
+                        log: Callable[[str], None],
+                        retries_done: int = 0) -> None:
+    """譯文能不能用：格式是不是 ``ID|譯文``、行數有沒有少太多。不能用就丟例外。
+
+    依進階設定決定丟哪一種（兩項各自獨立設定）：
+      - 「跳過這一話」→ `MalformedResponse`：記入失敗清單、不存檔、續下一話。
+      - 「稍後重試」→ `GeminiBusyRetriesExhausted`：排進待補翻列表，等下一話翻譯
+        成功（代表 AI 恢復正常）後再補翻這一話——隔一段時間再試比當場重送有意義，
+        因為 AI 不照 prompt 多半是整個對話已經歪掉。
+
+    送出行數少於 `_REPLY_CHECK_MIN_LINES` 時兩項都不判定（樣本太少容易誤判）。
+    """
+    sent_lines = len([l for l in (sent or "").split("\n") if l.strip()])
+    if sent_lines < _REPLY_CHECK_MIN_LINES:
+        return
+
+    def _fail(key: str, msg: str) -> None:
+        if (policy.get(key, ERROR_POLICY_DEFAULTS[key]) == "retry"
+                and retries_done < _MALFORMED_MAX_RETRIES):
+            log(f"  ⚠️ {msg} → 之後再補翻這一話（進階設定：稍後重試）")
+            raise GeminiBusyRetriesExhausted(msg + "（進階設定：稍後重試）")
+        if retries_done:
+            msg += f"（已補翻重試 {retries_done} 次仍相同）"
+        raise MalformedResponse(msg)
+
+    matched, total = _count_id_lines(reply)
+    ratio = matched / total if total else 0.0
+    if ratio < _FORMAT_MIN_RATIO:
+        _fail("reply_format",
+              f"回覆不是「ID|譯文」格式（{total} 行中只有 {matched} 行符合，"
+              "疑似 AI 沒照 prompt、改回了內容摘要）")
+
+    keep = matched / sent_lines
+    if keep < _LINE_KEEP_MIN_RATIO:
+        _fail("reply_lines",
+              f"譯文行數比原文少太多（送出 {sent_lines} 行、回來只有 {matched} 行＝"
+              f"{keep:.0%}，低於 {_LINE_KEEP_MIN_RATIO:.0%}）")
 
 
 def _translate(session: GeminiWebSession, extracted: str,
@@ -1062,6 +1147,8 @@ def run_auto_translate(
 
     stuck_retry = policy["web_stuck"] == "retry"
     censor_retry = policy["web_censored"] == "retry"
+    # {網址: 因「回覆無法使用」而排進待補翻列表的次數}，上限 _MALFORMED_MAX_RETRIES
+    malformed_tries: dict[str, int] = {}
 
     def _fetch_with_retry(ch_url: str) -> tuple[str, list, str, str]:
         """抓取＋解析；進階設定「抓取網頁失敗＝重試」時等待後重抓（解析失敗不重試）。
@@ -1245,6 +1332,12 @@ def run_auto_translate(
                                             censor_retry=censor_retry)
                     if _looks_untranslated(to_send, translated):
                         raise UntranslatedResponse("重試（已換新對話）後仍與原文幾乎一致")
+                try:
+                    _check_reply_usable(to_send, translated, policy, log,
+                                        malformed_tries.get(ch_url, 0))
+                except GeminiBusyRetriesExhausted:
+                    malformed_tries[ch_url] = malformed_tries.get(ch_url, 0) + 1
+                    raise
                 # 譯文關鍵字檢查：停止／跳過在存檔前處理（不存檔），暫停等存檔後再等
                 kw_hits = find_output_keywords(translated, kw_rules) if kw_rules else []
                 kw_action = next((a for a in _OUTPUT_KEYWORD_PRIORITY
@@ -1345,6 +1438,13 @@ def run_auto_translate(
                 url = next_url
             except UntranslatedResponse as e:
                 _record_failed(ch_url, retrying, f"疑似未翻譯：{e}")
+                log(f"  ⚠️ {e} → 跳過此話（不存檔），繼續下一話。")
+                url = next_url
+            except MalformedResponse as e:
+                # 回覆不是譯文（AI 回了摘要／漏翻太多）→ 不存檔。進階設定選
+                # 「稍後重試」時不會走到這裡（改丟 GeminiBusyRetriesExhausted
+                # 排進待補翻列表）。
+                _record_failed(ch_url, retrying, f"回覆無法使用：{e}")
                 log(f"  ⚠️ {e} → 跳過此話（不存檔），繼續下一話。")
                 url = next_url
             except OutputTooSmall as e:

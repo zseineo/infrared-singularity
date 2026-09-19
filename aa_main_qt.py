@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.50"
+APP_VERSION = "2.51"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -811,7 +811,10 @@ class MainWindow(QMainWindow):
         self._auto_copy: bool = False
         self._work_history_limit: int = 10
         self._fetch_history_limit: int = 50
-        self._original_cache_limit: int = 50
+        self._original_cache_limit: int = original_cache.DEFAULT_LIMIT
+        # 原文暫存已換成「一筆一檔」儲存區（v2.51）；False 代表這份設定還是
+        # 舊格式時代的，_apply_cache 會把上限提升為新預設並把旗標打開。
+        self._orig_cache_store_v2: bool = False
         self._glossary_auto_search: bool = True
         self._diff_save_mode: bool = False
         self._embed_font_in_html: bool = False
@@ -2476,6 +2479,7 @@ class MainWindow(QMainWindow):
             work_history_limit=self._work_history_limit,
             fetch_history_limit=self._fetch_history_limit,
             original_cache_limit=self._original_cache_limit,
+            orig_cache_store_v2=self._orig_cache_store_v2,
             glossary_auto_search=self._glossary_auto_search,
             diff_save_mode=self._diff_save_mode,
             embed_font_in_html=self._embed_font_in_html,
@@ -2569,8 +2573,17 @@ class MainWindow(QMainWindow):
             self._editor_bg_color = cache.editor_bg_color
         self._work_history_limit = max(1, int(cache.work_history_limit or 10))
         self._fetch_history_limit = max(1, int(cache.fetch_history_limit or 50))
-        self._original_cache_limit = max(1, int(
+        self._original_cache_limit = max(0, int(
             cache.original_cache_limit or self._fetch_history_limit))
+        self._orig_cache_store_v2 = bool(cache.orig_cache_store_v2)
+        if not self._orig_cache_store_v2:
+            # 舊上限（UI 最多 1000）是為了壓住「單一 JSON 每次存檔整包重寫」
+            # 的成本；一筆一檔之後沒有這個顧慮，一次性提升為新預設，之後就
+            # 尊重使用者自己調的值。
+            self._original_cache_limit = max(self._original_cache_limit,
+                                             original_cache.DEFAULT_LIMIT)
+            self._orig_cache_store_v2 = True
+            self.schedule_save()
         self._glossary_auto_search = bool(cache.glossary_auto_search)
         self._diff_save_mode = bool(cache.diff_save_mode)
         self._embed_font_in_html = bool(cache.embed_font_in_html)
@@ -2671,6 +2684,29 @@ class MainWindow(QMainWindow):
         cache = self.settings_mgr.load_cache()
         self._apply_cache(cache)
         self._apply_doc_num_state()
+        self._migrate_original_cache_async()
+
+    def _migrate_original_cache_async(self) -> None:
+        """在背景把舊的單一 ``aa_original_cache.json`` 搬進「一筆一檔」儲存區。
+
+        舊檔可能到 80 MB 以上（一筆平均 163 KB），逐筆 gzip 要好幾秒，放在啟動
+        路徑上會卡住 UI → 丟背景執行緒。搬移是冪等的（已存在的不覆寫、完成後留
+        `.migrated` 標記），`save_entry` / `load_entry_for_html` 也會各自確認過，
+        所以就算這條沒跑完也不會漏資料。
+        """
+        base = self._base_dir()
+
+        def _bg() -> None:
+            try:
+                moved = original_cache.migrate_legacy(base)
+            except Exception:  # noqa: BLE001 — 搬移失敗不該影響主程式
+                return
+            if moved:
+                self._invoke_on_main.emit(
+                    lambda n=moved: self.show_status(
+                        f"✅ 已把 {n} 筆原文暫存搬進新的儲存區", "#28a745"))
+
+        threading.Thread(target=_bg, daemon=True).start()
 
     def toggle_settings_panel(self) -> None:
         """⚙ 設定鈕：開合設定浮層（比照自動翻譯的連線設定浮層）。
@@ -2740,8 +2776,7 @@ class MainWindow(QMainWindow):
             fetch_auto_fill_title=self._fetch_auto_fill_title,
             fetch_proxy_url=self._fetch_proxy_url,
             api_proxy_url=self._api_proxy_url,
-            orig_cache_path=os.path.join(
-                self._base_dir(), original_cache.CACHE_FILENAME),
+            orig_cache_base_dir=self._base_dir(),
             data_dir=self._settings_base_dir,
             on_apply=self._on_settings_applied,
             on_clear_url_history=self._on_clear_url_history_from_settings,
@@ -2993,7 +3028,7 @@ class MainWindow(QMainWindow):
             'work_history_limit', self._work_history_limit)))
         self._fetch_history_limit = max(1, int(values.get(
             'fetch_history_limit', self._fetch_history_limit)))
-        self._original_cache_limit = max(1, int(values.get(
+        self._original_cache_limit = max(0, int(values.get(
             'original_cache_limit', self._original_cache_limit)))
         self._glossary_auto_search = bool(values.get(
             'glossary_auto_search', self._glossary_auto_search))
@@ -3199,6 +3234,14 @@ class MainWindow(QMainWindow):
         """
         if not file_path or not original_text:
             return
+        # 提取／翻譯欄位取自首頁面板，未必屬於正在存的這一話——例如開啟舊檔時
+        # 暫存裡沒有這兩欄，面板就還留著上一話的內容，直接寫進去會污染這一話的
+        # 暫存。以「面板原文欄的指紋 vs 這次要存的原文指紋」確認是同一話才寫。
+        if extracted or translation:
+            panel_fp = original_cache.compute_fingerprint(
+                self._translate_panel.source_text.toPlainText())
+            if panel_fp != original_cache.compute_fingerprint(original_text):
+                extracted = translation = ""
         original_cache.save_entry(
             self._base_dir(), original_text,
             extracted=extracted, translation=translation,

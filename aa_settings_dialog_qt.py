@@ -78,7 +78,7 @@ class SettingsDialog(QWidget):
         fetch_auto_fill_title: bool,
         fetch_proxy_url: str,
         api_proxy_url: str,
-        orig_cache_path: str,
+        orig_cache_base_dir: str,
         data_dir: str,
         on_apply: Callable[[dict], None],
         on_clear_url_history: Callable[[int], int],
@@ -86,7 +86,7 @@ class SettingsDialog(QWidget):
         on_close: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
-        self._orig_cache_path = orig_cache_path
+        self._orig_cache_base_dir = orig_cache_base_dir
         self._data_dir = data_dir
         self._on_import_settings = on_import_settings
         self._on_apply = on_apply
@@ -389,8 +389,16 @@ class SettingsDialog(QWidget):
         lbl3.setFont(_ui_font(12))
         row3.addWidget(lbl3)
         self.orig_spin = QSpinBox()
-        self.orig_spin.setRange(1, 1000)
-        self.orig_spin.setValue(max(1, int(oc_limit)))
+        # v2.51 起是「一筆一檔」的儲存區（%APPDATA%\AATool\originals），存檔
+        # 只寫自己那一個小檔（約 30～40 KB），不再整包重寫，所以上限可以放很大。
+        self.orig_spin.setRange(0, 100000)
+        self.orig_spin.setSpecialValueText("不限制")
+        self.orig_spin.setToolTip(
+            "保留最新 N 筆原文暫存（原文＋提取結果＋填入翻譯），0＝不限制。\n"
+            "開啟已存檔的 HTML 時會依投稿標頭指紋對回這裡，還原比對原文與\n"
+            "Alt+4 的兩個欄位；超過上限時刪掉最舊的。\n"
+            "一筆約 30～70 KB（實測平均），5000 筆約 200～350 MB。")
+        self.orig_spin.setValue(max(0, int(oc_limit)))
         self.orig_spin.setFont(_ui_font(11))
         row3.addWidget(self.orig_spin)
         btn_clear = _make_btn("清除暫存", "#dc3545", "#c82333",
@@ -454,11 +462,12 @@ class SettingsDialog(QWidget):
         root.addLayout(btm)
 
     def _refresh_cache_size(self) -> None:
-        try:
-            size = os.path.getsize(self._orig_cache_path)
-            self.size_label.setText(f"（{_format_size(size)}）")
-        except OSError:
-            self.size_label.setText("（檔案不存在）")
+        from aa_tool import original_cache
+        count, size = original_cache.store_stats(self._orig_cache_base_dir)
+        if not count and not size:
+            self.size_label.setText("（尚無暫存）")
+        else:
+            self.size_label.setText(f"（{count} 筆，{_format_size(size)}）")
 
     def _on_clear_cache(self) -> None:
         ret = QMessageBox.question(
@@ -469,13 +478,14 @@ class SettingsDialog(QWidget):
         )
         if ret != QMessageBox.StandardButton.Yes:
             return
+        from aa_tool import original_cache
         try:
-            with open(self._orig_cache_path, 'w', encoding='utf-8') as f:
-                json.dump({}, f)
-            self._refresh_cache_size()
-            QMessageBox.information(self, "清除完成", "原文暫存已清空。")
+            original_cache.clear_store(self._orig_cache_base_dir)
         except OSError as e:
-            QMessageBox.warning(self, "清除失敗", f"無法寫入暫存檔：{e}")
+            QMessageBox.warning(self, "清除失敗", f"無法清除暫存：{e}")
+            return
+        self._refresh_cache_size()
+        QMessageBox.information(self, "清除完成", "原文暫存已清空。")
 
     def _on_open_data_dir(self) -> None:
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(self._data_dir)):

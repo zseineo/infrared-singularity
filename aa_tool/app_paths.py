@@ -30,7 +30,10 @@ MANAGED_FILES = (
     "AA_Settings.json",        # 正則／過濾／術語表
     "aa_settings_cache.json",  # UI 狀態、自動翻譯參數、網址紀錄
     "aa_api_keys.dat",         # DPAPI 加密金鑰
-    "aa_original_cache.json",  # 原文暫存
+    "aa_original_cache.json",  # 原文暫存（v2.50 以前的單一 JSON；v2.51 起改為
+                               # 同層的 originals\ 資料夾一筆一檔，首次啟動時自動
+                               # 搬移。資料夾不在此清單內——這裡只處理單一檔案的
+                               # 補缺與匯入；備份／換電腦請整個 AATool 資料夾複製）
     "aa_api_quota.json",       # Gemini RPD 冷卻狀態
     "aa_crash.log",            # 閃退日誌
 )

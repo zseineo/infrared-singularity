@@ -124,7 +124,11 @@ class AppCache:
     editor_bg_color: str = "#ffffff"
     work_history_limit: int = 10
     fetch_history_limit: int = 50
-    original_cache_limit: int = 50
+    original_cache_limit: int = 5000
+    # 原文暫存是否已換成「一筆一檔」的新儲存區（v2.51）。False＝這份設定還是
+    # 舊格式時代的，載入時會把 original_cache_limit 從舊上限（最多 1000，為了
+    # 控制單一 JSON 整包重寫的成本）提升為新預設，之後就尊重使用者的設定。
+    orig_cache_store_v2: bool = False
     glossary_auto_search: bool = True
     glossary_translation_only: bool = False
     diff_save_mode: bool = False
@@ -400,6 +404,8 @@ class SettingsManager:
                     'original_cache_limit', cache.fetch_history_limit))
             except (TypeError, ValueError):
                 pass
+            cache.orig_cache_store_v2 = bool(data.get(
+                'orig_cache_store_v2', cache.orig_cache_store_v2))
             cache.glossary_auto_search = bool(data.get(
                 'glossary_auto_search', cache.glossary_auto_search))
             cache.glossary_translation_only = bool(data.get(
@@ -592,6 +598,7 @@ class SettingsManager:
                 'work_history_limit': cache.work_history_limit,
                 'fetch_history_limit': cache.fetch_history_limit,
                 'original_cache_limit': cache.original_cache_limit,
+                'orig_cache_store_v2': cache.orig_cache_store_v2,
                 'glossary_auto_search': cache.glossary_auto_search,
                 'glossary_translation_only': cache.glossary_translation_only,
                 'diff_save_mode': cache.diff_save_mode,

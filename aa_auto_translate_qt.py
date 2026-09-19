@@ -37,7 +37,8 @@ _BACKEND_OPTIONS: list[tuple[str, str]] = [
 ]
 
 # 連線設定「進階設定」的項目：(分組, [(項目 key, 顯示文字, 說明), ...])。
-# key 與預設值見 aa_tool.gemini_web.ERROR_POLICY_DEFAULTS。
+# key 與預設值見 aa_tool.gemini_web.ERROR_POLICY_DEFAULTS；兩個選項的顯示文字
+# 預設是「重試／中斷」，語意不同的項目在 gemini_web.ERROR_POLICY_CHOICE_LABELS 改寫。
 _ERROR_POLICY_UI: list[tuple[str, list[tuple[str, str, str]]]] = [
     ("API 模式", [
         ("api_5xx", "伺服器忙碌（HTTP 5xx）",
@@ -61,6 +62,14 @@ _ERROR_POLICY_UI: list[tuple[str, list[tuple[str, str, str]]]] = [
         ("web_stuck", "Gemini 卡住",
          "送出後超過 10 分鐘沒有回應，開新對話重送一次仍沒有回應。\n"
          "重試＝暫時跳過這一話、放進待補翻列表，下一話翻譯成功後再補翻。"),
+        ("web_censored", "回覆被換成拒絕語",
+         "生成到一半，整段回覆被伺服器換成「大規模言語モデルとして…対応できません」\n"
+         "之類的罐頭拒絕語或極短回覆。送出的內容本身正常也會隨機發生——\n"
+         "這是 Google 端的輸出過濾，程式端無法關閉。\n"
+         "跳過這一話＝原本的行為：記入失敗清單，直接翻下一話。\n"
+         "重送＋拆段＝開新對話、等 20 秒後重送（最多 2 次）；仍被擋且該段 40 行以上，\n"
+         "就把這一段對半拆開分別送（每半再重送 1 次），全部失敗才跳過。\n"
+         "代價是被擋的那一段最多要多送 4 次，會多花時間與額度。"),
     ]),
     ("兩種模式", [
         ("fetch_fail", "抓取網頁失敗",
@@ -585,7 +594,8 @@ class AutoTranslatePanel(QWidget):
         預設收合；展開後重新計算浮層高度。選項值存 `self._policy_combos`
         （{項目: QComboBox}，data 為 "retry"／"stop"），儲存時只記與預設不同的項目。
         """
-        from aa_tool.gemini_web import ERROR_POLICY_DEFAULTS
+        from aa_tool.gemini_web import (ERROR_POLICY_DEFAULTS,
+                                        policy_choice_label)
         self.btn_policy_toggle = QPushButton("▸ 進階設定：遇到錯誤要中斷或重試")
         self.btn_policy_toggle.setCheckable(True)
         self.btn_policy_toggle.setFlat(True)
@@ -627,7 +637,8 @@ class AutoTranslatePanel(QWidget):
             for key, label, tip in items:
                 combo = QComboBox()
                 default = ERROR_POLICY_DEFAULTS[key]
-                for val, text in (("retry", "重試"), ("stop", "中斷")):
+                for val in ("retry", "stop"):
+                    text = policy_choice_label(key, val)
                     combo.addItem(text + ("（預設）" if val == default else ""), val)
                 combo.setToolTip(tip)
                 lbl = QLabel(label + "：")

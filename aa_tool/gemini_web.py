@@ -84,8 +84,22 @@ ERROR_POLICY_DEFAULTS: dict[str, str] = {
     "api_4xx": "stop",             # HTTP 4xx（429 額度另有冷卻邏輯，不在此列）
     "api_empty": "stop",           # 空回應（非安全過濾、非截斷）
     "web_stuck": "stop",           # 瀏覽器：Gemini 卡住（開新對話重送後仍無回應）
+    "web_censored": "stop",        # 回覆被抽換成罐頭拒絕語／極短回覆（疑似被審查）
     "fetch_fail": "stop",          # 抓取網頁失敗
 }
+
+# 少數項目的「retry／stop」不是字面上的重試／中斷，UI 與 Log 改用這裡的說法。
+ERROR_POLICY_CHOICE_LABELS: dict[str, dict[str, str]] = {
+    # 這一項的 stop ＝跳過這一話續下一話（不是中斷整批），retry ＝開新對話重送、
+    # 再不行就把該段對半拆開送（見 aa_auto_translate._send_chunk）。
+    "web_censored": {"retry": "重送＋拆段", "stop": "跳過這一話"},
+}
+
+
+def policy_choice_label(key: str, value: str) -> str:
+    """進階設定某項目某選項的顯示文字（未特別指定者用「重試」／「中斷」）。"""
+    return ERROR_POLICY_CHOICE_LABELS.get(key, {}).get(
+        value, "重試" if value == "retry" else "中斷")
 
 
 def resolve_error_policy(policy) -> dict[str, str]:

@@ -32,7 +32,8 @@ from aa_tool import app_paths, constants, html_io, original_cache
 from aa_tool import settings_manager
 from aa_tool import text_extraction, translation_engine, url_fetcher
 from aa_tool.gemini_web import (
-    ERROR_POLICY_DEFAULTS, GeminiAborted, GeminiBusyRetriesExhausted,
+    ERROR_POLICY_DEFAULTS, policy_choice_label,
+    GeminiAborted, GeminiBusyRetriesExhausted,
     GeminiContentBlocked, GeminiModelMismatch, GeminiQuotaExceeded,
     GeminiResponseTruncated, GeminiStuck, GeminiWebError, GeminiWebSession,
     resolve_error_policy,
@@ -99,6 +100,7 @@ ERROR_POLICY_LABELS = {
     "api_4xx": "API HTTP 4xx 錯誤",
     "api_empty": "API 空回應",
     "web_stuck": "瀏覽器 Gemini 卡住",
+    "web_censored": "回覆被換成拒絕語",
     "fetch_fail": "抓取網頁失敗",
 }
 
@@ -437,6 +439,9 @@ def _send_chunk(session: GeminiWebSession, chunk_lines: list[str], label: str,
     （合起來仍是同一段的完整譯文）。全部失敗才丟 `CensoredResponse`（跳過該話）。
 
     最壞情況的送出次數：(1+_CENSOR_RETRIES) + 2×(1+_CENSOR_HALF_RETRIES)。
+
+    `retries=0, allow_split=False`（進階設定「回覆被換成拒絕語＝跳過這一話」，
+    **預設**）時完全不重送，命中就丟 `CensoredResponse`＝v2.47 以前的行為。
     """
     text = "\n".join(chunk_lines)
     for attempt in range(1, retries + 2):
@@ -479,15 +484,15 @@ def _send_chunk(session: GeminiWebSession, chunk_lines: list[str], label: str,
             stuck_retry, retries=_CENSOR_HALF_RETRIES, allow_split=False)
         return (first_half + "\n" + second_half).strip()
 
+    tried = (f"；已開新對話重送 {retries} 次"
+             + ("＋對半拆開送" if allow_split else "") + "仍相同") if retries else ""
     raise CensoredResponse(
-        f"{label} 回覆極短且非翻譯格式（疑似被審查）；"
-        f"已開新對話重送 {retries} 次"
-        + ("＋對半拆開送" if allow_split else "") + "仍相同")
+        f"{label} 回覆極短且非翻譯格式（疑似被審查）{tried}")
 
 
 def _translate(session: GeminiWebSession, extracted: str,
                log: Callable[[str], None], stop_event=None,
-               stuck_retry: bool = False) -> str:
+               stuck_retry: bool = False, censor_retry: bool = False) -> str:
     """送 Gemini 翻譯；行數過多時分段送出後合併。
 
     GeminiQuotaExceeded 直接往外拋（呼叫端暫停整批）。
@@ -507,7 +512,9 @@ def _translate(session: GeminiWebSession, extracted: str,
             log(f"  翻譯分段 {idx}/{len(chunks)}（{len(chunk)} 行）")
         parts.append(_send_chunk(
             session, chunk, f"分段 {idx}/{len(chunks)}", log, stop_event,
-            stuck_retry, retries=_CENSOR_RETRIES, allow_split=True))
+            stuck_retry,
+            retries=_CENSOR_RETRIES if censor_retry else 0,
+            allow_split=censor_retry))
     return "\n".join(parts)
 
 
@@ -917,7 +924,7 @@ def run_auto_translate(
     if error_policy is None:
         error_policy = getattr(cache, "auto_translate_error_policy", {})
     policy = resolve_error_policy(error_policy)
-    changed = [f"{ERROR_POLICY_LABELS[k]}→{'重試' if v == 'retry' else '中斷'}"
+    changed = [f"{ERROR_POLICY_LABELS[k]}→{policy_choice_label(k, v)}"
                for k, v in policy.items() if v != ERROR_POLICY_DEFAULTS[k]]
     if changed:
         log("⚙ 進階設定（與預設不同）：" + "、".join(changed))
@@ -1054,6 +1061,7 @@ def run_auto_translate(
         return True
 
     stuck_retry = policy["web_stuck"] == "retry"
+    censor_retry = policy["web_censored"] == "retry"
 
     def _fetch_with_retry(ch_url: str) -> tuple[str, list, str, str]:
         """抓取＋解析；進階設定「抓取網頁失敗＝重試」時等待後重抓（解析失敗不重試）。
@@ -1220,7 +1228,8 @@ def run_auto_translate(
                 if n_masked:
                     log(f"  🔒 已把 {n_masked} 處過濾詞換成 ○")
                 translated = _translate(session, to_send, log, stop_event,
-                                        stuck_retry=stuck_retry)
+                                        stuck_retry=stuck_retry,
+                                        censor_retry=censor_retry)
                 warnings = text_extraction.validate_ai_text(translated)
                 untranslated = _looks_untranslated(to_send, translated)
                 if warnings or untranslated:
@@ -1232,7 +1241,8 @@ def run_auto_translate(
                         log("  （未翻譯：先開新對話再重試，避免重複相同結果）")
                         session.start_new_session()
                     translated = _translate(session, to_send, log, stop_event,
-                                            stuck_retry=stuck_retry)
+                                            stuck_retry=stuck_retry,
+                                            censor_retry=censor_retry)
                     if _looks_untranslated(to_send, translated):
                         raise UntranslatedResponse("重試（已換新對話）後仍與原文幾乎一致")
                 # 譯文關鍵字檢查：停止／跳過在存檔前處理（不存檔），暫停等存檔後再等

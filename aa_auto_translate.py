@@ -243,20 +243,35 @@ def _url_cache_path(url: str) -> str:
 
 
 def _read_url_cache(url: str) -> str | None:
+    """讀本機網頁暫存；讀不到、或內容是舊版寫壞的，回 None（改為重抓）。
+
+    與 aa_main_qt 的同名方法同規則（見該處 docstring）：`newline=""` 讓讀回來
+    的 HTML 與抓下來的逐字相同；殘留 CR CR 的舊檔一律作廢重抓。
+    """
     path = _url_cache_path(url)
     if not os.path.exists(path):
         return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
+        with open(path, "r", encoding="utf-8", newline="") as f:
+            text = f.read()
     except OSError:
         return None
+    if (chr(13) + chr(13)) in text:
+        return None
+    return text
 
 
 def _write_url_cache(url: str, page_html: str) -> None:
+    """寫本機網頁暫存。
+
+    **`newline=""` 不可省略**：Windows 文字模式會把 LF 轉成 CR LF，來源 HTML
+    原有的 CR LF 於是變成 CR CR LF，下次讀回來又還原成兩個 LF＝每行多一個換行
+    （詳見 aa_main_qt._write_url_cache 的說明）。
+    """
     try:
         os.makedirs(_URL_CACHE_DIR, exist_ok=True)
-        with open(_url_cache_path(url), "w", encoding="utf-8") as f:
+        with open(_url_cache_path(url), "w", encoding="utf-8",
+                  newline="") as f:
             f.write(page_html)
     except OSError:
         pass

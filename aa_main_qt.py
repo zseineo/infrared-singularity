@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.51"
+APP_VERSION = "2.52"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -2184,18 +2184,38 @@ class MainWindow(QMainWindow):
         return os.path.join(self._url_cache_dir(), f"{h}.html")
 
     def _read_url_cache(self, url: str) -> str | None:
+        """讀本機網頁暫存；讀不到、或內容是舊版寫壞的，回 None（改為重抓）。
+
+        `newline=""`：不做通用換行轉換，讀回來與當初抓下來的 HTML 逐字相同
+        （見 `_write_url_cache`）。
+        """
         path = self._url_cache_path(url)
         if not os.path.exists(path):
             return None
         try:
-            with open(path, 'r', encoding='utf-8') as f:
-                return f.read()
+            with open(path, 'r', encoding='utf-8', newline='') as f:
+                text = f.read()
         except OSError:
             return None
+        # v2.51 以前寫入沒指定 newline，Windows 會把來源的 CR LF 寫成 CR CR LF；
+        # 這種舊檔一律視為無效、重抓後覆蓋（沿用會每行多一個空行，見下方說明）。
+        if (chr(13) + chr(13)) in text:
+            return None
+        return text
 
     def _write_url_cache(self, url: str, page_html: str) -> None:
+        """寫本機網頁暫存。
+
+        **`newline=""` 不可省略**：Windows 的文字模式會把字串裡的 LF 轉成
+        CR LF，來源 HTML 本來就有的 CR LF 因此被寫成 CR CR LF；下次讀回來時
+        通用換行又把 CR CR LF 還原成兩個 LF，等於**每一行多一個換行**。對
+        「每行寫成 `內容<br>` 加 CR LF」的站台（man001.blog.2nt.com 等），
+        解析後就會每行多一個空行——讀網址當下正常、之後吃暫存才出錯，正是
+        使用者回報的「勾不讀暫存就正常」。
+        """
         try:
-            with open(self._url_cache_path(url), 'w', encoding='utf-8') as f:
+            with open(self._url_cache_path(url), 'w', encoding='utf-8',
+                      newline='') as f:
                 f.write(page_html)
         except OSError:
             return

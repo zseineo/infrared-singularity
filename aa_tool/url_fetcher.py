@@ -1,7 +1,9 @@
 """網頁抓取與 HTML 解析 — 純 I/O 與純邏輯，不依賴任何 UI 框架。
 
 支援的網域：
-  - 預設格式（article div + relate_dl；含無 dt/dd 的平面 <br> 變體，例 man001.blog.2nt.com）
+  - 預設格式（article div + relate_dl；含無 dt/dd 的平面 <br> 變體，例 man001.blog.2nt.com。
+    平面變體的換行完全比照瀏覽器：只有 <br>/<hr> 換行、字面換行折成空白，**作者刻意留的
+    連續空行原樣保留**）
   - himanatokiniyaruo.com（dt / dd 結構 + related-entries；舊 <dt id="N"> 與新 <dt><span>N</span> 兩種模板）
   - blog.fc2.com（ently_text / entry_text div + relate_dl，含 web.archive.org 封存版、res_h/res_b 變體、
     yarucha 類 <a name/num> + <dd> 無容器模板）
@@ -767,20 +769,31 @@ def _parse_default(page_html: str, base_url: str, *, author_name: str = "", auth
         flat = re.sub(r'<script\b.*?</script>', '', flat, flags=re.DOTALL | re.IGNORECASE)
         flat = re.sub(r'<table\b.*?</table>', '', flat, flags=re.DOTALL | re.IGNORECASE)
         flat = re.sub(r'<a\s[^>]*>.*?</a>', '', flat, flags=re.DOTALL | re.IGNORECASE)
-        flat = re.sub(r'<hr\b[^>]*/?>', '\n', flat, flags=re.IGNORECASE)
-        # 來源 HTML 每行為 `LINE<br>\r\n`：<br> 才是真正的換行，其後的排版換行
-        # （瀏覽器在一般流中折疊為空白）須一併吸收，否則每行都會多出一個空行
-        # （例：man001.blog.2nt.com）。<br><br> 等連續換行仍各自保留為空行。
-        flat = flat.replace('\r', '')
-        flat = re.sub(r'<br\s*/?>[ \t]*\n?', '\n', flat)
+        # 註解整段（含裡面的換行）不算內容——留著會讓後面的折行把註解裡的排版
+        # 換行折成空白，內文第一行開頭多一個半形空格（man001 的容器開頭就有一段
+        # 【R-18】註解）。
+        flat = re.sub(r'<!--.*?-->', '', flat, flags=re.DOTALL)
+        # 換行完全比照瀏覽器：**只有 <br> / <hr> 產生換行**，來源 HTML 的字面
+        # 換行一律折成空白（瀏覽器在一般流中就是這樣折疊）。先把兩種標籤換成
+        # 佔位符，折掉所有字面換行後再還原，才不會把排版用的縮排換行算進去。
+        # 這樣連續 <br> 有幾個就留幾行空白——**作者刻意空出來的畫面留白必須
+        # 原樣保留**，不能用「連續 N 行以上就壓掉」這種規則猜（v2.53；v2.52 前
+        # 以 `\n{3,}→\n\n` 壓掉，man001.blog.2nt.com 一話就少了 900 多行空白）。
+        _NL = '\x00'
+        flat = re.sub(r'<hr\b[^>]*/?>', _NL, flat, flags=re.IGNORECASE)
+        flat = re.sub(r'<br\s*/?>', _NL, flat)
+        # 緊貼換行標籤的字面換行是排版用的（`LINE<br>\r\n`），直接丟掉——折成
+        # 空白會讓每行開頭多一個半形空格，AA 的對齊就跑掉半格。夾在行中間的
+        # 字面換行才是來源把過長行軟換行，折成空白（等同瀏覽器）。
+        flat = re.sub(r'[\r\n]*' + _NL + r'[\r\n]*', _NL, flat)
+        flat = re.sub(r'[\r\n]+', ' ', flat)
+        flat = flat.replace(_NL, '\n')
         flat = _strip_tags_keep_color(flat)
         flat = html.unescape(flat)
         if author_name or author_only:
             flat = _filter_color_by_author(flat, author_name, author_only=author_only)
         else:
             flat = re.sub(r'<span\s+style="color:[^"]*">|</span>', '', flat)
-        # 多個 span/hr 邊界會堆出 3+ 連續換行，壓回最多一行空白
-        flat = re.sub(r'\n{3,}', '\n\n', flat)
         out_lines = flat.split('\n')
         while out_lines and not out_lines[0].strip():
             out_lines.pop(0)

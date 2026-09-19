@@ -48,6 +48,31 @@ _CENSOR_REPLY_MAX_LINES = 4
 _CENSOR_SOURCE_MIN_LINES = 4
 _ID_LINE_RE = re.compile(r'^\s*\d+-\d+\s*\|')
 
+# 罐頭拒絕語（v2.48）。實際回報：生成到快完成時，伺服器端把整段回覆抽換成
+# 「大規模言語モデルとして私はまだ学習中であり、そちらには対応できません。」
+# 這類一句話拒絕。**只有在回覆幾乎沒有 ID|文 結構時才會拿來比對**（正常譯文
+# 每行都是 `ID|文`，劇情裡出現同樣字眼不會誤判），所以片語可以列得寬一點。
+_REFUSAL_RE = re.compile(
+    "|".join([
+        "大規模言語モデル", "言語モデルとして", "まだ学習中",
+        "対応できません", "お答えできません", "お手伝いできません",
+        "大型語言模型", "大型语言模型", "語言模型", "语言模型",
+        "還在學習", "还在学习", "無法協助", "无法协助", "無法回應", "无法回应",
+        "i'm a language model", "i am a language model",
+        "large language model", "as an ai",
+        "i can't help with that", "i cannot help with that",
+        "i'm not able to help", "i'm unable to",
+    ]),
+    re.IGNORECASE,
+)
+
+# 罐頭拒絕／極短回覆的重送策略（v2.48）：伺服器端的輸出過濾多半有隨機性，
+# 換個對話重送常常就過了；連兩次不行才懷疑是「這段輸出太長」，對半拆開送。
+_CENSOR_RETRIES = 2            # 同一段最多再重送幾次（每次都先開新對話）
+_CENSOR_RETRY_WAIT = 20.0      # 重送前先等幾秒（連續送出容易再被攔）
+_CENSOR_HALF_RETRIES = 1       # 對半拆之後，每半段最多再重送幾次
+_CENSOR_SPLIT_MIN_LINES = 40   # 少於這個行數就不再拆（拆了也無濟於事）
+
 # 未翻譯偵測：可比對的 ID 中，譯文與原文「完全相同」的比例 ≥ 此值 → 視為沒翻譯。
 _UNTRANSLATED_RATIO = 0.9
 # 可比對 ID 數少於此值時不做未翻譯判定（樣本太少容易誤判，交給其他檢查）。
@@ -275,20 +300,27 @@ def _extract(source: str, display_title: str, cfg: AutoConfig) -> str:
 
 
 def _looks_censored(extracted_chunk: str, reply: str) -> bool:
-    """檢查回覆是否疑似被審查。
+    """檢查回覆是否疑似被審查（含伺服器端把回覆抽換成罐頭拒絕語）。
 
-    判定條件：原文一定行數以上（避免短句誤判），但回覆極短（≤4 行）且幾乎
-    沒有 ``ID|文`` 結構 → 視為被審查。被審查時 Gemini 通常回一兩句
-    「無法協助」「不便回應」之類的拒絕語。
+    先看有沒有 ``ID|文`` 結構：有兩行以上就是正常譯文，一律不判定（這道前置
+    條件讓下面兩種判定都不會誤殺正常翻譯，即使劇情裡剛好有「対応できません」
+    之類的台詞）。接著：
+
+    - 回覆含罐頭拒絕語（`_REFUSAL_RE`）→ 不看行數一律視為被審查（v2.48；
+      伺服器有時會在拒絕語前後多加幾行說明，原本的「≤4 行」會漏掉）。
+    - 否則沿用舊規則：原文 ≥ `_CENSOR_SOURCE_MIN_LINES` 行但回覆 ≤
+      `_CENSOR_REPLY_MAX_LINES` 行 → 視為被審查。
     """
     sent = [l for l in extracted_chunk.split("\n") if l.strip()]
     reply_lines = [l for l in reply.split("\n") if l.strip()]
+    matched = sum(1 for l in reply_lines if _ID_LINE_RE.match(l))
+    if matched > 1:
+        return False
+    if _REFUSAL_RE.search(reply or ""):
+        return True
     if len(sent) < _CENSOR_SOURCE_MIN_LINES:
         return False
-    if len(reply_lines) > _CENSOR_REPLY_MAX_LINES:
-        return False
-    matched = sum(1 for l in reply_lines if _ID_LINE_RE.match(l))
-    return matched <= 1
+    return len(reply_lines) <= _CENSOR_REPLY_MAX_LINES
 
 
 def _parse_id_map(text: str) -> dict[str, str]:
@@ -393,6 +425,66 @@ def _keyword_hits_text(hits: list[tuple[str, str, str]]) -> str:
     return "、".join(f"「{w}」（{OUTPUT_KEYWORD_ACTIONS[a]}）" for w, a, _ in hits)
 
 
+def _send_chunk(session: GeminiWebSession, chunk_lines: list[str], label: str,
+                log: Callable[[str], None], stop_event, stuck_retry: bool,
+                *, retries: int, allow_split: bool) -> str:
+    """送出一段並確認拿到的是譯文；被吞成罐頭拒絕就重送，再不行就對半拆。
+
+    伺服器端的輸出過濾（回覆生成到一半被整段抽換成「大規模言語モデルとして…
+    対応できません」）**有隨機性**，而且被吞的那則回覆會留在對話脈絡裡影響後續，
+    所以每次重送前都 `start_new_session()` 開新對話並等 `_CENSOR_RETRY_WAIT` 秒。
+    重送 `retries` 次都不行，才改判「這段輸出太長容易被攔」，對半拆成兩段分別送
+    （合起來仍是同一段的完整譯文）。全部失敗才丟 `CensoredResponse`（跳過該話）。
+
+    最壞情況的送出次數：(1+_CENSOR_RETRIES) + 2×(1+_CENSOR_HALF_RETRIES)。
+    """
+    text = "\n".join(chunk_lines)
+    for attempt in range(1, retries + 2):
+        if stop_event is not None and stop_event.is_set():
+            raise StopRequested()
+        try:
+            reply = session.translate(text)
+        except GeminiStuck as e:
+            if not stuck_retry:
+                raise
+            raise GeminiBusyRetriesExhausted(f"{e}（進階設定：重試）") from e
+        if not _looks_censored(text, reply):
+            if attempt > 1:
+                log(f"  ✅ {label} 重送後取得正常譯文。")
+            return reply.strip()
+        first = (reply.strip().splitlines() or [""])[0][:60]
+        log(f"  🚫 {label} 的回覆被抽換成拒絕語／極短回覆"
+            f"（第 {attempt} 次）：{first}")
+        if attempt > retries:
+            break
+        log(f"  🔁 開新對話後等 {int(_CENSOR_RETRY_WAIT)} 秒再重送一次"
+            "（被吞的回覆會留在對話脈絡裡，同一個對話重送多半一樣）…")
+        session.start_new_session()
+        if stop_event is not None:
+            if stop_event.wait(_CENSOR_RETRY_WAIT):
+                raise StopRequested()
+        else:
+            time.sleep(_CENSOR_RETRY_WAIT)
+
+    if allow_split and len(chunk_lines) >= _CENSOR_SPLIT_MIN_LINES:
+        mid = len(chunk_lines) // 2
+        log(f"  ✂️ 重送都被擋 → 改成對半拆（{mid} + {len(chunk_lines) - mid} 行）"
+            "分開送：回覆愈長愈容易在快完成時被攔掉。")
+        session.start_new_session()
+        first_half = _send_chunk(
+            session, chunk_lines[:mid], f"{label} 前半", log, stop_event,
+            stuck_retry, retries=_CENSOR_HALF_RETRIES, allow_split=False)
+        second_half = _send_chunk(
+            session, chunk_lines[mid:], f"{label} 後半", log, stop_event,
+            stuck_retry, retries=_CENSOR_HALF_RETRIES, allow_split=False)
+        return (first_half + "\n" + second_half).strip()
+
+    raise CensoredResponse(
+        f"{label} 回覆極短且非翻譯格式（疑似被審查）；"
+        f"已開新對話重送 {retries} 次"
+        + ("＋對半拆開送" if allow_split else "") + "仍相同")
+
+
 def _translate(session: GeminiWebSession, extracted: str,
                log: Callable[[str], None], stop_event=None,
                stuck_retry: bool = False) -> str:
@@ -413,17 +505,9 @@ def _translate(session: GeminiWebSession, extracted: str,
             raise StopRequested()
         if len(chunks) > 1:
             log(f"  翻譯分段 {idx}/{len(chunks)}（{len(chunk)} 行）")
-        chunk_text = "\n".join(chunk)
-        try:
-            reply = session.translate(chunk_text)
-        except GeminiStuck as e:
-            if not stuck_retry:
-                raise
-            raise GeminiBusyRetriesExhausted(f"{e}（進階設定：重試）") from e
-        if _looks_censored(chunk_text, reply):
-            raise CensoredResponse(
-                f"分段 {idx}/{len(chunks)} 回覆極短且非翻譯格式（疑似被審查）")
-        parts.append(reply.strip())
+        parts.append(_send_chunk(
+            session, chunk, f"分段 {idx}/{len(chunks)}", log, stop_event,
+            stuck_retry, retries=_CENSOR_RETRIES, allow_split=True))
     return "\n".join(parts)
 
 

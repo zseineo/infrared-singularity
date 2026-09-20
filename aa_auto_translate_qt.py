@@ -237,7 +237,23 @@ class AutoTranslatePanel(QWidget):
             "・跳過的話不計入「連續話數」，也不存檔\n"
             "・連續多話（50 話）都不符會自動中止，避免過濾文字打錯時一路抓到最後\n"
             "・直接比對文字，不是正則")
-        form.addRow("標題過濾：", self.title_filter_edit)
+        # 「⤵ 作品名」：用與「作品資料夾」同一套規則（頁面標題去掉話數後的作品名
+        # 主體）填進過濾欄——同一個作品的每一話標題都含作品名，拿它當過濾字最準，
+        # 使用者不必自己從標題挑字。刻意做成按鈕而非自動帶入：自動帶會讓「本來不想
+        # 過濾」的批次突然被過濾。
+        self.btn_title_from_series = QPushButton("⤵ 作品名")
+        self.btn_title_from_series.setToolTip(
+            "用起始網址的頁面標題算出作品名稱（與「作品資料夾」同一套規則：\n"
+            "去掉話數／第N話等尾碼後的主體），填進左邊的過濾欄。\n"
+            "算不出來時會在狀態列提示。")
+        self.btn_title_from_series.clicked.connect(self._fill_title_filter_from_series)
+        title_row = QWidget()
+        title_hl = QHBoxLayout(title_row)
+        title_hl.setContentsMargins(0, 0, 0, 0)
+        title_hl.setSpacing(6)
+        title_hl.addWidget(self.title_filter_edit, 1)
+        title_hl.addWidget(self.btn_title_from_series)
+        form.addRow("標題過濾：", title_row)
 
         # 檔名：作品名稱與檔名預覽共用一列，依「自動填入作品名稱」設定切換
         # （_apply_title_mode）。手動模式＝可編輯的作品名稱＋右側灰字尾碼
@@ -1149,6 +1165,56 @@ class AutoTranslatePanel(QWidget):
         """目前清單的有效網址（去空行、去頭尾空白）。"""
         return [ln.strip() for ln in self._url_list_text.splitlines() if ln.strip()]
 
+    def _fill_title_filter_from_series(self) -> None:
+        """「⤵ 作品名」：把起始網址算出的作品名稱填進標題過濾欄。
+
+        用的是與「作品資料夾」完全相同的規則（`preview_series_folder`
+        → `compute_series_folder_name` → `extract_work_title`），差別只在這裡
+        **一律以頁面標題為準**（`fetch_auto_fill_title=True`）——手動模式的作品
+        資料夾等於使用者自己打的作品名稱，拿來當過濾字不一定對得上頁面標題。
+        自動模式下若剛好已經算好了就直接沿用，不必再跑一次。
+        """
+        lines = self._url_list_lines()
+        url = lines[0] if lines else self.url_edit.text().strip()
+        if not url:
+            self._main.show_status("⚠️ 請先填入起始網址（或手動網址清單）", "#f39c12")
+            return
+        if self._title_auto and self._series_folder_value:
+            self._set_title_filter(self._series_folder_value)
+            return
+        doc_title = self.doc_title_edit.text().strip()
+        base_dir = getattr(self._main, "_settings_base_dir", None) \
+            or app_paths.data_dir()
+        self.btn_title_from_series.setEnabled(False)
+        self._main.show_status("⏳ 讀取網址中…", "#17a2b8")
+
+        def _bg() -> None:
+            import aa_auto_translate as a
+            name = err = ""
+            try:
+                name = a.preview_series_folder(
+                    url, base_dir=base_dir, doc_title=doc_title,
+                    fetch_auto_fill_title=True, allow_network=True) or ""
+            except Exception as e:  # noqa: BLE001 — 只是帶入輔助，不影響流程
+                err = str(e) or type(e).__name__
+
+            def _apply() -> None:
+                self.btn_title_from_series.setEnabled(not self._running)
+                if name:
+                    self._set_title_filter(name)
+                elif err:
+                    self._main.show_status(f"⚠️ 讀取失敗：{err}", "#f39c12")
+                else:
+                    self._main.show_status(
+                        "⚠️ 無法從頁面標題判斷作品名稱", "#f39c12")
+            self._main._invoke_on_main.emit(_apply)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _set_title_filter(self, name: str) -> None:
+        self.title_filter_edit.setText(name)
+        self._main.show_status(f"✅ 標題過濾已帶入「{name}」", "#0f0")
+
     def _update_url_list_btn(self) -> None:
         """按鈕文字帶出清單筆數，讓使用者一眼看出清單正在生效。"""
         n = len(self._url_list_lines())
@@ -1423,7 +1489,8 @@ class AutoTranslatePanel(QWidget):
         self.btn_stop.setEnabled(running)
         # 執行中鎖住設定欄位，避免使用者中途改值造成混亂
         for w in (self.url_edit, self.count_spin, self.until_last,
-                  self.title_filter_edit, self.gem_edit, self.model_combo, self.max_session_spin,
+                  self.title_filter_edit, self.btn_title_from_series,
+                  self.gem_edit, self.model_combo, self.max_session_spin,
                   self.doc_title_edit, self.out_edit, self.skip_existing_cb,
                   self.btn_url_list, self.group_by_series_cb,
                   self.mask_words_cb, self.btn_mask_list,

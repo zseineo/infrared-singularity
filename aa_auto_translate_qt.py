@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import threading
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QEvent, Qt, QTimer
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
@@ -1515,16 +1515,18 @@ class AutoTranslatePanel(QWidget):
         cv = QVBoxLayout(cur_box)
         cv.setContentsMargins(6, 4, 6, 4)
         cv.setSpacing(2)
+        # 只顯示「哪一話」（頁面標題；讀到標題前先顯示網址）。標題常很長會折行，
+        # 而折行 QLabel 放在這種版面裡高度常只算一行、第二行被切掉 → 由
+        # _fit_cur_title() 依實際寬度算需要幾行、設定最小高度（寬度變了也重算）。
         self.cur_title_label = QLabel("")
         self.cur_title_label.setWordWrap(True)
+        self.cur_title_label.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.cur_title_label.setStyleSheet("color:#ffffff; font-weight:bold;")
         self.cur_title_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.cur_detail_label = QLabel("")
-        self.cur_detail_label.setWordWrap(True)
-        self.cur_detail_label.setStyleSheet("color:#9aa0a6;")
+        self.cur_title_label.installEventFilter(self)
         cv.addWidget(self.cur_title_label)
-        cv.addWidget(self.cur_detail_label)
         v.addWidget(cur_box)
 
         self.done_head = _head("")
@@ -1540,7 +1542,6 @@ class AutoTranslatePanel(QWidget):
         v.addWidget(self.skip_list, 1)
 
         self._cur_url = ""
-        self._cur_step = ""
         self._skip_items: dict[str, QListWidgetItem] = {}   # url → 已跳過清單項
         self.reset_status()
         return col
@@ -1551,9 +1552,7 @@ class AutoTranslatePanel(QWidget):
         self.skip_list.clear()
         self._skip_items.clear()
         self._cur_url = ""
-        self._cur_step = ""
-        self.cur_title_label.setText("（尚未開始）")
-        self.cur_detail_label.setText("")
+        self._set_cur_title("（尚未開始）")
         self._update_status_heads()
 
     def _update_status_heads(self) -> None:
@@ -1571,10 +1570,7 @@ class AutoTranslatePanel(QWidget):
         tip = f"{url}\n{detail}" if detail else url
         if kind == "current":
             self._cur_url = url
-            self._cur_step = detail
-            self.cur_title_label.setText(name)
-            self.cur_title_label.setToolTip(url)
-            self.cur_detail_label.setText(detail)
+            self._set_cur_title(name, url)
             return
         if kind == "done":
             # 補翻成功：從「已跳過」移除（它原本是暫時跳過）
@@ -1601,28 +1597,34 @@ class AutoTranslatePanel(QWidget):
             return
         if url == self._cur_url:
             self._cur_url = ""
-            self.cur_title_label.setText("（等待下一話…）")
-            self.cur_detail_label.setText("")
+            self._set_cur_title("（等待下一話…）")
         self._update_status_heads()
-
-    def set_current_status(self, msg: str) -> None:
-        """把最新一行 Log 顯示在「當前正在翻譯」底下（例如 503 重試倒數）。"""
-        if not self._cur_url:
-            return
-        line = msg.strip().splitlines()[0] if msg.strip() else ""
-        if not line or line.startswith("==="):
-            return
-        if len(line) > 80:
-            line = line[:77] + "…"
-        self.cur_detail_label.setText(
-            f"{self._cur_step}\n{line}" if self._cur_step else line)
 
     def finish_status(self) -> None:
         """這一批結束：清掉「當前」。"""
         self._cur_url = ""
-        self._cur_step = ""
-        self.cur_title_label.setText("（已結束）")
-        self.cur_detail_label.setText("")
+        self._set_cur_title("（已結束）")
+
+    def _set_cur_title(self, text: str, tooltip: str = "") -> None:
+        self.cur_title_label.setText(text)
+        self.cur_title_label.setToolTip(tooltip)
+        self._fit_cur_title()
+
+    def _fit_cur_title(self) -> None:
+        """依標籤目前寬度算出折行後需要的高度，設為最小高度（避免第二行被切掉）。"""
+        lbl = self.cur_title_label
+        w = lbl.width()
+        if w <= 0:
+            return
+        rect = lbl.fontMetrics().boundingRect(
+            0, 0, w, 10000, int(Qt.TextFlag.TextWordWrap), lbl.text())
+        lbl.setMinimumHeight(rect.height())
+
+    def eventFilter(self, obj, event):  # noqa: N802 — Qt 介面名稱
+        if obj is getattr(self, "cur_title_label", None) \
+                and event.type() == QEvent.Type.Resize:
+            self._fit_cur_title()
+        return super().eventFilter(obj, event)
 
     def append_log(self, msg: str) -> None:
         self.log_view.appendPlainText(msg)

@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.55"
+APP_VERSION = "2.56"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -1955,10 +1955,9 @@ class MainWindow(QMainWindow):
                     short = short[:117] + "…"
                 if self._auto_banner_label is not None:
                     self._auto_banner_label.setText(f"⚡ {short}")
-                # 面板 Log：原文整段；最新一行另外顯示在右側「當前正在翻譯」底下
+                # 面板 Log：原文整段
                 if self._auto_window is not None:
                     self._auto_window.append_log(m)
-                    self._auto_window.set_current_status(m)
             self._invoke_on_main.emit(_apply)
 
         def _on_pause(msg: str) -> None:

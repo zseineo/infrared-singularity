@@ -930,6 +930,7 @@ def run_auto_translate(
     error_policy: dict | None = None,
     stop_event=None,
     progress: Callable[[str], None] | None = None,
+    on_event: Callable[[str, str, str, str], None] | None = None,
     print_summary: bool = True,
 ) -> AutoResult:
     """從 ``start_url`` 起連續自動翻譯。
@@ -978,6 +979,11 @@ def run_auto_translate(
         pending_url（v2.27 前會跳過該話續跑）。
     stop_event：threading.Event；設定後會在話與話之間（及分段之間）中止。
     progress：進度回呼（單一字串參數）；None 時印到 stdout。
+    on_event：結構化進度回呼 ``(kind, url, 標題, 說明)``，供 GUI 的狀態欄使用
+        （不必解析 Log 字串）。kind：``current``＝開始處理某話（新的話會送兩次：
+        讀取網頁前標題未知、讀到後帶標題）；``done``＝已存檔（說明＝檔名）；
+        ``skipped``＝這一話不翻了（標題不符／已存在同名檔／各種失敗，說明＝原因）；
+        ``deferred``＝暫時跳過、之後補翻（之後若補翻成功會再送 ``done``）。
     print_summary：是否在結束時透過 `log` 印出 `_print_summary` 總結；
         GUI 端會自行印更完整的版本，故傳 False 避免面板 log 出現兩份總結。
     """
@@ -1141,9 +1147,23 @@ def run_auto_translate(
     # (網址, source, display_title, page_title, 話序號)，補翻時不必重抓網頁。
     deferred: list = []
 
+    def _event(kind: str, url: str, title: str = "", detail: str = "") -> None:
+        """結構化進度（給 GUI 右側狀態欄）：kind ∈ current/done/skipped/deferred。
+
+        與 `progress` 的純文字 Log 分開：GUI 不必去解析 Log 字串。回呼丟例外
+        不影響翻譯流程。
+        """
+        if on_event is None:
+            return
+        try:
+            on_event(kind, url, title or result.titles.get(url, ""), detail)
+        except Exception:  # noqa: BLE001 — 顯示用回呼失敗不該中斷整批
+            pass
+
     def _record_failed(ch_url: str, retrying: bool, reason: str) -> None:
         """記一話失敗；若是補翻中的話，順便移出待補翻列表（已有結論）。"""
         result.failed.append((ch_url, reason))
+        _event("skipped", ch_url, "", reason)
         if retrying:
             deferred.pop(0)
 
@@ -1241,10 +1261,12 @@ def run_auto_translate(
                 next_url = url  # 補翻不推進「新的話」：補完照原本進度續跑
                 log("=== 補翻先前暫時跳過的話："
                     f"{format_url_with_title(ch_url, result.titles)} ===")
+                _event("current", ch_url, page_title, "補翻先前暫時跳過的話")
             else:
                 i += 1
                 ch_url, ch_index = url, i
                 log(f"=== 第 {i}/{total_label} 話：{url} ===")
+                _event("current", url, "", f"第 {i}/{total_label} 話（讀取網頁中）")
 
                 # 1) 抓取＋解析（失敗則無法得知下一話 → 中斷整批）
                 try:
@@ -1261,6 +1283,7 @@ def run_auto_translate(
                     # 的失敗不默默漏話）。訊息可能含多行診斷：Log 印完整版，失敗清單／
                     # 總結只留第一行。
                     result.failed.append((url, str(e).split(chr(10))[0]))
+                    _event("skipped", url, "", str(e).split(chr(10))[0] + "（已中斷整批）")
                     result.pending_url = url  # 這一話未完成 → 供 GUI 回填起始網址接續
                     log(f"  ❌ {e} → 中斷整批（此話未完成，可用它當起始網址接續）。")
                     if urls:
@@ -1272,6 +1295,7 @@ def run_auto_translate(
                 # 記下這一話的名稱，供總結顯示（失敗／跳過／接續的網址才分得出是哪一話）
                 if page_title:
                     result.titles[url] = page_title
+                _event("current", url, page_title, f"第 {i}/{total_label} 話")
                 # 清單模式下一話直接取清單的下一筆（list_pos 為已讀網址數，故下一筆
                 # 是 urls[list_pos]；標題過濾跳過的話不計 i，所以不能用 i 當索引）
                 if urls:
@@ -1288,6 +1312,7 @@ def run_auto_translate(
                     i -= 1
                     filtered_run += 1
                     result.filtered.append((url, page_title))
+                    _event("skipped", url, page_title, f"標題不含「{title_filter}」")
                     log(f"  ⏭️ 標題「{page_title or '（讀不到標題）'}」不含"
                         f"「{title_filter}」→ 跳過此話（不計話數），讀下一話。")
                     url = next_url
@@ -1315,6 +1340,8 @@ def run_auto_translate(
                     existing = os.path.join(effective_out_dir, f"{name_base}.html")
                     if os.path.exists(existing):
                         result.skipped.append((url, f"{name_base}.html"))
+                        _event("skipped", url, page_title,
+                               f"已存在同名檔：{name_base}.html")
                         log(f"  ⏭️ 已存在同名檔「{name_base}.html」→ 跳過此話，續下一話。")
                         url = next_url
                         continue
@@ -1403,6 +1430,7 @@ def run_auto_translate(
                     log(f"  ⚠️ 原文暫存寫入失敗（不影響存檔）：{e}")
                 result.done.append(out_path)
                 log(f"  ✅ 已存檔：{out_path}")
+                _event("done", ch_url, page_title, os.path.basename(out_path))
                 if retrying:
                     deferred.pop(0)
                 retry_ready = True  # 翻譯成功＝伺服器正常 → 下一輪先補翻待補翻列表
@@ -1495,6 +1523,8 @@ def run_auto_translate(
                 else:
                     deferred.append(
                         (ch_url, source, display_title, page_title, ch_index))
+                    _event("deferred", ch_url, page_title,
+                           str(e).split(chr(10))[0])
                     log(f"  ⏳ {e} → 暫時跳過此話，加入待補翻列表"
                         f"（共 {len(deferred)} 話），下一次翻譯成功後再補翻。")
                 url = next_url
@@ -1529,8 +1559,9 @@ def run_auto_translate(
 
     # 仍留在待補翻列表的話＝暫時跳過後始終沒補翻成功 → 列入失敗，總結才看得到
     for d_url, *_ in deferred:
-        result.failed.append(
-            (d_url, "伺服器忙碌／逾時，重試達上限而暫時跳過，之後未能補翻成功"))
+        reason = "伺服器忙碌／逾時，重試達上限而暫時跳過，之後未能補翻成功"
+        result.failed.append((d_url, reason))
+        _event("skipped", d_url, "", reason)
 
     processed = len(result.done) + len(result.failed) + len(result.skipped)
     result.remaining = 0 if until_last else max(0, total - processed)

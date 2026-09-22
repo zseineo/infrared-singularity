@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.54"
+APP_VERSION = "2.55"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -1936,6 +1936,7 @@ class MainWindow(QMainWindow):
         self._auto_banner.show()
         if self._auto_window is not None:
             self._auto_window.set_running(True)
+            self._auto_window.reset_status()
             self._auto_window.append_log(
                 f"=== 啟動自動翻譯：count={count} until_last={until_last} "
                 f"skip_existing={skip_existing} "
@@ -1954,9 +1955,10 @@ class MainWindow(QMainWindow):
                     short = short[:117] + "…"
                 if self._auto_banner_label is not None:
                     self._auto_banner_label.setText(f"⚡ {short}")
-                # 面板 Log：原文整段
+                # 面板 Log：原文整段；最新一行另外顯示在右側「當前正在翻譯」底下
                 if self._auto_window is not None:
                     self._auto_window.append_log(m)
+                    self._auto_window.set_current_status(m)
             self._invoke_on_main.emit(_apply)
 
         def _on_pause(msg: str) -> None:
@@ -1967,6 +1969,13 @@ class MainWindow(QMainWindow):
                 self._auto_banner_resume_btn.show()
                 self.show_status(f"⏸️ {m}", "#f39c12")
                 QApplication.alert(self)  # 工作列閃爍，人不在畫面前也看得到
+            self._invoke_on_main.emit(_apply)
+
+        def _on_event(kind: str, url: str, title: str, detail: str) -> None:
+            """協調器的結構化進度 → 面板右側狀態欄（當前／已完成／已跳過）。"""
+            def _apply(a=(kind, url, title, detail)) -> None:
+                if self._auto_window is not None:
+                    self._auto_window.on_translate_event(*a)
             self._invoke_on_main.emit(_apply)
 
         stop_event = self._auto_stop_event
@@ -2002,6 +2011,7 @@ class MainWindow(QMainWindow):
                     url_list=url_list,
                     stop_event=stop_event,
                     progress=_progress,
+                    on_event=_on_event,
                     print_summary=False)  # GUI 端自己印更完整的總結
             except Exception as e:  # noqa: BLE001 — 背景執行緒須吞例外回報 UI
                 self._invoke_on_main.emit(
@@ -2039,6 +2049,7 @@ class MainWindow(QMainWindow):
         self._auto_banner.hide()
         if self._auto_window is not None:
             self._auto_window.set_running(False)
+            self._auto_window.finish_status()
         if error is not None:
             if self._auto_window is not None:
                 self._auto_window.append_log(f"❌ 自動翻譯失敗：{error}")

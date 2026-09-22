@@ -3,7 +3,8 @@
 對應使用者流程：在主畫面工具列按「⚡ 自動翻譯」→ 切換到本面板（index 4）。
 面板分上下兩部分：
   上：設定欄位（起始網址、話數＋翻譯到最後一話、檔名（含作品名稱）、輸出資料夾）。
-  下：執行 Log（即時顯示 :func:`aa_auto_translate.run_auto_translate` 的進度）。
+  下：左＝執行 Log（即時顯示 :func:`aa_auto_translate.run_auto_translate` 的進度）；
+      右＝本批進度一覽（當前正在翻譯／已完成／已跳過），由協調器 ``on_event`` 驅動。
 
 「連線設定」（翻譯方式／Gem 網址／要求模型／換新對話次數／API 金鑰與 Prompt）改以
 浮層面板呈現，由主視窗導覽列「⚙ 連線設定」鈕（返回首頁鈕右側）開合，作法比照
@@ -22,7 +23,8 @@ from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QSplitter,
+    QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
+    QScrollArea, QSpinBox, QSplitter,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -453,7 +455,16 @@ class AutoTranslatePanel(QWidget):
         self.log_view.setStyleSheet(
             "QPlainTextEdit { background:#1e1e1e; color:#dcdcdc;"
             " border:1px solid #3c3c3c; }")
-        bv.addWidget(self.log_view, 1)
+        # Log 右側：本批進度一覽（當前／已完成／已跳過），由協調器的 on_event
+        # 結構化事件驅動（MainWindow._start_auto_translate → on_translate_event）。
+        # Log 是逐行流水帳，一長就看不出「翻到哪、哪幾話沒翻」，這裡一眼看完。
+        log_split = QSplitter(Qt.Orientation.Horizontal)
+        log_split.addWidget(self.log_view)
+        log_split.addWidget(self._build_status_column())
+        log_split.setStretchFactor(0, 3)
+        log_split.setStretchFactor(1, 2)
+        log_split.setSizes([640, 360])
+        bv.addWidget(log_split, 1)
         splitter.addWidget(bottom)
 
         splitter.setStretchFactor(0, 0)
@@ -1477,6 +1488,141 @@ class AutoTranslatePanel(QWidget):
         self.log_view.clear()
 
     # ── 由 MainWindow 主執行緒呼叫 ──
+
+    # ── Log 右側的進度狀態欄 ──
+
+    _STATUS_LIST_QSS = (
+        "QListWidget { background:#1e1e1e; color:#dcdcdc;"
+        " border:1px solid #3c3c3c; }")
+
+    def _build_status_column(self) -> QWidget:
+        """當前正在翻譯／已完成／已跳過 三區。"""
+        col = QWidget()
+        v = QVBoxLayout(col)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(4)
+
+        def _head(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setFont(_font(11, bold=True))
+            return lbl
+
+        v.addWidget(_head("▶ 當前正在翻譯"))
+        cur_box = QFrame()
+        cur_box.setStyleSheet(
+            "QFrame { background:#1e1e1e; border:1px solid #3c3c3c; }"
+            " QLabel { border:none; background:transparent; }")
+        cv = QVBoxLayout(cur_box)
+        cv.setContentsMargins(6, 4, 6, 4)
+        cv.setSpacing(2)
+        self.cur_title_label = QLabel("")
+        self.cur_title_label.setWordWrap(True)
+        self.cur_title_label.setStyleSheet("color:#ffffff; font-weight:bold;")
+        self.cur_title_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.cur_detail_label = QLabel("")
+        self.cur_detail_label.setWordWrap(True)
+        self.cur_detail_label.setStyleSheet("color:#9aa0a6;")
+        cv.addWidget(self.cur_title_label)
+        cv.addWidget(self.cur_detail_label)
+        v.addWidget(cur_box)
+
+        self.done_head = _head("")
+        v.addWidget(self.done_head)
+        self.done_list = QListWidget()
+        self.done_list.setStyleSheet(self._STATUS_LIST_QSS)
+        v.addWidget(self.done_list, 1)
+
+        self.skip_head = _head("")
+        v.addWidget(self.skip_head)
+        self.skip_list = QListWidget()
+        self.skip_list.setStyleSheet(self._STATUS_LIST_QSS)
+        v.addWidget(self.skip_list, 1)
+
+        self._cur_url = ""
+        self._cur_step = ""
+        self._skip_items: dict[str, QListWidgetItem] = {}   # url → 已跳過清單項
+        self.reset_status()
+        return col
+
+    def reset_status(self) -> None:
+        """新的一批開始前清空狀態欄。"""
+        self.done_list.clear()
+        self.skip_list.clear()
+        self._skip_items.clear()
+        self._cur_url = ""
+        self._cur_step = ""
+        self.cur_title_label.setText("（尚未開始）")
+        self.cur_detail_label.setText("")
+        self._update_status_heads()
+
+    def _update_status_heads(self) -> None:
+        self.done_head.setText(f"✅ 已完成（{self.done_list.count()}）")
+        self.skip_head.setText(f"⏭️ 已跳過（{self.skip_list.count()}）")
+
+    @staticmethod
+    def _status_name(url: str, title: str) -> str:
+        return title or url
+
+    def on_translate_event(self, kind: str, url: str, title: str,
+                           detail: str) -> None:
+        """協調器 on_event 的結構化進度（主執行緒呼叫）。"""
+        name = self._status_name(url, title)
+        tip = f"{url}\n{detail}" if detail else url
+        if kind == "current":
+            self._cur_url = url
+            self._cur_step = detail
+            self.cur_title_label.setText(name)
+            self.cur_title_label.setToolTip(url)
+            self.cur_detail_label.setText(detail)
+            return
+        if kind == "done":
+            # 補翻成功：從「已跳過」移除（它原本是暫時跳過）
+            old = self._skip_items.pop(url, None)
+            if old is not None:
+                self.skip_list.takeItem(self.skip_list.row(old))
+            item = QListWidgetItem(name)
+            item.setToolTip(f"{url}\n已存檔：{detail}" if detail else url)
+            self.done_list.addItem(item)
+            self.done_list.scrollToBottom()
+        elif kind in ("skipped", "deferred"):
+            text = (f"⏳ {name}（待補翻）" if kind == "deferred"
+                    else f"{name} — {detail}" if detail else name)
+            item = self._skip_items.get(url)
+            if item is None:
+                item = QListWidgetItem(text)
+                self.skip_list.addItem(item)
+                self._skip_items[url] = item
+            else:
+                item.setText(text)   # 待補翻 → 最終沒補成：更新成最後的原因
+            item.setToolTip(tip)
+            self.skip_list.scrollToBottom()
+        else:
+            return
+        if url == self._cur_url:
+            self._cur_url = ""
+            self.cur_title_label.setText("（等待下一話…）")
+            self.cur_detail_label.setText("")
+        self._update_status_heads()
+
+    def set_current_status(self, msg: str) -> None:
+        """把最新一行 Log 顯示在「當前正在翻譯」底下（例如 503 重試倒數）。"""
+        if not self._cur_url:
+            return
+        line = msg.strip().splitlines()[0] if msg.strip() else ""
+        if not line or line.startswith("==="):
+            return
+        if len(line) > 80:
+            line = line[:77] + "…"
+        self.cur_detail_label.setText(
+            f"{self._cur_step}\n{line}" if self._cur_step else line)
+
+    def finish_status(self) -> None:
+        """這一批結束：清掉「當前」。"""
+        self._cur_url = ""
+        self._cur_step = ""
+        self.cur_title_label.setText("（已結束）")
+        self.cur_detail_label.setText("")
 
     def append_log(self, msg: str) -> None:
         self.log_view.appendPlainText(msg)

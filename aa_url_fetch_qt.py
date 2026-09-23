@@ -12,6 +12,7 @@
 
 面板 → 主程式（直接呼叫）：
     main._handle_url_fetch_request(url, author_only, skip_cache)
+    main._find_url_for_text(text) # 「從檔案」：以投稿標頭指紋查讀取紀錄的網址
     main._skip_url_cache          # 「不讀暫存」勾選狀態（toggled 時即時同步回主程式，
                                   #   讓主畫面上一話／下一話、重找原文、自動翻譯一併適用）
     main.url_history / main.settings_mgr.clear_url_history()
@@ -20,15 +21,17 @@
 """
 from __future__ import annotations
 
+import os
 import re
 
 from PyQt6.QtCore import QPoint, QRect, QSize, Qt, QTimer
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QFrame, QHBoxLayout, QLabel, QLayout, QLineEdit,
-    QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLayout,
+    QLineEdit, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
+from aa_tool.html_io import read_html_pre_content
 from aa_tool.qt_helpers import make_button
 from aa_tool.text_extraction import TITLE_CHAPTER_RES, extract_work_title
 
@@ -310,6 +313,16 @@ class UrlFetchWindow(QWidget):
         self.fetch_btn.setFixedHeight(28)
         self.fetch_btn.clicked.connect(self._do_fetch)
         top.addWidget(self.fetch_btn)
+
+        self.from_file_btn = make_button("從檔案", color="#17a2b8", hover="#138496",
+                                         font=self.ui_small_font, width=70)
+        self.from_file_btn.setFixedHeight(28)
+        self.from_file_btn.setToolTip(
+            "選一個已存的檔案，以其中的投稿標頭指紋（日期＋時間＋ID）\n"
+            "在讀取紀錄裡找出對應網址，直接讀取該網址。\n"
+            "譯文檔也可以：翻譯不會改到投稿標頭。")
+        self.from_file_btn.clicked.connect(self._fetch_from_file)
+        top.addWidget(self.from_file_btn)
         layout.addLayout(top)
 
         # 作者名稱列
@@ -812,6 +825,40 @@ class UrlFetchWindow(QWidget):
     def _fetch_url(self, url: str):
         self.url_entry.setText(url)
         self._do_fetch()
+
+    def _fetch_from_file(self) -> None:
+        """「從檔案」：依所選檔案的投稿標頭指紋查讀取紀錄，找到網址就直接讀取。"""
+        if self._fetching:
+            return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "選取已儲存的檔案", self._main._last_dir,
+            "HTML / 文字檔 (*.html *.htm *.txt);;All files (*.*)")
+        if not file_path:
+            return
+        name = os.path.basename(file_path)
+        # 本工具存的是 HTML（內文在 <pre>）；沒有 <pre> 就當純文字檔整份讀
+        try:
+            try:
+                text = read_html_pre_content(file_path)
+            except UnicodeDecodeError:
+                text = None
+            if text is None:
+                with open(file_path, encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+        except OSError as e:
+            self._set_status(f"❌ 無法讀取檔案：{e}", "#dc3545")
+            return
+        if not self._main._compute_author_fingerprint(text or ""):
+            self._set_status(
+                f"⚠️ {name} 裡找不到投稿標頭（日期＋時間＋ID），無法比對網址", "#f39c12")
+            return
+        url = self._main._find_url_for_text(text)
+        if not url:
+            self._set_status(
+                f"⚠️ 讀取紀錄裡沒有與 {name} 指紋相符的網址"
+                "（可能從沒在本工具讀過，或紀錄已被清除）", "#f39c12")
+            return
+        self._fetch_url(url)
 
     def _do_fetch(self):
         if self._fetching:

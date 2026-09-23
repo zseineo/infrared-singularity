@@ -14,7 +14,8 @@
   - yaruobook.jp（author-res-dt / author-res 結構 + relatedPostsWrap）
   - yaruohiroba.com（dt/dd 結構 + related-list 關聯清單）
   - yaruobook.net / yaruobook.com（entry-content div + dt/dd + relatedPostsWrap，早期文章含 HTML 數字字元引用）
-  - yaruo-matome.com（entry-content div + nexe-prev-post ul）
+  - yaruo-matome.com（entry-content div + nexe-prev-post ul；dd 內以 <p> 分段，
+    `<p> &nbsp;</p>` 是作者排版用的空行，</p> 須當換行處理）
   - blog.livedoor.jp（textar-aa / span.aa，無關聯記事、尾端嵌入下一話連結）
   - asitayaruo.com（entry-content + dt/dd，dd 內 <p> 分段＝空一行；關聯記事取頁面上的 ym-nav／ym-nx，
     最多 10 話、不另發 HTTP；頁面上沒有時才退回分類頁 ?cat=N&paged=K）
@@ -1487,8 +1488,13 @@ def _parse_yaruo_matome(page_html: str, base_url: str, *,
 
     # WordPress が <br /> の直後に source HTML の改行を挿入するため、
     # <br />\n が後で \n\n（空行）になるのを防ぐ。
-    # <p>&nbsp;</p> のような空行 spacer はそのまま残して blank line として保持する。
     content_html = re.sub(r'<br\s*/?>[ \t]*\n', '<br />', content_html)
+    # WordPress 會把 <dd> 內容切成一堆 <p>，**排版用的空行是 `<p> &nbsp;</p>`**
+    # （瀏覽器裡每個 <p> 各佔一行，只有 &nbsp; 的那幾個就是作者刻意空的行）。
+    # `_extract_dt_dd_posts` 只把 <br> 當換行、去標籤時 </p> 邊界會整個消失，
+    # 那些空行就被併進前一行的文字裡不見了 → 先把 </p> 也當成換行。
+    # 只在本 parser 做這個轉換：`_extract_dt_dd_posts` 是多站共用的。
+    content_html = re.sub(r'</p\s*>', '<br />', content_html, flags=re.IGNORECASE)
 
     lines_out = _extract_dt_dd_posts(
         content_html, author_name=author_name, author_only=author_only)

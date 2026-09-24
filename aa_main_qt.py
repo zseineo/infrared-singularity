@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.64"
+APP_VERSION = "2.65"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -2134,9 +2134,12 @@ class MainWindow(QMainWindow):
                 lines.append("要接續，用下列網址當起始網址：")
                 lines.append(_url_name(result.pending_url, titles))
         if resume_earlier:
+            # 從較前面的話重跑時，中間已翻好的話要跳過，否則會重翻並多存一份（-2）
+            if self._auto_window is not None:
+                self._auto_window.skip_existing_cb.setChecked(True)  # 經 _persist_fields 記住
             lines.append("")
-            lines.append("↩ 本批有跳過的話，「起始網址」已帶入其中最前面的一話"
-                         "（重跑時勾「已存在同名檔則跳過」，已翻好的話不會重翻）：")
+            lines.append("↩ 本批有跳過的話，「起始網址」已帶入其中最前面的一話，"
+                         "並已勾選「已存在同名檔則跳過」（已翻好的話不會重翻）：")
             lines.append(_url_name(resume_url, titles))
         ok = (not result.failed and not result.quota_paused
               and not result.stopped and not result.model_mismatch

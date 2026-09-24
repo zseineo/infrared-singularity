@@ -219,13 +219,22 @@ class AutoTranslatePanel(QWidget):
         count_row = QWidget()
         count_hl = QHBoxLayout(count_row)
         count_hl.setContentsMargins(0, 0, 0, 0)
+        # 數字欄只放數字，單位／說明放欄位外（使用者要求：欄內夾文字不好改值）
         self.count_spin = QSpinBox()
         self.count_spin.setRange(1, 999)
-        self.count_spin.setSuffix(" 話")
         self.until_last = QCheckBox("翻譯到最後一話")
         self.until_last.toggled.connect(
             lambda chk: self.count_spin.setEnabled(not chk))
         count_hl.addWidget(self.count_spin)
+        count_hl.addWidget(QLabel("話"))
+        # 常用話數快捷鈕：設定話數並取消「翻譯到最後一話」（否則話數不會生效）
+        self._count_quick_btns: list[QPushButton] = []
+        for n in (1, 10):
+            b = QPushButton(f"{n} 話")
+            b.setToolTip(f"連續話數設為 {n} 話")
+            b.clicked.connect(lambda _=False, v=n: self._set_count_quick(v))
+            count_hl.addWidget(b)
+            self._count_quick_btns.append(b)
         count_hl.addSpacing(8)
         count_hl.addWidget(self.until_last)
         count_hl.addStretch()
@@ -401,23 +410,23 @@ class AutoTranslatePanel(QWidget):
         loop_hl.addWidget(self.loop_cb)
         self.loop_ratio_spin = QSpinBox()
         self.loop_ratio_spin.setRange(1, 100)
-        self.loop_ratio_spin.setSuffix(" %")
         self.loop_ratio_spin.setValue(100)
         self.loop_ratio_spin.setToolTip("成功話數 ÷ 本批話數（已存在同名檔而跳過的也算成功）")
         self.loop_cb.toggled.connect(self.loop_ratio_spin.setEnabled)
         loop_hl.addWidget(self.loop_ratio_spin)
+        loop_hl.addWidget(QLabel("%，連續"))
         # 某一話每次都被擋時，沒有這個上限會一直重送到按停止（放著跑會白燒額度）
+        idle_tip = ("一輪＝把跳過的話全部重翻一次。連續這麼多輪都沒有任何一話翻成功，\n"
+                    "就停止循環（剩下的話記為失敗）。設 0＝不限，一直循環到成功率達標或按停止。")
         self.loop_idle_spin = QSpinBox()
         self.loop_idle_spin.setRange(0, 99)
-        self.loop_idle_spin.setPrefix("，連續 ")
-        self.loop_idle_spin.setSuffix(" 輪無進展就停")
-        self.loop_idle_spin.setSpecialValueText("，不限輪數（達標才停）")
         self.loop_idle_spin.setValue(3)
-        self.loop_idle_spin.setToolTip(
-            "一輪＝把跳過的話全部重翻一次。連續這麼多輪都沒有任何一話翻成功，\n"
-            "就停止循環（剩下的話記為失敗）。設 0＝不限，一直循環到成功率達標或按停止。")
+        self.loop_idle_spin.setToolTip(idle_tip)
         self.loop_cb.toggled.connect(self.loop_idle_spin.setEnabled)
         loop_hl.addWidget(self.loop_idle_spin)
+        idle_lbl = QLabel("輪無進展就停（0＝不限）")
+        idle_lbl.setToolTip(idle_tip)
+        loop_hl.addWidget(idle_lbl)
         loop_hl.addStretch()
         form.addRow("", loop_row)
 
@@ -883,6 +892,11 @@ class AutoTranslatePanel(QWidget):
             (self.loop_idle_spin, "_auto_translate_loop_idle_rounds",
              self.loop_idle_spin.value),
         ]
+
+    def _set_count_quick(self, n: int) -> None:
+        """「1 話／10 話」快捷鈕（寫回主視窗走 _persist_fields 的訊號）。"""
+        self.until_last.setChecked(False)
+        self.count_spin.setValue(n)
 
     def _connect_persist(self) -> None:
         for w, _attr, _get in self._persist_specs():
@@ -1756,7 +1770,7 @@ class AutoTranslatePanel(QWidget):
                   self.btn_url_list, self.group_by_series_cb,
                   self.mask_words_cb, self.btn_mask_list,
                   self.output_kw_cb, self.btn_output_kw, self.loop_cb,
-                  *self._backend_btns.values()):
+                  *self._backend_btns.values(), *self._count_quick_btns):
             w.setEnabled(not running)
         self.loop_ratio_spin.setEnabled((not running) and self.loop_cb.isChecked())
         self.loop_idle_spin.setEnabled((not running) and self.loop_cb.isChecked())

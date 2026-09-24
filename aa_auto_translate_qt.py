@@ -32,6 +32,12 @@ from aa_tool.gemini_api import API_MODELS
 from aa_tool.openai_api import API_PROVIDERS
 from aa_tool import app_paths, secure_store
 
+def _loop_idle_rounds() -> int:
+    """循環翻譯「連續幾輪沒進展就停」——說明文字直接讀協調器的常數，不另抄一份。"""
+    import aa_auto_translate as a
+    return a._LOOP_MAX_IDLE_ROUNDS
+
+
 # 翻譯後端選項：(顯示文字, 內部值)
 _BACKEND_OPTIONS: list[tuple[str, str]] = [
     ("瀏覽器", "browser"),
@@ -164,8 +170,10 @@ class AutoTranslatePanel(QWidget):
         super().__init__()
         self._main = main_window
         self._running = False
+        self._loading = False   # _load_from_main 設值中：不要把半套值寫回主視窗
         self._build_ui()
         self._load_from_main()
+        self._connect_persist()
         # ESC：連線設定浮層開著→關浮層；否則→返回首頁。
         # 用 WidgetWithChildren context，子欄位（QLineEdit / QPlainTextEdit）
         # 有焦點時 ESC 也能觸發。
@@ -382,6 +390,30 @@ class AutoTranslatePanel(QWidget):
             bk_hl.addWidget(b)
         bk_hl.addStretch()
         form.addRow("翻譯方式：", bk_row)
+
+        # 循環翻譯：新的話都跑完後，把本批「翻譯失敗而跳過」的話重翻，直到成功比率達標
+        loop_row = QWidget()
+        loop_hl = QHBoxLayout(loop_row)
+        loop_hl.setContentsMargins(0, 0, 0, 0)
+        self.loop_cb = QCheckBox("循環翻譯：重翻跳過的話，直到成功率達")
+        self.loop_cb.setToolTip(
+            "勾選後，這批新的話都跑完時，把過程中因翻譯失敗而跳過的話\n"
+            "（疑似被審查、疑似未翻譯、回覆無法使用、檔案過小、譯文關鍵字「跳過」）\n"
+            "重新翻譯，一輪輪循環，直到「成功話數 ÷ 本批話數」達到右邊的比率。\n"
+            "・已存在同名檔而跳過的話算成功\n"
+            "・標題過濾跳過的話、沒有可翻文字（純 AA）的話、API 回應被截斷的話不會重翻\n"
+            f"・連續 {_loop_idle_rounds()} 輪都沒有任何一話翻成功就停止循環\n"
+            "・會中斷整批的狀況（額度上限、按停止、未預期錯誤…）照樣中斷")
+        loop_hl.addWidget(self.loop_cb)
+        self.loop_ratio_spin = QSpinBox()
+        self.loop_ratio_spin.setRange(1, 100)
+        self.loop_ratio_spin.setSuffix(" %")
+        self.loop_ratio_spin.setValue(100)
+        self.loop_ratio_spin.setToolTip("成功話數 ÷ 本批話數（已存在同名檔而跳過的也算成功）")
+        self.loop_cb.toggled.connect(self.loop_ratio_spin.setEnabled)
+        loop_hl.addWidget(self.loop_ratio_spin)
+        loop_hl.addStretch()
+        form.addRow("", loop_row)
 
         # 替換過濾詞：送給 AI 前把清單裡的詞換成 ○（兩種翻譯方式都適用）
         mask_row = QWidget()
@@ -825,7 +857,57 @@ class AutoTranslatePanel(QWidget):
 
     # ── 與 MainWindow 同步狀態 ──
 
+    # 主頁上「改了就記住」的欄位：(元件, 主視窗屬性, 讀值)。寫回時機見 _persist_fields。
+    def _persist_specs(self) -> list:
+        return [
+            (self.count_spin, "_auto_translate_count", self.count_spin.value),
+            (self.until_last, "_auto_translate_until_last", self.until_last.isChecked),
+            (self.skip_existing_cb, "_auto_translate_skip_existing",
+             self.skip_existing_cb.isChecked),
+            (self.append_mode_cb, "_auto_translate_append_mode",
+             self.append_mode_cb.isChecked),
+            (self.mask_words_cb, "_auto_translate_mask_words",
+             self.mask_words_cb.isChecked),
+            (self.output_kw_cb, "_auto_translate_output_kw", self.output_kw_cb.isChecked),
+            (self.group_by_series_cb, "_auto_translate_group_by_series",
+             self.group_by_series_cb.isChecked),
+            (self.loop_cb, "_auto_translate_loop", self.loop_cb.isChecked),
+            (self.loop_ratio_spin, "_auto_translate_loop_ratio",
+             self.loop_ratio_spin.value),
+        ]
+
+    def _connect_persist(self) -> None:
+        for w, _attr, _get in self._persist_specs():
+            sig = w.valueChanged if isinstance(w, QSpinBox) else w.toggled
+            sig.connect(lambda *_: self._persist_fields())
+
+    def _persist_fields(self) -> None:
+        """主頁欄位一改就寫回主視窗並排程存檔（比照輸出資料夾）。
+
+        原本只在按「開始」時寫回，切到網址讀取／首頁再回來時 `refresh_from_main`
+        會以主視窗的舊值把剛改的蓋掉。用 schedule_save（延遲合併）而非 save_cache：
+        話數欄連按上下鍵時不必每一下都寫一次設定檔。
+        """
+        if self._loading:
+            return
+        m = self._main
+        changed = False
+        for _w, attr, get in self._persist_specs():
+            val = get()
+            if getattr(m, attr, None) != val:
+                setattr(m, attr, val)
+                changed = True
+        if changed:
+            m.schedule_save()
+
     def _load_from_main(self) -> None:
+        self._loading = True
+        try:
+            self._load_from_main_inner()
+        finally:
+            self._loading = False
+
+    def _load_from_main_inner(self) -> None:
         m = self._main
         self.url_edit.setText(getattr(m, "current_url", "") or "")
         self.count_spin.setValue(int(getattr(m, "_auto_translate_count", 5) or 5))
@@ -864,6 +946,10 @@ class AutoTranslatePanel(QWidget):
         group_series = bool(getattr(m, "_auto_translate_group_by_series", False))
         self.group_by_series_cb.setChecked(group_series)
         self._set_series_row_enabled(group_series)
+        self.loop_cb.setChecked(bool(getattr(m, "_auto_translate_loop", False)))
+        self.loop_ratio_spin.setValue(int(
+            getattr(m, "_auto_translate_loop_ratio", 100) or 100))
+        self.loop_ratio_spin.setEnabled(self.loop_cb.isChecked() and not self._running)
         # 「自動填入作品名稱」設定決定檔名欄是可編輯的作品名稱還是唯讀檔名
         self._apply_title_mode(bool(getattr(m, "_fetch_auto_fill_title", False)))
         # 作品名稱：與首頁同步——優先用首頁 doc_title，沒有就空
@@ -1000,6 +1086,8 @@ class AutoTranslatePanel(QWidget):
             "append_mode": self.append_mode_cb.isChecked(),
             "mask_words": self.mask_words_cb.isChecked(),
             "output_kw": self.output_kw_cb.isChecked(),
+            "loop": self.loop_cb.isChecked(),
+            "loop_ratio": self.loop_ratio_spin.value(),
             "url_list": url_list,
         }
 
@@ -1655,9 +1743,10 @@ class AutoTranslatePanel(QWidget):
                   self.doc_title_edit, self.out_edit, self.skip_existing_cb,
                   self.btn_url_list, self.group_by_series_cb,
                   self.mask_words_cb, self.btn_mask_list,
-                  self.output_kw_cb, self.btn_output_kw,
+                  self.output_kw_cb, self.btn_output_kw, self.loop_cb,
                   *self._backend_btns.values()):
             w.setEnabled(not running)
+        self.loop_ratio_spin.setEnabled((not running) and self.loop_cb.isChecked())
         # 作品資料夾欄位：執行中一律鎖；結束後回到「依勾選狀態」
         self._set_series_row_enabled(
             (not running) and self.group_by_series_cb.isChecked())

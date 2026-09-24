@@ -213,6 +213,10 @@ class AppCache:
     # 文字，非正則）。預設關閉。
     auto_translate_output_kw: bool = False
     auto_translate_output_kw_rules: list = field(default_factory=list)
+    # auto_translate_loop：循環翻譯——新的話都跑完後，重翻本批因翻譯失敗而跳過的話，
+    # 直到「成功話數 ÷ 本批話數」≥ auto_translate_loop_ratio（%）。預設關閉。
+    auto_translate_loop: bool = False
+    auto_translate_loop_ratio: int = 100
     # auto_translate_error_policy：連線設定「進階設定」——各種錯誤要中斷或重試，
     # {項目: "stop"|"retry"}（項目見 gemini_web.ERROR_POLICY_DEFAULTS）。面板只存
     # 與預設不同的項目；缺的項目用預設（＝v2.40 以前的固定行為）。
@@ -504,6 +508,13 @@ class SettingsManager:
                      'action': str(r.get('action', 'pause'))}
                     for r in raw_kw
                     if isinstance(r, dict) and str(r.get('word', '')).strip()]
+            cache.auto_translate_loop = bool(data.get(
+                'auto_translate_loop', cache.auto_translate_loop))
+            try:
+                cache.auto_translate_loop_ratio = min(100, max(1, int(data.get(
+                    'auto_translate_loop_ratio', cache.auto_translate_loop_ratio))))
+            except (TypeError, ValueError):
+                pass
             raw_policy = data.get('auto_translate_error_policy', {})
             if isinstance(raw_policy, dict):
                 cache.auto_translate_error_policy = {
@@ -642,6 +653,8 @@ class SettingsManager:
                     cache.auto_translate_output_kw_rules,
                 'auto_translate_error_policy':
                     cache.auto_translate_error_policy,
+                'auto_translate_loop': cache.auto_translate_loop,
+                'auto_translate_loop_ratio': cache.auto_translate_loop_ratio,
                 'auto_translate_group_by_series':
                     cache.auto_translate_group_by_series,
                 'gemini_required_model': cache.gemini_required_model,

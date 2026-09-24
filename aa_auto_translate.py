@@ -892,6 +892,10 @@ _UNTIL_LAST_CAP = 9999
 # 一路抓到最後，關聯連結成環時也不會無限迴圈）。
 _TITLE_FILTER_MAX_CONSECUTIVE = 50
 
+# 循環翻譯：連續這麼多輪都沒有任何一話翻成功就停止循環。某一話每次都被審查時，
+# 沒有這個上限會一直重送到使用者按停止（無人看管時白白燒額度）。
+_LOOP_MAX_IDLE_ROUNDS = 3
+
 
 def title_matches(page_title: str, title_filter: str) -> bool:
     """標題過濾：頁面標題含過濾文字（不分大小寫）才算符合；過濾文字空白＝不過濾。"""
@@ -925,6 +929,7 @@ def run_auto_translate(
     mask_word_list: str | None = None,
     output_keywords_enabled: bool | None = None,
     output_keyword_rules: list | None = None,
+    loop_ratio: int | None = None,
     on_pause: Callable[[str], None] | None = None,
     resume_event=None,
     error_policy: dict | None = None,
@@ -965,6 +970,12 @@ def run_auto_translate(
         「暫停」＝照常存檔後呼叫 `on_pause(說明)`，再等 `resume_event` 被設定才繼續
         （等待中按停止＝手動停止）。規則格式 [{"word": 詞, "action": pause|stop|skip}]。
         None 時讀 cache 的 auto_translate_output_kw／auto_translate_output_kw_rules。
+    loop_ratio：循環翻譯的目標成功比率（%，1～100；0＝關閉）。新的話都跑完時，把本批
+        「翻譯失敗而跳過」的話（疑似審查／未翻譯／回覆無法使用／檔案過小／譯文關鍵字
+        跳過）排回待補翻列表重翻，一輪輪循環到「(成功＋已存在同名檔) ÷ 本批話數」
+        達標、沒有可重翻的話，或連續 `_LOOP_MAX_IDLE_ROUNDS` 輪沒有任何進展為止。
+        標題過濾跳過、提取為空（純 AA）、API 回應被截斷的話不重翻；會中斷整批的
+        狀況照樣中斷。None 時讀 cache 的 auto_translate_loop／auto_translate_loop_ratio。
     on_pause／resume_event：「暫停」用的 UI 回呼與 threading.Event；未提供時（CLI）
         暫停一律視為停止。
     error_policy：進階設定——各種錯誤要「中斷」或「重試」（{項目: "stop"|"retry"}，
@@ -1022,6 +1033,12 @@ def run_auto_translate(
     if output_keywords_enabled:
         log(f"🔎 譯文關鍵字檢查：開啟（{len(kw_rules)} 個關鍵字）"
             + ("" if kw_rules else "；沒有設定任何關鍵字，本次不會檢查"))
+    if loop_ratio is None:
+        loop_ratio = (int(getattr(cache, "auto_translate_loop_ratio", 100) or 100)
+                      if getattr(cache, "auto_translate_loop", False) else 0)
+    loop_ratio = min(100, max(0, int(loop_ratio or 0)))
+    if loop_ratio:
+        log(f"🔁 循環翻譯：開啟（新的話跑完後重翻跳過的話，直到成功率達 {loop_ratio}%）")
     title_filter = (title_filter or "").strip()
     if title_filter:
         log(f"🔤 標題過濾：只翻標題含「{title_filter}」的話（不符的跳過，不計話數）")
@@ -1167,6 +1184,46 @@ def run_auto_translate(
         if retrying:
             deferred.pop(0)
 
+    # 循環翻譯：本批「翻譯失敗而跳過」、之後可以重翻的話（元素同 deferred）
+    loop_pool: list = []
+    loop_round = 0
+    loop_idle = 0            # 連續幾輪沒有任何一話翻成功
+    loop_done_mark = 0       # 上一輪開始時的成功話數
+
+    def _loop_add(item: tuple) -> None:
+        if loop_ratio and all(x[0] != item[0] for x in loop_pool):
+            loop_pool.append(item)
+
+    def _start_loop_round(n_new: int) -> bool:
+        """新的話都跑完時呼叫：成功率未達標就把循環池排回待補翻列表，回 True＝繼續跑。"""
+        nonlocal loop_round, loop_idle, loop_done_mark
+        if not loop_ratio or not loop_pool or n_new <= 0:
+            return False
+        ok = len(result.done) + len(result.skipped)
+        pct = ok * 100 / n_new
+        if pct >= loop_ratio:
+            log(f"🔁 循環翻譯：成功率 {pct:.0f}%（{ok}/{n_new}）已達 {loop_ratio}%，"
+                f"不再重翻剩下的 {len(loop_pool)} 話。")
+            return False
+        if loop_round:
+            loop_idle = 0 if len(result.done) > loop_done_mark else loop_idle + 1
+            if loop_idle >= _LOOP_MAX_IDLE_ROUNDS:
+                log(f"🔁 循環翻譯：連續 {loop_idle} 輪都沒有翻成功任何一話，停止循環"
+                    f"（成功率 {pct:.0f}%，未達 {loop_ratio}%）。")
+                return False
+        loop_round += 1
+        loop_done_mark = len(result.done)
+        again = {x[0] for x in loop_pool}
+        # 這些話要重翻：先從失敗清單拿掉（重翻又失敗會再記一次最新原因）
+        result.failed[:] = [f for f in result.failed if f[0] not in again]
+        deferred.extend(loop_pool)
+        for item in loop_pool:
+            _event("deferred", item[0], item[3], f"循環翻譯第 {loop_round} 輪")
+        log(f"🔁 循環翻譯第 {loop_round} 輪：成功率 {pct:.0f}%（{ok}/{n_new}）"
+            f"未達 {loop_ratio}%，重翻跳過的 {len(loop_pool)} 話…")
+        loop_pool.clear()
+        return True
+
     def _wait_for_resume(message: str) -> bool:
         """譯文關鍵字「暫停」：通知 UI 後原地等使用者按繼續。回 False＝按了停止。"""
         if on_pause is None or resume_event is None:
@@ -1245,6 +1302,8 @@ def run_auto_translate(
                 drain_logged = True
                 log(f"🔁 新的話已跑完，繼續補翻待補翻列表剩下的 {len(deferred)} 話，"
                     "直到全部完成（要中止請按停止）…")
+            if not retrying and no_more_new and _start_loop_round(i):
+                continue
             if not retrying and no_more_new:
                 if i >= total:
                     # 跑滿設定話數而結束 → url 為下一話續接網址，供 GUI 把它帶回
@@ -1465,12 +1524,14 @@ def run_auto_translate(
                 break
             except CensoredResponse as e:
                 _record_failed(ch_url, retrying, f"可能被審查：{e}")
+                _loop_add((ch_url, source, display_title, page_title, ch_index))
                 log(f"  🚫 {e} → 跳過此話，繼續下一話。")
                 url = next_url
             except GeminiContentBlocked as e:
                 # API 端安全過濾擋下（如 blockReason: PROHIBITED_CONTENT）＝被審查，
                 # 重送幾乎一定再被擋 → 比照 CensoredResponse 跳過該話、續下一話。
                 _record_failed(ch_url, retrying, f"可能被審查：{e}")
+                _loop_add((ch_url, source, display_title, page_title, ch_index))
                 log(f"  🚫 {e} → 跳過此話，繼續下一話。")
                 url = next_url
             except GeminiResponseTruncated as e:
@@ -1481,6 +1542,7 @@ def run_auto_translate(
                 url = next_url
             except UntranslatedResponse as e:
                 _record_failed(ch_url, retrying, f"疑似未翻譯：{e}")
+                _loop_add((ch_url, source, display_title, page_title, ch_index))
                 log(f"  ⚠️ {e} → 跳過此話（不存檔），繼續下一話。")
                 url = next_url
             except MalformedResponse as e:
@@ -1488,15 +1550,18 @@ def run_auto_translate(
                 # 「稍後重試」時不會走到這裡（改丟 GeminiBusyRetriesExhausted
                 # 排進待補翻列表）。
                 _record_failed(ch_url, retrying, f"回覆無法使用：{e}")
+                _loop_add((ch_url, source, display_title, page_title, ch_index))
                 log(f"  ⚠️ {e} → 跳過此話（不存檔），繼續下一話。")
                 url = next_url
             except OutputTooSmall as e:
                 _record_failed(ch_url, retrying, f"檔案過小：{e}")
+                _loop_add((ch_url, source, display_title, page_title, ch_index))
                 log(f"  🗑️ {e} → 跳過此話，繼續下一話。")
                 url = next_url
             except OutputKeywordHit as e:
                 if e.action == "skip":
                     _record_failed(ch_url, retrying, f"{e}（跳過，不存檔）")
+                    _loop_add((ch_url, source, display_title, page_title, ch_index))
                     log(f"  ⏭️ {e} → 跳過此話（不存檔），繼續下一話。")
                     url = next_url
                 else:  # stop

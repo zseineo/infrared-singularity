@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.63"
+APP_VERSION = "2.64"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -2065,9 +2065,11 @@ class MainWindow(QMainWindow):
             self.show_status(f"❌ 自動翻譯失敗：{error}", "#dc3545")
             QMessageBox.critical(self, "自動翻譯失敗", error)
             return
-        # 把接續網址回填到「起始網址」，方便直接接續：
-        #   pending_url＝停止／暫停／中止時未完成的話；next_url＝跑滿話數後的下一話。
-        fill_url = (getattr(result, "pending_url", "")
+        # 把接續網址回填到「起始網址」，方便直接接續：resume_url＝本批第一個沒翻到
+        # 的話（跳過的也算）；都翻到了＝pending_url（停止／暫停／中止時未完成的話）
+        # 或 next_url（跑滿話數後的下一話）。
+        fill_url = (getattr(result, "resume_url", "")
+                    or getattr(result, "pending_url", "")
                     or getattr(result, "next_url", ""))
         if self._auto_window is not None and fill_url:
             self._auto_window.set_start_url(fill_url)
@@ -2100,9 +2102,14 @@ class MainWindow(QMainWindow):
         if result.reached_end:
             lines.append("")
             lines.append("🏁 已翻到最後一話。")
+        resume_url = getattr(result, "resume_url", "")
+        # 起始網址改帶「本批第一個沒翻到的話」（比未完成／下一話更早）
+        resume_earlier = bool(resume_url) and resume_url not in (
+            result.pending_url, getattr(result, "next_url", ""))
         if getattr(result, "next_url", ""):
             lines.append("")
-            lines.append("▶ 已達設定話數；下一話網址已帶入「起始網址」，可直接按開始接續：")
+            lines.append("▶ 已達設定話數；下一話：" if resume_earlier else
+                         "▶ 已達設定話數；下一話網址已帶入「起始網址」，可直接按開始接續：")
             lines.append(_url_name(result.next_url, titles))
         if result.quota_paused:
             lines.append("")
@@ -2126,6 +2133,11 @@ class MainWindow(QMainWindow):
             if result.pending_url:
                 lines.append("要接續，用下列網址當起始網址：")
                 lines.append(_url_name(result.pending_url, titles))
+        if resume_earlier:
+            lines.append("")
+            lines.append("↩ 本批有跳過的話，「起始網址」已帶入其中最前面的一話"
+                         "（重跑時勾「已存在同名檔則跳過」，已翻好的話不會重翻）：")
+            lines.append(_url_name(resume_url, titles))
         ok = (not result.failed and not result.quota_paused
               and not result.stopped and not result.model_mismatch
               and not title_filter_stop)

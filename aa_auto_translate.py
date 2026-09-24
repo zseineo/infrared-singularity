@@ -233,6 +233,9 @@ class AutoResult:
     model_mismatch: bool = False                    # 是否因模型與要求不符而中止
     keyword_stop: str = ""                          # 譯文出現「停止」關鍵字而中止時的說明
     titles: dict = field(default_factory=dict)      # {網址: 該網址讀取到的名稱（頁面標題）}
+    # 下一批該從哪一話開始：本批依順序第一個「沒翻到」的話（跳過的也算，純 AA
+    # 那種沒有可翻文字的除外）；都翻到了就是 pending_url／next_url。GUI 用它回填起始網址。
+    resume_url: str = ""
 
 
 # ── URL 快取（沿用 aa_main_qt 的 %TEMP%/aa_url_cache/<md5>.html 格式）──
@@ -1254,6 +1257,9 @@ def run_auto_translate(
         log("  ▶ 已按繼續，接著翻譯下一話。")
         return True
 
+    order: dict[str, int] = {}     # {網址: 本批第幾個讀到的}（算 resume_url 用）
+    no_text: set[str] = set()      # 提取為空（純 AA）的話：沒東西可翻，不算缺漏
+
     stuck_retry = policy["web_stuck"] == "retry"
     censor_retry = policy["web_censored"] == "retry"
     # {網址: 因「回覆無法使用」而排進待補翻列表的次數}，上限 _MALFORMED_MAX_RETRIES
@@ -1366,6 +1372,7 @@ def run_auto_translate(
                         log("  （網址清單模式：清單中這一話之後的網址都還沒處理；"
                             "要接續請把清單改成從這一話開始。）")
                     break
+                order.setdefault(url, len(order))
                 # 讀過的網址寫入讀取紀錄（與手動流程一致）
                 _record_url_history(sm, url, page_title, nav_links, source, log)
                 # 記下這一話的名稱，供總結顯示（失敗／跳過／接續的網址才分得出是哪一話）
@@ -1527,6 +1534,7 @@ def run_auto_translate(
                 # 只會是 `_extract` 的「提取結果為空」＝這一話沒有可翻譯的文字
                 # （純 AA／圖片話）。不是工具故障，記錄後跳過續跑，不中斷整批。
                 _record_failed(ch_url, retrying, str(e).split(chr(10))[0])
+                no_text.add(ch_url)
                 log(f"  ⏭️ {e} → 跳過此話，繼續下一話。")
                 url = next_url
             except GeminiModelMismatch as e:
@@ -1644,6 +1652,15 @@ def run_auto_translate(
         reason = "伺服器忙碌／逾時，重試達上限而暫時跳過，之後未能補翻成功"
         result.failed.append((d_url, reason))
         _event("skipped", d_url, "", reason)
+
+    # 下一批從哪開始：本批第一個沒翻到的話（跳過的也算）——使用者不必自己回頭
+    # 找哪一話被跳過。都翻到了才是原本的接續點（未完成的那話／下一話）。
+    gaps = [u for u, _r in result.failed if u in order and u not in no_text]
+    result.resume_url = (min(gaps, key=order.__getitem__) if gaps
+                         else result.pending_url or result.next_url)
+    if gaps and result.resume_url not in (result.pending_url, result.next_url):
+        log("↩ 下一批從本批第一個沒翻到的話開始："
+            + format_url_with_title(result.resume_url, result.titles))
 
     processed = len(result.done) + len(result.failed) + len(result.skipped)
     result.remaining = 0 if until_last else max(0, total - processed)

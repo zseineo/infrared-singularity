@@ -250,6 +250,8 @@ _GEN_NOT_STARTED_TIMEOUT = 60
 # domcontentloaded 之後才把 Gem 網址改導到 /app（沒套用 Gem 的一般對話）。
 _GEM_URL_SETTLE = 5.0
 _GEM_OPEN_RETRIES = 3
+# 剛啟動瀏覽器的第一次開 Gem 額外多等這麼久（冷啟動載入最慢，導向也最晚到）
+_GEM_FIRST_OPEN_EXTRA = 10.0
 # 生成判定完成後，再多等這秒數才讀取回覆文字。
 # 目的：避免串流尾端／DOM 尚未完全 render 時就讀走半截或舊內容
 # （等同「按下複製鍵到實際取得內容之間的緩衝」）。
@@ -421,7 +423,7 @@ class GeminiWebSession:
             pass
         pages = self._context.pages
         self._page = pages[0] if pages else self._context.new_page()
-        self._open_new_chat()
+        self._open_new_chat(extra_settle=_GEM_FIRST_OPEN_EXTRA)
         self._ensure_logged_in(login_timeout)
         self._ensure_model()
 
@@ -578,8 +580,10 @@ class GeminiWebSession:
         self._ensure_logged_in(60)
         self._ensure_model()
 
-    def _open_new_chat(self) -> None:
+    def _open_new_chat(self, extra_settle: float = 0.0) -> None:
         """重新導向 Gem URL 開啟全新對話，重置送出計數（不讀模型，呼叫端自行決定何時 log）。
+
+        ``extra_settle``：網址穩定判定額外多等的秒數（剛啟動瀏覽器時用）。
 
         網路慢時（使用者回報：中國連線）Gemini 會在頁面載入後才把 Gem 網址改導到
         ``/app``：沒套用 Gem，而且已填入的文字會被洗掉、訊息沒送出。故開完要確認
@@ -589,7 +593,8 @@ class GeminiWebSession:
         for attempt in range(1, _GEM_OPEN_RETRIES + 1):
             self._page.goto(self.gem_url, wait_until="domcontentloaded")
             # 不是 Gem 網址（沒有 /gem/<id>）就無從檢查；登入頁交給 _ensure_logged_in
-            if not want or self._on_login_page() or self._stays_on_gem(want):
+            if (not want or self._on_login_page()
+                    or self._stays_on_gem(want, _GEM_URL_SETTLE + extra_settle)):
                 break
             self._log(f"⚠️ 開啟 Gem 後被導到「{self._page.url}」（不是 Gem 對話，"
                       f"多半是網路慢），重新開啟（{attempt}/{_GEM_OPEN_RETRIES}）…")
@@ -603,15 +608,15 @@ class GeminiWebSession:
         url = (self._page.url or "").lower()
         return "accounts.google.com" in url or "signin" in url
 
-    def _stays_on_gem(self, want: str) -> bool:
-        """等輸入框出現（最多 30 秒），之後網址連續 ``_GEM_URL_SETTLE`` 秒都還在
+    def _stays_on_gem(self, want: str, settle: float = _GEM_URL_SETTLE) -> bool:
+        """等輸入框出現（最多 30 秒），之後網址連續 ``settle`` 秒都還在
         這個 Gem 上才回 True；期間任何時刻被導離就回 False。"""
         deadline = time.time() + 30
         while time.time() < deadline and self._find("input") is None:
             if _gem_id(self._page.url) != want:
                 return False
             self._sleep_with_stop(0.5)
-        settle_end = time.time() + _GEM_URL_SETTLE
+        settle_end = time.time() + settle
         while True:
             if _gem_id(self._page.url) != want:
                 return False

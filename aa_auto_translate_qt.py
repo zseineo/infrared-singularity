@@ -377,7 +377,7 @@ class AutoTranslatePanel(QWidget):
             b.setMinimumWidth(84)
             b.setFont(_font(11, bold=True))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.clicked.connect(lambda _=False, v=value: self._set_backend(v))
+            b.clicked.connect(lambda _=False, v=value: self._on_backend_clicked(v))
             self._backend_btns[value] = b
             bk_hl.addWidget(b)
         bk_hl.addStretch()
@@ -757,6 +757,19 @@ class AutoTranslatePanel(QWidget):
             b.setStyleSheet(_BACKEND_BTN_SEL if v == self._backend
                             else _BACKEND_BTN_UNSEL)
         self._on_backend_changed()
+
+    def _on_backend_clicked(self, value: str) -> None:
+        """使用者按翻譯方式鈕：切換並即時寫回主視窗存檔（比照輸出資料夾）。
+
+        不能等按「開始」或儲存連線設定才寫回——切到網址讀取／首頁再回來時，
+        `refresh_from_main` 會以主視窗的舊值重設，切換就被蓋掉。
+        """
+        self._set_backend(value)
+        m = self._main
+        if getattr(m, "_translate_backend", "browser") == self._backend:
+            return
+        m._translate_backend = self._backend
+        m.save_cache()
 
     def _on_backend_changed(self) -> None:
         """連線設定的 API 欄位不受翻譯方式影響——兩種方式下皆可先行編輯供應商／模型／

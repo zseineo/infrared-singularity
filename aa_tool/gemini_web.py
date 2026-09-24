@@ -243,7 +243,13 @@ DEFAULT_MAX_PER_SESSION = 3
 _POLL_INTERVAL = 1.0
 _STABLE_CHECKS = 3
 _GEN_TIMEOUT = 600          # 單次生成最長等待秒數
-_GEN_START_TIMEOUT = 25     # 送出後等待「開始生成」的最長秒數
+# 送出後過了這麼久仍沒開始生成（出現停止鈕或新回覆） → 視為「根本沒送出去」（頁面在填字後被導走、
+# 文字被洗掉等），直接回空讓 translate() 開新對話重送，而不是空等 _GEN_TIMEOUT。
+_GEN_NOT_STARTED_TIMEOUT = 60
+# 開 Gem 後頁面網址須穩定停在 Gem 上這麼久才算開好；網路慢時 Gemini 會在
+# domcontentloaded 之後才把 Gem 網址改導到 /app（沒套用 Gem 的一般對話）。
+_GEM_URL_SETTLE = 2.0
+_GEM_OPEN_RETRIES = 3
 # 生成判定完成後，再多等這秒數才讀取回覆文字。
 # 目的：避免串流尾端／DOM 尚未完全 render 時就讀走半截或舊內容
 # （等同「按下複製鍵到實際取得內容之間的緩衝」）。
@@ -289,6 +295,19 @@ def looks_quota_note(text: str) -> bool:
     if any(p.lower() in low for p in _QUOTA_RESET_PHRASES):
         return True
     return bool(_QUOTA_RESET_RE.search(text))
+
+
+_GEM_ID_RE = re.compile(r'/gem/([^/?#]+)')
+
+
+def _gem_id(url: str) -> str:
+    """網址中的 Gem 代號（``/gem/<id>`` 的 id）；不是 Gem 網址回空字串。
+
+    只比對代號、不比整條路徑：同一個 Gem 可能帶 ``/u/1/`` 帳號前綴，
+    送出後網址還會多一段對話 id。
+    """
+    m = _GEM_ID_RE.search(url or "")
+    return m.group(1) if m else ""
 
 # 啟動瀏覽器的候選，依序嘗試第一個能啟動的：
 #   None    → Playwright 自帶的 Chromium（原本唯一的行為，已可用者不受影響）
@@ -414,22 +433,28 @@ class GeminiWebSession:
         """
         failures: list[str] = []
         for channel in _BROWSER_CHANNELS:
-            kwargs = {
-                "headless": self.headless,
-                "args": ["--disable-blink-features=AutomationControlled"],
-            }
-            if channel:
-                kwargs["channel"] = channel
-            try:
-                context = self._pw.chromium.launch_persistent_context(
-                    self.profile_dir, **kwargs)
-            except Exception as e:
-                first_line = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
-                failures.append(f"{_CHANNEL_LABELS[channel]}：{first_line}")
-                continue
-            if channel:
-                self._log(f"未找到內建 Chromium，改用{_CHANNEL_LABELS[channel]}啟動")
-            return context
+            # Playwright 預設帶 --no-sandbox；內建 Chromium 會隱藏警示列，系統 Chrome／Edge
+            # 則頂端常駐「不受支援的命令列標記：--no-sandbox」。系統瀏覽器先開沙箱啟動，
+            # 失敗才退回原本的無沙箱（內建 Chromium 維持原行為）。
+            for sandbox in ((True, False) if channel else (False,)):
+                kwargs = {
+                    "headless": self.headless,
+                    "args": ["--disable-blink-features=AutomationControlled"],
+                    "chromium_sandbox": sandbox,
+                }
+                if channel:
+                    kwargs["channel"] = channel
+                try:
+                    context = self._pw.chromium.launch_persistent_context(
+                        self.profile_dir, **kwargs)
+                except Exception as e:
+                    first_line = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+                    failures.append(f"{_CHANNEL_LABELS[channel]}"
+                                    f"{'（沙箱）' if sandbox else ''}：{first_line}")
+                    continue
+                if channel:
+                    self._log(f"未找到內建 Chromium，改用{_CHANNEL_LABELS[channel]}啟動")
+                return context
         raise GeminiWebError(
             "無法啟動瀏覽器：找不到 Playwright 內建 Chromium，系統也沒有可用的 "
             "Google Chrome 或 Microsoft Edge。\n"
@@ -481,15 +506,14 @@ class GeminiWebSession:
 
         reply = self._send_and_collect(prompt_text)
         if not reply.strip():
-            self._log(
-                f"⏳ Gemini 卡住超過 {_GEN_TIMEOUT}s 無回應，開新對話重試一次…")
+            self._log("⏳ Gemini 沒有回應（訊息沒送出，或卡住逾時），開新對話重試一次…")
             self._open_new_chat()
             self._ensure_logged_in(60)
             self._ensure_model()
             reply = self._send_and_collect(prompt_text)
             if not reply.strip():
                 raise GeminiStuck(
-                    f"Gemini 卡住超過 {_GEN_TIMEOUT}s 且重開新對話後仍無回應")
+                    "Gemini 沒有回應（訊息沒送出，或卡住逾時），重開新對話後仍然如此")
         self._check_quota(reply)
         # 額度用完時 Gemini 會在對話中途自動降級（例如 Flash → Flash-Lite），而模型
         # 只在開新對話時確認 → 每次回覆後再讀一次。降級後的這次回覆不採用：開新對話
@@ -533,7 +557,9 @@ class GeminiWebSession:
         editor.fill(text)
         prev_count = self._response_count()
         self._click_send()
-        self._wait_generation_done(prev_count)
+        if not self._wait_generation_done(prev_count):
+            # 沒送出去：頁面上最後一則回覆是「上一段」的，不能當成這次的回覆
+            return ""
         # 生成判定完成後再沉澱數秒，確保讀到的是完整最終回覆
         if _POST_GEN_SETTLE > 0:
             time.sleep(_POST_GEN_SETTLE)
@@ -553,10 +579,45 @@ class GeminiWebSession:
         self._ensure_model()
 
     def _open_new_chat(self) -> None:
-        """重新導向 Gem URL 開啟全新對話，重置送出計數（不讀模型，呼叫端自行決定何時 log）。"""
-        self._page.goto(self.gem_url, wait_until="domcontentloaded")
+        """重新導向 Gem URL 開啟全新對話，重置送出計數（不讀模型，呼叫端自行決定何時 log）。
+
+        網路慢時（使用者回報：中國連線）Gemini 會在頁面載入後才把 Gem 網址改導到
+        ``/app``：沒套用 Gem，而且已填入的文字會被洗掉、訊息沒送出。故開完要確認
+        網址穩定停在 Gem 上，被導走就重開（最多 ``_GEM_OPEN_RETRIES`` 次）。
+        """
+        want = _gem_id(self.gem_url)
+        for attempt in range(1, _GEM_OPEN_RETRIES + 1):
+            self._page.goto(self.gem_url, wait_until="domcontentloaded")
+            # 不是 Gem 網址（沒有 /gem/<id>）就無從檢查；登入頁交給 _ensure_logged_in
+            if not want or self._on_login_page() or self._stays_on_gem(want):
+                break
+            self._log(f"⚠️ 開啟 Gem 後被導到「{self._page.url}」（不是 Gem 對話，"
+                      f"多半是網路慢），重新開啟（{attempt}/{_GEM_OPEN_RETRIES}）…")
+        else:
+            self._log("⚠️ 多次開啟仍被導離 Gem，請確認 Gem 網址能在瀏覽器正常開啟；"
+                      "先照目前頁面繼續")
         self._send_count = 0
         self._session_index += 1
+
+    def _on_login_page(self) -> bool:
+        url = (self._page.url or "").lower()
+        return "accounts.google.com" in url or "signin" in url
+
+    def _stays_on_gem(self, want: str) -> bool:
+        """等輸入框出現（最多 30 秒），之後網址連續 ``_GEM_URL_SETTLE`` 秒都還在
+        這個 Gem 上才回 True；期間任何時刻被導離就回 False。"""
+        deadline = time.time() + 30
+        while time.time() < deadline and self._find("input") is None:
+            if _gem_id(self._page.url) != want:
+                return False
+            self._sleep_with_stop(0.5)
+        settle_end = time.time() + _GEM_URL_SETTLE
+        while True:
+            if _gem_id(self._page.url) != want:
+                return False
+            if time.time() >= settle_end:
+                return True
+            self._sleep_with_stop(0.3)
 
     def _ensure_model(self) -> None:
         """確認目前模型符合 ``required_model``；不符時嘗試自動從選單切換。
@@ -873,14 +934,24 @@ class GeminiWebSession:
 
     # ── 內部：等待生成完成 ──
 
-    def _wait_generation_done(self, prev_count: int) -> None:
-        """等待生成開始 → 結束 → 回覆文字穩定。"""
+    def _wait_generation_done(self, prev_count: int) -> bool:
+        """等待生成開始 → 結束 → 回覆文字穩定。
+
+        回傳 False ＝ ``_GEN_NOT_STARTED_TIMEOUT`` 秒內根本沒開始生成（訊息多半沒送出去，
+        例如填字後頁面被導走、文字被洗掉）；呼叫端應開新對話重送，不要空等 ``_GEN_TIMEOUT``。
+        """
         # 1) 等待開始：出現停止鈕，或回覆數量增加
-        start_deadline = time.time() + _GEN_START_TIMEOUT
+        start_deadline = time.time() + _GEN_NOT_STARTED_TIMEOUT
+        started = False
         while time.time() < start_deadline:
             if self._find("stop") is not None or self._response_count() > prev_count:
+                started = True
                 break
             time.sleep(0.3)
+        if not started:
+            self._log(f"⚠️ 送出後 {_GEN_NOT_STARTED_TIMEOUT}s 仍未開始生成"
+                      f"（目前頁面：{self._page.url}），訊息可能沒送出去")
+            return False
 
         # 2) 等待結束：停止鈕消失 + 回覆文字連續數次不變
         gen_deadline = time.time() + _GEN_TIMEOUT
@@ -892,12 +963,13 @@ class GeminiWebSession:
             if not generating and text and text == last_text:
                 stable += 1
                 if stable >= _STABLE_CHECKS:
-                    return
+                    return True
             else:
                 stable = 0
             last_text = text
             time.sleep(_POLL_INTERVAL)
         self._log("⚠️ 等待生成逾時，改用目前已取得的回覆")
+        return True
 
     # ── 內部：額度偵測 ──
 

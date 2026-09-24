@@ -248,7 +248,7 @@ _GEN_TIMEOUT = 600          # 單次生成最長等待秒數
 _GEN_NOT_STARTED_TIMEOUT = 60
 # 開 Gem 後頁面網址須穩定停在 Gem 上這麼久才算開好；網路慢時 Gemini 會在
 # domcontentloaded 之後才把 Gem 網址改導到 /app（沒套用 Gem 的一般對話）。
-_GEM_URL_SETTLE = 2.0
+_GEM_URL_SETTLE = 5.0
 _GEM_OPEN_RETRIES = 3
 # 生成判定完成後，再多等這秒數才讀取回覆文字。
 # 目的：避免串流尾端／DOM 尚未完全 render 時就讀走半截或舊內容

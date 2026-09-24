@@ -32,12 +32,6 @@ from aa_tool.gemini_api import API_MODELS
 from aa_tool.openai_api import API_PROVIDERS
 from aa_tool import app_paths, secure_store
 
-def _loop_idle_rounds() -> int:
-    """循環翻譯「連續幾輪沒進展就停」——說明文字直接讀協調器的常數，不另抄一份。"""
-    import aa_auto_translate as a
-    return a._LOOP_MAX_IDLE_ROUNDS
-
-
 # 翻譯後端選項：(顯示文字, 內部值)
 _BACKEND_OPTIONS: list[tuple[str, str]] = [
     ("瀏覽器", "browser"),
@@ -402,7 +396,7 @@ class AutoTranslatePanel(QWidget):
             "重新翻譯，一輪輪循環，直到「成功話數 ÷ 本批話數」達到右邊的比率。\n"
             "・已存在同名檔而跳過的話算成功\n"
             "・標題過濾跳過的話、沒有可翻文字（純 AA）的話、API 回應被截斷的話不會重翻\n"
-            f"・連續 {_loop_idle_rounds()} 輪都沒有任何一話翻成功就停止循環\n"
+            "・連續右邊設定的輪數都沒有任何一話翻成功就停止循環（0＝不限，達標才停）\n"
             "・會中斷整批的狀況（額度上限、按停止、未預期錯誤…）照樣中斷")
         loop_hl.addWidget(self.loop_cb)
         self.loop_ratio_spin = QSpinBox()
@@ -412,6 +406,18 @@ class AutoTranslatePanel(QWidget):
         self.loop_ratio_spin.setToolTip("成功話數 ÷ 本批話數（已存在同名檔而跳過的也算成功）")
         self.loop_cb.toggled.connect(self.loop_ratio_spin.setEnabled)
         loop_hl.addWidget(self.loop_ratio_spin)
+        # 某一話每次都被擋時，沒有這個上限會一直重送到按停止（放著跑會白燒額度）
+        self.loop_idle_spin = QSpinBox()
+        self.loop_idle_spin.setRange(0, 99)
+        self.loop_idle_spin.setPrefix("，連續 ")
+        self.loop_idle_spin.setSuffix(" 輪無進展就停")
+        self.loop_idle_spin.setSpecialValueText("，不限輪數（達標才停）")
+        self.loop_idle_spin.setValue(3)
+        self.loop_idle_spin.setToolTip(
+            "一輪＝把跳過的話全部重翻一次。連續這麼多輪都沒有任何一話翻成功，\n"
+            "就停止循環（剩下的話記為失敗）。設 0＝不限，一直循環到成功率達標或按停止。")
+        self.loop_cb.toggled.connect(self.loop_idle_spin.setEnabled)
+        loop_hl.addWidget(self.loop_idle_spin)
         loop_hl.addStretch()
         form.addRow("", loop_row)
 
@@ -874,6 +880,8 @@ class AutoTranslatePanel(QWidget):
             (self.loop_cb, "_auto_translate_loop", self.loop_cb.isChecked),
             (self.loop_ratio_spin, "_auto_translate_loop_ratio",
              self.loop_ratio_spin.value),
+            (self.loop_idle_spin, "_auto_translate_loop_idle_rounds",
+             self.loop_idle_spin.value),
         ]
 
     def _connect_persist(self) -> None:
@@ -949,7 +957,10 @@ class AutoTranslatePanel(QWidget):
         self.loop_cb.setChecked(bool(getattr(m, "_auto_translate_loop", False)))
         self.loop_ratio_spin.setValue(int(
             getattr(m, "_auto_translate_loop_ratio", 100) or 100))
+        self.loop_idle_spin.setValue(int(
+            getattr(m, "_auto_translate_loop_idle_rounds", 3)))
         self.loop_ratio_spin.setEnabled(self.loop_cb.isChecked() and not self._running)
+        self.loop_idle_spin.setEnabled(self.loop_cb.isChecked() and not self._running)
         # 「自動填入作品名稱」設定決定檔名欄是可編輯的作品名稱還是唯讀檔名
         self._apply_title_mode(bool(getattr(m, "_fetch_auto_fill_title", False)))
         # 作品名稱：與首頁同步——優先用首頁 doc_title，沒有就空
@@ -1088,6 +1099,7 @@ class AutoTranslatePanel(QWidget):
             "output_kw": self.output_kw_cb.isChecked(),
             "loop": self.loop_cb.isChecked(),
             "loop_ratio": self.loop_ratio_spin.value(),
+            "loop_idle_rounds": self.loop_idle_spin.value(),
             "url_list": url_list,
         }
 
@@ -1747,6 +1759,7 @@ class AutoTranslatePanel(QWidget):
                   *self._backend_btns.values()):
             w.setEnabled(not running)
         self.loop_ratio_spin.setEnabled((not running) and self.loop_cb.isChecked())
+        self.loop_idle_spin.setEnabled((not running) and self.loop_cb.isChecked())
         # 作品資料夾欄位：執行中一律鎖；結束後回到「依勾選狀態」
         self._set_series_row_enabled(
             (not running) and self.group_by_series_cb.isChecked())

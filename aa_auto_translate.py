@@ -892,8 +892,9 @@ _UNTIL_LAST_CAP = 9999
 # 一路抓到最後，關聯連結成環時也不會無限迴圈）。
 _TITLE_FILTER_MAX_CONSECUTIVE = 50
 
-# 循環翻譯：連續這麼多輪都沒有任何一話翻成功就停止循環。某一話每次都被審查時，
-# 沒有這個上限會一直重送到使用者按停止（無人看管時白白燒額度）。
+# 循環翻譯：連續這麼多輪都沒有任何一話翻成功就停止循環（預設值；可由
+# loop_max_idle／設定 auto_translate_loop_idle_rounds 改，0＝不限）。某一話每次都被
+# 審查時，沒有這個上限會一直重送到使用者按停止（無人看管時白白燒額度）。
 _LOOP_MAX_IDLE_ROUNDS = 3
 
 
@@ -930,6 +931,7 @@ def run_auto_translate(
     output_keywords_enabled: bool | None = None,
     output_keyword_rules: list | None = None,
     loop_ratio: int | None = None,
+    loop_max_idle: int | None = None,
     on_pause: Callable[[str], None] | None = None,
     resume_event=None,
     error_policy: dict | None = None,
@@ -973,7 +975,9 @@ def run_auto_translate(
     loop_ratio：循環翻譯的目標成功比率（%，1～100；0＝關閉）。新的話都跑完時，把本批
         「翻譯失敗而跳過」的話（疑似審查／未翻譯／回覆無法使用／檔案過小／譯文關鍵字
         跳過）排回待補翻列表重翻，一輪輪循環到「(成功＋已存在同名檔) ÷ 本批話數」
-        達標、沒有可重翻的話，或連續 `_LOOP_MAX_IDLE_ROUNDS` 輪沒有任何進展為止。
+        達標、沒有可重翻的話，或連續 `loop_max_idle` 輪沒有任何一話翻成功為止
+        （0＝不限；None 讀 cache 的 auto_translate_loop_idle_rounds，預設
+        `_LOOP_MAX_IDLE_ROUNDS`）。
         標題過濾跳過、提取為空（純 AA）、API 回應被截斷的話不重翻；會中斷整批的
         狀況照樣中斷。None 時讀 cache 的 auto_translate_loop／auto_translate_loop_ratio。
     on_pause／resume_event：「暫停」用的 UI 回呼與 threading.Event；未提供時（CLI）
@@ -1037,8 +1041,14 @@ def run_auto_translate(
         loop_ratio = (int(getattr(cache, "auto_translate_loop_ratio", 100) or 100)
                       if getattr(cache, "auto_translate_loop", False) else 0)
     loop_ratio = min(100, max(0, int(loop_ratio or 0)))
+    if loop_max_idle is None:
+        loop_max_idle = getattr(cache, "auto_translate_loop_idle_rounds",
+                                _LOOP_MAX_IDLE_ROUNDS)
+    loop_max_idle = max(0, int(loop_max_idle or 0))
     if loop_ratio:
-        log(f"🔁 循環翻譯：開啟（新的話跑完後重翻跳過的話，直到成功率達 {loop_ratio}%）")
+        log(f"🔁 循環翻譯：開啟（新的話跑完後重翻跳過的話，直到成功率達 {loop_ratio}%"
+            + (f"；連續 {loop_max_idle} 輪無進展就停）" if loop_max_idle
+               else "；不限輪數）"))
     title_filter = (title_filter or "").strip()
     if title_filter:
         log(f"🔤 標題過濾：只翻標題含「{title_filter}」的話（不符的跳過，不計話數）")
@@ -1207,7 +1217,7 @@ def run_auto_translate(
             return False
         if loop_round:
             loop_idle = 0 if len(result.done) > loop_done_mark else loop_idle + 1
-            if loop_idle >= _LOOP_MAX_IDLE_ROUNDS:
+            if loop_max_idle and loop_idle >= loop_max_idle:
                 log(f"🔁 循環翻譯：連續 {loop_idle} 輪都沒有翻成功任何一話，停止循環"
                     f"（成功率 {pct:.0f}%，未達 {loop_ratio}%）。")
                 return False

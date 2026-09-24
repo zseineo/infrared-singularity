@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.59"
+APP_VERSION = "2.60"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -779,6 +779,7 @@ class MainWindow(QMainWindow):
         # 循環翻譯：新的話跑完後重翻本批跳過的話，直到成功比率（%）達標
         self._auto_translate_loop: bool = False
         self._auto_translate_loop_ratio: int = 100
+        self._auto_translate_loop_idle_rounds: int = 3   # 連續幾輪無進展就停（0＝不限）
         self._auto_translate_output_kw_rules: list = []  # [{"word", "action"}, ...]
         # 自動翻譯進階設定：各種錯誤要中斷或重試（{項目: "stop"|"retry"}，連線設定內）
         self._auto_translate_error_policy: dict = {}
@@ -1897,6 +1898,7 @@ class MainWindow(QMainWindow):
         self._auto_translate_output_kw = params.get("output_kw", False)
         self._auto_translate_loop = bool(params.get("loop", False))
         self._auto_translate_loop_ratio = int(params.get("loop_ratio", 100) or 100)
+        self._auto_translate_loop_idle_rounds = int(params.get("loop_idle_rounds", 3))
         self._gemini_max_per_session = params["max_per_session"]
         self._gemini_required_model = params["required_model"] or "pro"
         # 手動模式下也把使用者填的作品名稱同步回首頁（保持兩邊一致）
@@ -1999,6 +2001,7 @@ class MainWindow(QMainWindow):
                     output_keyword_rules=list(self._auto_translate_output_kw_rules),
                     loop_ratio=(self._auto_translate_loop_ratio
                                 if self._auto_translate_loop else 0),
+                    loop_max_idle=self._auto_translate_loop_idle_rounds,
                     on_pause=_on_pause,
                     resume_event=resume_event,
                     error_policy=dict(self._auto_translate_error_policy),
@@ -2558,6 +2561,7 @@ class MainWindow(QMainWindow):
             auto_translate_output_kw=self._auto_translate_output_kw,
             auto_translate_loop=self._auto_translate_loop,
             auto_translate_loop_ratio=self._auto_translate_loop_ratio,
+            auto_translate_loop_idle_rounds=self._auto_translate_loop_idle_rounds,
             auto_translate_output_kw_rules=list(self._auto_translate_output_kw_rules),
             auto_translate_error_policy=dict(self._auto_translate_error_policy),
             translate_backend=self._translate_backend,
@@ -2692,6 +2696,11 @@ class MainWindow(QMainWindow):
                 getattr(cache, "auto_translate_loop_ratio", 100) or 100)))
         except (TypeError, ValueError):
             self._auto_translate_loop_ratio = 100
+        try:
+            self._auto_translate_loop_idle_rounds = min(99, max(0, int(
+                getattr(cache, "auto_translate_loop_idle_rounds", 3))))
+        except (TypeError, ValueError):
+            self._auto_translate_loop_idle_rounds = 3
         self._auto_translate_output_kw_rules = list(
             getattr(cache, "auto_translate_output_kw_rules", []) or [])
         self._auto_translate_error_policy = dict(

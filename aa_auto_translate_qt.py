@@ -1678,12 +1678,16 @@ class AutoTranslatePanel(QWidget):
         self.done_list.clear()
         self.skip_list.clear()
         self._skip_items.clear()
+        self._rate_text = ""
         self._cur_url = ""
         self._set_cur_title("（尚未開始）")
         self._update_status_heads()
 
     def _update_status_heads(self) -> None:
-        self.done_head.setText(f"✅ 已完成（{self.done_list.count()}）")
+        # 完成率只在循環翻譯開啟時由協調器送來（rate 事件），沒送就不顯示
+        rate = getattr(self, "_rate_text", "")
+        self.done_head.setText(f"✅ 已完成（{self.done_list.count()}）"
+                               + (f"　{rate}" if rate else ""))
         self.skip_head.setText(f"⏭️ 已跳過（{self.skip_list.count()}）")
 
     @staticmethod
@@ -1693,6 +1697,16 @@ class AutoTranslatePanel(QWidget):
     def on_translate_event(self, kind: str, url: str, title: str,
                            detail: str) -> None:
         """協調器 on_event 的結構化進度（主執行緒呼叫）。"""
+        if kind == "rate":
+            try:
+                ok, n, target = (int(x) for x in detail.split("/"))
+            except ValueError:
+                return
+            if n > 0:
+                self._rate_text = f"完成率 {ok * 100 // n}%（{ok}/{n}，目標 {target}%）"
+                self.done_head.setToolTip("成功話數 ÷ 本批話數（已存在同名檔而跳過的算成功）")
+                self._update_status_heads()
+            return
         name = self._status_name(url, title)
         tip = f"{url}\n{detail}" if detail else url
         if kind == "current":

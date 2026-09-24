@@ -998,7 +998,9 @@ def run_auto_translate(
         （不必解析 Log 字串）。kind：``current``＝開始處理某話（新的話會送兩次：
         讀取網頁前標題未知、讀到後帶標題）；``done``＝已存檔（說明＝檔名）；
         ``skipped``＝這一話不翻了（標題不符／已存在同名檔／各種失敗，說明＝原因）；
-        ``deferred``＝暫時跳過、之後補翻（之後若補翻成功會再送 ``done``）。
+        ``deferred``＝暫時跳過、之後補翻（之後若補翻成功會再送 ``done``）；
+        ``rate``＝循環翻譯開啟時，緊跟在前三者之後的目前完成率（url／標題空，
+        說明＝``"成功/本批話數/目標%"``，成功含已存在同名檔）。
     print_summary：是否在結束時透過 `log` 印出 `_print_summary` 總結；
         GUI 端會自行印更完整的版本，故傳 False 避免面板 log 出現兩份總結。
     """
@@ -1184,6 +1186,11 @@ def run_auto_translate(
             return
         try:
             on_event(kind, url, title or result.titles.get(url, ""), detail)
+            # 循環翻譯開啟時，每一話有結論就附送目前完成率（與 _start_loop_round
+            # 同一個算法）：kind="rate"、說明＝"成功/本批話數/目標%"
+            if loop_ratio and kind in ("done", "skipped", "deferred"):
+                ok = len(result.done) + len(result.skipped)
+                on_event("rate", "", "", f"{ok}/{i}/{loop_ratio}")
         except Exception:  # noqa: BLE001 — 顯示用回呼失敗不該中斷整批
             pass
 

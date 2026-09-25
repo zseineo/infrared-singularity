@@ -312,7 +312,6 @@ class UrlFetchWindow(QWidget):
                                      font=self.ui_small_font, width=60)
         self.fetch_btn.setFixedHeight(28)
         self.fetch_btn.clicked.connect(self._do_fetch)
-        top.addWidget(self.fetch_btn)
 
         self.from_file_btn = make_button("從檔案", color="#17a2b8", hover="#138496",
                                          font=self.ui_small_font, width=70)
@@ -323,6 +322,7 @@ class UrlFetchWindow(QWidget):
             "譯文檔也可以：翻譯不會改到投稿標頭。")
         self.from_file_btn.clicked.connect(self._fetch_from_file)
         top.addWidget(self.from_file_btn)
+        top.addWidget(self.fetch_btn)
         layout.addLayout(top)
 
         # 作者名稱列

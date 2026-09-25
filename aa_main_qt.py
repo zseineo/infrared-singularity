@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.67"
+APP_VERSION = "2.68"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -780,6 +780,8 @@ class MainWindow(QMainWindow):
         self._auto_translate_loop: bool = False
         self._auto_translate_loop_ratio: int = 100
         self._auto_translate_loop_idle_rounds: int = 3   # 連續幾輪無進展就停（0＝不限）
+        # 標題過濾「讀取網址時自動帶入」作品名（過濾文字本身不持久化）
+        self._auto_translate_title_auto: bool = False
         self._auto_translate_output_kw_rules: list = []  # [{"word", "action"}, ...]
         # 自動翻譯進階設定：各種錯誤要中斷或重試（{項目: "stop"|"retry"}，連線設定內）
         self._auto_translate_error_policy: dict = {}
@@ -2577,6 +2579,7 @@ class MainWindow(QMainWindow):
             auto_translate_loop=self._auto_translate_loop,
             auto_translate_loop_ratio=self._auto_translate_loop_ratio,
             auto_translate_loop_idle_rounds=self._auto_translate_loop_idle_rounds,
+            auto_translate_title_auto=self._auto_translate_title_auto,
             auto_translate_output_kw_rules=list(self._auto_translate_output_kw_rules),
             auto_translate_error_policy=dict(self._auto_translate_error_policy),
             translate_backend=self._translate_backend,
@@ -2716,6 +2719,8 @@ class MainWindow(QMainWindow):
                 getattr(cache, "auto_translate_loop_idle_rounds", 3))))
         except (TypeError, ValueError):
             self._auto_translate_loop_idle_rounds = 3
+        self._auto_translate_title_auto = bool(
+            getattr(cache, "auto_translate_title_auto", False))
         self._auto_translate_output_kw_rules = list(
             getattr(cache, "auto_translate_output_kw_rules", []) or [])
         self._auto_translate_error_policy = dict(

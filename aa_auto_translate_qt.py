@@ -252,8 +252,8 @@ class AutoTranslatePanel(QWidget):
             "・直接比對文字，不是正則")
         # 「⤵ 作品名」：用與「作品資料夾」同一套規則（頁面標題去掉話數後的作品名
         # 主體）填進過濾欄——同一個作品的每一話標題都含作品名，拿它當過濾字最準，
-        # 使用者不必自己從標題挑字。刻意做成按鈕而非自動帶入：自動帶會讓「本來不想
-        # 過濾」的批次突然被過濾。
+        # 使用者不必自己從標題挑字。預設是按鈕（自動帶會讓「本來不想過濾」的批次
+        # 突然被過濾）；要自動帶入另勾右邊的 title_auto_cb。
         self.btn_title_from_series = QPushButton("⤵ 作品名")
         self.btn_title_from_series.setToolTip(
             "用起始網址的頁面標題算出作品名稱（與「作品資料夾」同一套規則：\n"
@@ -266,6 +266,17 @@ class AutoTranslatePanel(QWidget):
         title_hl.setSpacing(6)
         title_hl.addWidget(self.title_filter_edit, 1)
         title_hl.addWidget(self.btn_title_from_series)
+        self.title_auto_cb = QCheckBox("讀取網址時自動帶入")
+        self.title_auto_cb.setToolTip(
+            "勾選後，起始網址（或網址清單第一行）一換——例如從「網址讀取」讀了新的一話——\n"
+            "就自動做一次「⤵ 作品名」，把作品名稱填進標題過濾欄。\n"
+            "只在網址改變時帶入；改輸出資料夾等其他欄位不會蓋掉你手動改過的過濾文字。\n"
+            "自動翻譯執行中不會變動。")
+        self._title_auto_url = ""   # 上次自動帶入時的網址（同一個網址不重帶）
+        title_hl.addWidget(self.title_auto_cb)
+        # 勾上當下就對目前的網址帶一次（不必等網址再換）
+        self.title_auto_cb.toggled.connect(
+            lambda chk: chk and self._auto_fill_title_filter(self._current_start_url()))
         form.addRow("標題過濾：", title_row)
 
         # 檔名：作品名稱與檔名預覽共用一列，依「自動填入作品名稱」設定切換
@@ -891,6 +902,8 @@ class AutoTranslatePanel(QWidget):
              self.loop_ratio_spin.value),
             (self.loop_idle_spin, "_auto_translate_loop_idle_rounds",
              self.loop_idle_spin.value),
+            (self.title_auto_cb, "_auto_translate_title_auto",
+             self.title_auto_cb.isChecked),
         ]
 
     def _set_count_quick(self, n: int) -> None:
@@ -973,6 +986,8 @@ class AutoTranslatePanel(QWidget):
             getattr(m, "_auto_translate_loop_ratio", 100) or 100))
         self.loop_idle_spin.setValue(int(
             getattr(m, "_auto_translate_loop_idle_rounds", 3)))
+        self.title_auto_cb.setChecked(bool(
+            getattr(m, "_auto_translate_title_auto", False)))
         self.loop_ratio_spin.setEnabled(self.loop_cb.isChecked() and not self._running)
         self.loop_idle_spin.setEnabled(self.loop_cb.isChecked() and not self._running)
         # 「自動填入作品名稱」設定決定檔名欄是可編輯的作品名稱還是唯讀檔名
@@ -1203,6 +1218,7 @@ class AutoTranslatePanel(QWidget):
         doc_title = self.doc_title_edit.text().strip()
         lines = self._url_list_lines()
         url = lines[0] if lines else self.url_edit.text().strip()
+        self._auto_fill_title_filter(url)
         if not auto_fill:
             self._sync_manual_series_folder()  # 從自動模式切回來時要補算
         if not url:
@@ -1303,7 +1319,19 @@ class AutoTranslatePanel(QWidget):
         """目前清單的有效網址（去空行、去頭尾空白）。"""
         return [ln.strip() for ln in self._url_list_text.splitlines() if ln.strip()]
 
-    def _fill_title_filter_from_series(self) -> None:
+    def _current_start_url(self) -> str:
+        lines = self._url_list_lines()
+        return lines[0] if lines else self.url_edit.text().strip()
+
+    def _auto_fill_title_filter(self, url: str) -> None:
+        """勾「讀取網址時自動帶入」時，起始網址換了就帶一次作品名（執行中不動）。"""
+        if (not self.title_auto_cb.isChecked() or self._running or not url
+                or url == self._title_auto_url):
+            return
+        self._title_auto_url = url
+        self._fill_title_filter_from_series(quiet=True)
+
+    def _fill_title_filter_from_series(self, quiet: bool = False) -> None:
         """「⤵ 作品名」：把起始網址算出的作品名稱填進標題過濾欄。
 
         用的是與「作品資料夾」完全相同的規則（`preview_series_folder`
@@ -1311,11 +1339,15 @@ class AutoTranslatePanel(QWidget):
         **一律以頁面標題為準**（`fetch_auto_fill_title=True`）——手動模式的作品
         資料夾等於使用者自己打的作品名稱，拿來當過濾字不一定對得上頁面標題。
         自動模式下若剛好已經算好了就直接沿用，不必再跑一次。
+
+        quiet：自動帶入時用——算不出來／讀取失敗不跳警告（使用者沒按按鈕），
+        背景結果回來時起始網址已經又換了就丟掉。
         """
         lines = self._url_list_lines()
         url = lines[0] if lines else self.url_edit.text().strip()
         if not url:
-            self._main.show_status("⚠️ 請先填入起始網址（或手動網址清單）", "#f39c12")
+            if not quiet:
+                self._main.show_status("⚠️ 請先填入起始網址（或手動網址清單）", "#f39c12")
             return
         if self._title_auto and self._series_folder_value:
             self._set_title_filter(self._series_folder_value)
@@ -1338,6 +1370,14 @@ class AutoTranslatePanel(QWidget):
 
             def _apply() -> None:
                 self.btn_title_from_series.setEnabled(not self._running)
+                if quiet:
+                    cur = self._url_list_lines()
+                    cur = cur[0] if cur else self.url_edit.text().strip()
+                    if self._running or cur != url:
+                        return  # 已開始翻譯或網址又換了：這個結果作廢
+                    if name:
+                        self._set_title_filter(name)
+                    return
                 if name:
                     self._set_title_filter(name)
                 elif err:
@@ -1779,6 +1819,7 @@ class AutoTranslatePanel(QWidget):
         # 執行中鎖住設定欄位，避免使用者中途改值造成混亂
         for w in (self.url_edit, self.count_spin, self.until_last,
                   self.title_filter_edit, self.btn_title_from_series,
+                  self.title_auto_cb,
                   self.gem_edit, self.model_combo, self.max_session_spin,
                   self.doc_title_edit, self.out_edit, self.skip_existing_cb,
                   self.btn_url_list, self.group_by_series_cb,

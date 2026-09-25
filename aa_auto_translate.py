@@ -32,7 +32,7 @@ from aa_tool import app_paths, constants, html_io, original_cache
 from aa_tool import settings_manager
 from aa_tool import text_extraction, translation_engine, url_fetcher
 from aa_tool.gemini_web import (
-    ERROR_POLICY_DEFAULTS, policy_choice_label,
+    ERROR_POLICY_DEFAULTS, brief_error, policy_choice_label,
     GeminiAborted, GeminiBusyRetriesExhausted,
     GeminiContentBlocked, GeminiModelMismatch, GeminiQuotaExceeded,
     GeminiResponseTruncated, GeminiStuck, GeminiWebError, GeminiWebSession,
@@ -1639,9 +1639,10 @@ def run_auto_translate(
                 # 只有第一次送出就失敗〔多半是設定問題〕才會到這裡。）
                 # 補翻中的話出錯時，pending_url 仍是「下一個新的話」（url），
                 # 補翻的那話記在失敗清單。
-                _record_failed(ch_url, retrying, str(e))
+                # brief_error：Playwright 錯誤（如 fill 逾時）不附整段 Call log／原文
+                _record_failed(ch_url, retrying, brief_error(e))
                 result.pending_url = url
-                log(f"  ❌ 失敗：{e} → 中斷整批"
+                log(f"  ❌ 失敗：{brief_error(e)} → 中斷整批"
                     + ("。" if retrying else "（此話未完成，可用它當起始網址接續）。"))
                 break
     finally:

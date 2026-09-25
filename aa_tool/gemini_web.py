@@ -297,6 +297,17 @@ def looks_quota_note(text: str) -> bool:
     return bool(_QUOTA_RESET_RE.search(text))
 
 
+def brief_error(e: BaseException) -> str:
+    """例外訊息的精簡版：Playwright 的錯誤會在第一行摘要後附「Call log:」與
+    整段呼叫紀錄——`fill()` 逾時時連要填入的整話原文都在裡面，Log 會被灌上
+    幾百行。去掉「Call log:」以後的部分；其他例外（沒有 Call log）原樣保留。"""
+    msg = str(e)
+    cut = msg.find('Call log:')
+    if cut >= 0:
+        msg = msg[:cut]
+    return msg.strip() or type(e).__name__
+
+
 _GEM_ID_RE = re.compile(r'/gem/([^/?#]+)')
 
 
@@ -715,7 +726,7 @@ class GeminiWebSession:
         try:
             self._page.reload(wait_until="domcontentloaded")
         except Exception as e:  # noqa: BLE001 — 任何重整失敗都等下一輪再試
-            self._log(f"⚠️ 重新整理頁面失敗：{e}；下次輪詢再試")
+            self._log(f"⚠️ 重新整理頁面失敗：{brief_error(e)}；下次輪詢再試")
             return False
         deadline = time.time() + 60
         while time.time() < deadline:
@@ -765,7 +776,7 @@ class GeminiWebSession:
             picker.click()
             self._page.wait_for_timeout(700)
         except Exception as e:  # noqa: BLE001 — 點不開就是選擇器／版面問題
-            return "fail", f"點不開模型選單：{e}"
+            return "fail", f"點不開模型選單：{brief_error(e)}"
 
         target = None
         target_txt = ""

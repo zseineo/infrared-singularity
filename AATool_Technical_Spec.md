@@ -505,7 +505,7 @@
     *   `translate(prompt_text)`：填入文字 → 送出 → `_wait_generation_done()`（等停止鈕消失＋回覆文字連續數次穩定）→ 回傳最新回覆。
     *   **Session 輪替**：`translate()` 內部計數，每 session 最多 `max_per_session`（預設 3）次送出，達上限自動 `_open_new_chat()` 重開對話、計數歸零——避免單一對話上下文過長使翻譯品質下降。計數以「實際送出次數」計（含分段）。
     *   **額度上限偵測**：回覆命中 `QUOTA_PHRASES` 即丟 `GeminiQuotaExceeded`（非翻譯失敗，呼叫端須暫停）。
-    *   **開新對話要確認停在 Gem 上**：`_open_new_chat()` 在 `goto(gem_url)` 後以 `_stays_on_gem()` 等輸入框出現、網址連續 `_GEM_URL_SETTLE`＝5 秒（v2.62 由 2 秒調長）；**剛啟動瀏覽器的第一次**（`open()` 呼叫 `_open_new_chat(extra_settle=_GEM_FIRST_OPEN_EXTRA)`）再多 10 秒（v2.64，冷啟動載入最慢、導向最晚到）仍是同一個 Gem（`_gem_id()` 只比 `/gem/<id>` 的 id，容許 `/u/1/` 前綴與對話 id 後綴）；被導到 `/app` 就重開，最多 `_GEM_OPEN_RETRIES`＝3 次（仍失敗只 Log 警告、照目前頁面繼續；登入頁直接交給 `_ensure_logged_in`）。背景：中國使用者回報網路慢時 Gemini 在 `domcontentloaded` 之後才把 Gem 改導到 `/app`——沒套用 Gem、已填入的文字被洗掉、訊息沒送出，程式卻要空等 10 分鐘才重開。
+    *   **開新對話要確認停在 Gem 上**：`_open_new_chat()` 在 `goto(gem_url)` 後以 `_stays_on_gem()` 等輸入框出現、網址連續 `_GEM_URL_SETTLE`＝5 秒（v2.62 由 2 秒調長）（v2.64 曾對剛啟動瀏覽器的第一次多加 10 秒，v2.67 取消，第一次也是 5 秒）仍是同一個 Gem（`_gem_id()` 只比 `/gem/<id>` 的 id，容許 `/u/1/` 前綴與對話 id 後綴）；被導到 `/app` 就重開，最多 `_GEM_OPEN_RETRIES`＝3 次（仍失敗只 Log 警告、照目前頁面繼續；登入頁直接交給 `_ensure_logged_in`）。背景：中國使用者回報網路慢時 Gemini 在 `domcontentloaded` 之後才把 Gem 改導到 `/app`——沒套用 Gem、已填入的文字被洗掉、訊息沒送出，程式卻要空等 10 分鐘才重開。
     *   **沒送出偵測**：`_wait_generation_done()` 回傳 bool；送出後 `_GEN_NOT_STARTED_TIMEOUT`＝60 秒內沒出現停止鈕也沒有新回覆 → 回 False，`_send_and_collect()` 回空字串（**不可**讀頁面最後一則回覆，那是上一段的），交給下面的卡住重試開新對話重送。
     *   **卡住偵測**：`translate()` 拆成 `_send_and_collect()`；若送出後沒開始生成（見上），或等待生成完成（`_GEN_TIMEOUT`＝10 分鐘）後回覆仍為空，自動 `_open_new_chat()` 重開新對話並再送一次；仍無回應丟 `GeminiStuck`。協調器將其當作該話失敗處理（跳過）。
     *   **DOM 選擇器**集中於 `DEFAULT_SELECTORS`（input / send / stop / response，各為候選列表），可由 `gemini_selectors` 設定覆寫——Gemini 前端改版時的唯一維護點。

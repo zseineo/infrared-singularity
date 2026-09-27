@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import time
@@ -250,6 +251,14 @@ _GEN_NOT_STARTED_TIMEOUT = 60
 # domcontentloaded 之後才把 Gem 網址改導到 /app（沒套用 Gem 的一般對話）。
 _GEM_URL_SETTLE = 5.0
 _GEM_OPEN_RETRIES = 3
+# Debug Log：頁面健康檢查（在頁面內跑一小段 JS）最多等幾毫秒；等不到＝頁面凍結
+_HEALTH_TIMEOUT_MS = 5000
+# Debug Log：等待生成期間每隔幾秒記一次進度快照
+_DEBUG_GEN_EVERY = 15.0
+# 頁面健康檢查：DOM 元素數、JS heap（Chrome 的 performance.memory）
+_HEALTH_JS = ("() => ({n: document.getElementsByTagName('*').length,"
+              " heap: (performance.memory || {}).usedJSHeapSize || 0,"
+              " limit: (performance.memory || {}).jsHeapSizeLimit || 0})")
 # 生成判定完成後，再多等這秒數才讀取回覆文字。
 # 目的：避免串流尾端／DOM 尚未完全 render 時就讀走半截或舊內容
 # （等同「按下複製鍵到實際取得內容之間的緩衝」）。
@@ -381,7 +390,10 @@ class GeminiWebSession:
         prepend_prompt: str = "",
         stop_event=None,
         log: Callable[[str], None] | None = None,
+        debug=None,
     ) -> None:
+        """``debug``：`aa_tool.debug_log.DebugLog`（勾「Debug Log」時由協調器傳入），
+        記錄每一步耗時、頁面健康度、瀏覽器事件與錯誤截圖；None＝不記。"""
         if not gem_url:
             raise GeminiWebError("未提供 Gem 網址（gem_url）")
         self.gem_url = gem_url
@@ -401,6 +413,8 @@ class GeminiWebSession:
                 self.selectors[key] = [val]
         self.headless = headless
         self._log = log or (lambda m: print(f"[gemini_web] {m}"))
+        self._debug = debug
+        self._channel_used = ""   # 實際啟動的瀏覽器（Debug Log 用）
         self._pw = None
         self._context = None
         self._page = None
@@ -432,6 +446,8 @@ class GeminiWebSession:
             pass
         pages = self._context.pages
         self._page = pages[0] if pages else self._context.new_page()
+        if self._debug is not None:
+            self._debug_attach()
         self._open_new_chat()
         self._ensure_logged_in(login_timeout)
         self._ensure_model()
@@ -465,6 +481,8 @@ class GeminiWebSession:
                     continue
                 if channel:
                     self._log(f"未找到內建 Chromium，改用{_CHANNEL_LABELS[channel]}啟動")
+                self._channel_used = (_CHANNEL_LABELS[channel]
+                                      + ("（沙箱）" if sandbox else "（無沙箱）"))
                 return context
         raise GeminiWebError(
             "無法啟動瀏覽器：找不到 Playwright 內建 Chromium，系統也沒有可用的 "
@@ -563,18 +581,40 @@ class GeminiWebSession:
         if self.prepend_prompt and first_in_chat:
             text = self.prepend_prompt + "\n\n" + prompt_text
             self._log("  （已在對話開頭附加翻譯 prompt）")
-        editor = self._require("input")
-        editor.click()
-        editor.fill(text)
-        prev_count = self._response_count()
-        self._click_send()
-        if not self._wait_generation_done(prev_count):
-            # 沒送出去：頁面上最後一則回覆是「上一段」的，不能當成這次的回覆
-            return ""
-        # 生成判定完成後再沉澱數秒，確保讀到的是完整最終回覆
-        if _POST_GEN_SETTLE > 0:
-            time.sleep(_POST_GEN_SETTLE)
-        return self._latest_response_text()
+        self._dbg(f"── session #{self._session_index} 第 {self._send_count} 次送出："
+                  f"{text.count(chr(10)) + 1} 行／{len(text)} 字｜{self._page.url}")
+        self._health("送出前")
+        try:
+            with self._timed("找輸入框"):
+                editor = self._require("input")
+            with self._timed("點輸入框"):
+                editor.click()
+            with self._timed("填入文字"):
+                editor.fill(text)
+            prev_count = self._response_count()
+            with self._timed("按送出"):
+                self._click_send()
+            t0 = time.time()
+            started = self._wait_generation_done(prev_count)
+            self._dbg(f"等待生成結束：{time.time() - t0:.1f}s"
+                      + ("" if started else "（沒開始生成）"))
+            if not started:
+                # 沒送出去：頁面上最後一則回覆是「上一段」的，不能當成這次的回覆
+                self._debug_screenshot("not_started")
+                return ""
+            # 生成判定完成後再沉澱數秒，確保讀到的是完整最終回覆
+            if _POST_GEN_SETTLE > 0:
+                time.sleep(_POST_GEN_SETTLE)
+            reply = self._latest_response_text()
+        except Exception as e:
+            if self._debug is not None:
+                self._debug.exception("送出／等待回覆時發生例外", e)
+                self._health("例外當下")
+                self._debug_screenshot("error")
+            raise
+        self._dbg(f"回覆：{reply.count(chr(10)) + 1 if reply else 0} 行／{len(reply)} 字")
+        self._health("回覆後")
+        return reply
 
     # ── 對話管理 ──
 
@@ -598,9 +638,14 @@ class GeminiWebSession:
         """
         want = _gem_id(self.gem_url)
         for attempt in range(1, _GEM_OPEN_RETRIES + 1):
-            self._page.goto(self.gem_url, wait_until="domcontentloaded")
+            with self._timed(f"開啟 Gem（第 {attempt} 次）"):
+                self._page.goto(self.gem_url, wait_until="domcontentloaded")
             # 不是 Gem 網址（沒有 /gem/<id>）就無從檢查；登入頁交給 _ensure_logged_in
-            if not want or self._on_login_page() or self._stays_on_gem(want):
+            t0 = time.time()
+            ok = not want or self._on_login_page() or self._stays_on_gem(want)
+            self._dbg(f"確認停在 Gem：{'是' if ok else '否'}（{time.time() - t0:.1f}s）"
+                      f"｜{self._page.url}")
+            if ok:
                 break
             self._log(f"⚠️ 開啟 Gem 後被導到「{self._page.url}」（不是 Gem 對話，"
                       f"多半是網路慢），重新開啟（{attempt}/{_GEM_OPEN_RETRIES}）…")
@@ -609,6 +654,77 @@ class GeminiWebSession:
                       "先照目前頁面繼續")
         self._send_count = 0
         self._session_index += 1
+
+    # ── Debug Log（self._debug 為 None 時全部不做事） ──
+
+    def _dbg(self, msg: str) -> None:
+        if self._debug is not None:
+            self._debug.write(msg)
+
+    @contextlib.contextmanager
+    def _timed(self, label: str):
+        """with 區塊計時：寫「label：N.Ns」，丟例外時寫「label：失敗（N.Ns）」。"""
+        t0 = time.time()
+        try:
+            yield
+        except BaseException:
+            self._dbg(f"{label}：失敗（{time.time() - t0:.1f}s）")
+            raise
+        self._dbg(f"{label}：{time.time() - t0:.1f}s")
+
+    def _health(self, tag: str) -> None:
+        """頁面健康度：在頁面內跑一小段 JS 量回應延遲、DOM 元素數、JS heap。
+
+        用 wait_for_function（有逾時）而非 evaluate（沒有逾時）：頁面凍結時
+        evaluate 會一直卡住，這裡最多等 _HEALTH_TIMEOUT_MS 就記「沒回應」。
+        """
+        if self._debug is None or self._page is None:
+            return
+        from aa_tool.debug_log import system_memory
+        t0 = time.time()
+        try:
+            v = self._page.wait_for_function(
+                _HEALTH_JS, polling=100, timeout=_HEALTH_TIMEOUT_MS).json_value()
+            mb = 1024 * 1024
+            heap = (f"JS heap {v['heap'] / mb:.0f}／{v['limit'] / mb:.0f} MB"
+                    if v.get("heap") else "JS heap 讀不到")
+            self._dbg(f"[健康] {tag}：回應 {(time.time() - t0) * 1000:.0f}ms、"
+                      f"DOM {v['n']} 個元素、{heap}、回覆區塊 {self._response_count()} 個"
+                      f"｜{system_memory()}")
+        except Exception as e:  # noqa: BLE001 — 量不到本身就是答案
+            self._dbg(f"[健康] {tag}：頁面 {_HEALTH_TIMEOUT_MS // 1000} 秒內沒有回應"
+                      f"（{brief_error(e)}）——頁面可能凍結｜{system_memory()}")
+
+    def _debug_screenshot(self, tag: str) -> None:
+        if self._debug is None or self._page is None:
+            return
+        path = self._debug.screenshot_path(tag)
+        try:
+            self._page.screenshot(path=path, timeout=10000)
+            self._dbg(f"截圖：{os.path.basename(path)}")
+        except Exception as e:  # noqa: BLE001
+            self._dbg(f"截圖失敗：{brief_error(e)}")
+
+    def _debug_attach(self) -> None:
+        """記錄瀏覽器版本並掛上頁面事件：崩潰、JS 錯誤、主框架導向、關閉、新分頁。"""
+        page, dbg = self._page, self._dbg
+        try:
+            ver = self._context.browser.version if self._context.browser else ""
+        except Exception:  # noqa: BLE001
+            ver = ""
+        dbg(f"瀏覽器：{self._channel_used or '?'} {ver}｜headless={self.headless}"
+            f"｜每 {self.max_per_session} 次送出換新對話｜要求模型 {self.required_model or '不限'}")
+        try:
+            page.on("crash", lambda *_: dbg("💥 頁面崩潰（crash 事件）"))
+            page.on("close", lambda *_: dbg("頁面被關閉（close 事件）"))
+            page.on("pageerror", lambda err: dbg(f"頁面 JS 錯誤：{str(err)[:300]}"))
+            page.on("console", lambda m: m.type == "error"
+                    and dbg(f"console.error：{m.text[:300]}"))
+            page.on("framenavigated", lambda f: f == page.main_frame
+                    and dbg(f"頁面導向：{f.url}"))
+            self._context.on("page", lambda p: dbg(f"開了新分頁：{p.url}"))
+        except Exception as e:  # noqa: BLE001
+            dbg(f"掛頁面事件失敗：{brief_error(e)}")
 
     def _on_login_page(self) -> bool:
         url = (self._page.url or "").lower()
@@ -952,6 +1068,7 @@ class GeminiWebSession:
         例如填字後頁面被導走、文字被洗掉）；呼叫端應開新對話重送，不要空等 ``_GEN_TIMEOUT``。
         """
         # 1) 等待開始：出現停止鈕，或回覆數量增加
+        t_start = time.time()
         start_deadline = time.time() + _GEN_NOT_STARTED_TIMEOUT
         started = False
         while time.time() < start_deadline:
@@ -959,6 +1076,7 @@ class GeminiWebSession:
                 started = True
                 break
             time.sleep(0.3)
+        self._dbg(f"開始生成：{'是' if started else '否'}（{time.time() - t_start:.1f}s）")
         if not started:
             self._log(f"⚠️ 送出後 {_GEN_NOT_STARTED_TIMEOUT}s 仍未開始生成"
                       f"（目前頁面：{self._page.url}），訊息可能沒送出去")
@@ -968,9 +1086,19 @@ class GeminiWebSession:
         gen_deadline = time.time() + _GEN_TIMEOUT
         last_text = None
         stable = 0
+        next_snap = time.time() + _DEBUG_GEN_EVERY
         while time.time() < gen_deadline:
+            t_poll = time.time()
             generating = self._find("stop") is not None
             text = self._latest_response_text()
+            if self._debug is not None:
+                # 輪詢本身變慢（讀 DOM 要好幾秒）＝頁面開始卡
+                poll = time.time() - t_poll
+                if poll > 2 or time.time() >= next_snap:
+                    next_snap = time.time() + _DEBUG_GEN_EVERY
+                    self._dbg(f"生成中快照：停止鈕={'有' if generating else '無'}"
+                              f"、回覆 {len(text)} 字、穩定 {stable}、"
+                              f"這次讀取 DOM 花 {poll:.1f}s")
             if not generating and text and text == last_text:
                 stable += 1
                 if stable >= _STABLE_CHECKS:

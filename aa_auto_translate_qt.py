@@ -494,6 +494,23 @@ class AutoTranslatePanel(QWidget):
         btn_clear = _btn("清空 Log", "#6c757d", "#5a6268", width=80)
         btn_clear.clicked.connect(self._clear_log)
         btn_hl.addWidget(btn_clear)
+        # Debug Log：回報「瀏覽器卡住／逾時」這類開發端重現不出來的問題用
+        btn_hl.addSpacing(12)
+        self.debug_log_cb = QCheckBox("🐞 產生 Debug Log")
+        self.debug_log_cb.setToolTip(
+            "勾選後，每次執行會在設定資料夾的 debug_logs 產生一份詳細記錄檔，\n"
+            "回報問題時把它（和同名的截圖）附上：\n"
+            "・每一步的時間點與耗時（開 Gem、填字、送出、等回覆…）\n"
+            "・頁面健康度（回應延遲、元素數量、記憶體）與系統可用記憶體\n"
+            "・瀏覽器崩潰、頁面錯誤、被導向等事件\n"
+            "・錯誤的完整訊息與當下畫面截圖\n"
+            "不含 API 金鑰，也不含原文／譯文全文（只記行數與長度）。只保留最新 20 份。")
+        btn_hl.addWidget(self.debug_log_cb)
+        btn_debug_dir = QPushButton("📂")
+        btn_debug_dir.setToolTip("開啟 Debug Log 資料夾")
+        btn_debug_dir.setFixedWidth(32)
+        btn_debug_dir.clicked.connect(self._open_debug_dir)
+        btn_hl.addWidget(btn_debug_dir)
         btn_hl.addStretch()
         form.addRow(btn_row)
 
@@ -904,7 +921,17 @@ class AutoTranslatePanel(QWidget):
              self.loop_idle_spin.value),
             (self.title_auto_cb, "_auto_translate_title_auto",
              self.title_auto_cb.isChecked),
+            (self.debug_log_cb, "_auto_translate_debug_log",
+             self.debug_log_cb.isChecked),
         ]
+
+    def _open_debug_dir(self) -> None:
+        from aa_tool import debug_log
+        base_dir = getattr(self._main, "_settings_base_dir", None) \
+            or app_paths.data_dir()
+        folder = debug_log.debug_dir(base_dir)
+        os.makedirs(folder, exist_ok=True)
+        os.startfile(folder)  # noqa: S606 — Windows 專用工具
 
     def _set_count_quick(self, n: int) -> None:
         """「1 話／10 話」快捷鈕（寫回主視窗走 _persist_fields 的訊號）。"""
@@ -988,6 +1015,8 @@ class AutoTranslatePanel(QWidget):
             getattr(m, "_auto_translate_loop_idle_rounds", 3)))
         self.title_auto_cb.setChecked(bool(
             getattr(m, "_auto_translate_title_auto", False)))
+        self.debug_log_cb.setChecked(bool(
+            getattr(m, "_auto_translate_debug_log", False)))
         self.loop_ratio_spin.setEnabled(self.loop_cb.isChecked() and not self._running)
         self.loop_idle_spin.setEnabled(self.loop_cb.isChecked() and not self._running)
         # 「自動填入作品名稱」設定決定檔名欄是可編輯的作品名稱還是唯讀檔名
@@ -1819,7 +1848,7 @@ class AutoTranslatePanel(QWidget):
         # 執行中鎖住設定欄位，避免使用者中途改值造成混亂
         for w in (self.url_edit, self.count_spin, self.until_last,
                   self.title_filter_edit, self.btn_title_from_series,
-                  self.title_auto_cb,
+                  self.title_auto_cb, self.debug_log_cb,
                   self.gem_edit, self.model_combo, self.max_session_spin,
                   self.doc_title_edit, self.out_edit, self.skip_existing_cb,
                   self.btn_url_list, self.group_by_series_cb,

@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from aa_tool import app_paths, constants, html_io, original_cache
+from aa_tool import debug_log as debug_log_mod
 from aa_tool import settings_manager
 from aa_tool import text_extraction, translation_engine, url_fetcher
 from aa_tool.gemini_web import (
@@ -236,6 +237,7 @@ class AutoResult:
     # 下一批該從哪一話開始：本批依順序第一個「沒翻到」的話（跳過的也算，純 AA
     # 那種沒有可翻文字的除外）；都翻到了就是 pending_url／next_url。GUI 用它回填起始網址。
     resume_url: str = ""
+    debug_log_path: str = ""                        # 勾「Debug Log」時這次的記錄檔
 
 
 # ── URL 快取（沿用 aa_main_qt 的 %TEMP%/aa_url_cache/<md5>.html 格式）──
@@ -942,6 +944,8 @@ def run_auto_translate(
     progress: Callable[[str], None] | None = None,
     on_event: Callable[[str, str, str, str], None] | None = None,
     print_summary: bool = True,
+    debug_log: bool | None = None,
+    app_version: str = "",
 ) -> AutoResult:
     """從 ``start_url`` 起連續自動翻譯。
 
@@ -1006,6 +1010,11 @@ def run_auto_translate(
         說明＝``"成功/本批話數/目標%"``，成功含已存在同名檔）。
     print_summary：是否在結束時透過 `log` 印出 `_print_summary` 總結；
         GUI 端會自行印更完整的版本，故傳 False 避免面板 log 出現兩份總結。
+    debug_log：為 True 時在設定資料夾 debug_logs/ 寫一份詳細記錄檔（見
+        `aa_tool.debug_log`）：面板 Log 全文加時間戳、瀏覽器後端每一步耗時與頁面
+        健康度、錯誤完整 traceback 與截圖。路徑放在 `debug_log_path`，開頭也會印
+        在 Log。None 時讀 cache 的 auto_translate_debug_log。
+    app_version：寫進 Debug Log 表頭的程式版號（GUI 帶入）。
     """
     log = progress or (lambda m: print(m))
     # CLI 直接執行時也要接收程式根目錄的舊設定（GUI 端啟動時已做過，重複呼叫無副作用）
@@ -1059,6 +1068,27 @@ def run_auto_translate(
         log(f"🔤 標題過濾：只翻標題含「{title_filter}」的話（不符的跳過，不計話數）")
     if skip_cache:
         log("🌐 不讀暫存：每一話都重新上網抓取（不吃本機網頁暫存）")
+    if debug_log is None:
+        debug_log = getattr(cache, "auto_translate_debug_log", False)
+    dlog = None
+    if debug_log:
+        try:
+            dlog = debug_log_mod.start(base_dir)
+        except OSError as e:
+            log(f"⚠️ 無法建立 Debug Log（{e}），本次不記錄。")
+    if dlog is not None:
+        result_debug_path = dlog.path
+        _plain_log = log
+
+        def log(m: str) -> None:  # noqa: F811 — 面板 Log 同時寫進 Debug Log
+            _plain_log(m)
+            dlog.write(f"[Log] {m}")
+        dlog.write(f"AA 工具 v{app_version or '?'}｜後端 {backend}｜話數 "
+                   f"{'到最後一話' if until_last else count}｜清單 {len(url_list or [])} 筆"
+                   f"｜不讀暫存 {skip_cache}｜循環 {loop_ratio}%")
+        log(f"🐞 Debug Log 記錄中：{dlog.path}")
+    else:
+        result_debug_path = ""
     if error_policy is None:
         error_policy = getattr(cache, "auto_translate_error_policy", {})
     policy = resolve_error_policy(error_policy)
@@ -1116,6 +1146,7 @@ def run_auto_translate(
         return stop_event is not None and stop_event.is_set()
 
     result = AutoResult()
+    result.debug_log_path = result_debug_path
     url = start_url
 
     # ── 依後端建立翻譯 session（兩者皆提供 open / translate / close） ──
@@ -1169,7 +1200,7 @@ def run_auto_translate(
             prepend_prompt=("" if cache.browser_use_gem
                             else cache.gemini_api_system_prompt),
             stop_event=stop_event,
-            headless=headless, log=log)
+            headless=headless, log=log, debug=dlog)
         open_log = "開啟瀏覽器並登入 Gemini…"
 
     # 待補翻列表（v2.30）：伺服器忙碌／逾時連續重試達上限（後端丟
@@ -1305,6 +1336,10 @@ def run_auto_translate(
             result.stopped = True
             log(f"⏹️ {e}，未開始翻譯。")
             return result
+        except Exception as e:
+            if dlog is not None:
+                dlog.exception("啟動瀏覽器／登入時發生例外", e)
+            raise
         retry_ready = False   # 上一話翻譯成功 → 下一輪先補翻待補翻列表
         drain_logged = False  # 「新的話已跑完、開始清空列表」的提示只印一次
         i = 0                 # 已開始處理的「新」話數（補翻、標題過濾跳過的不計）
@@ -1641,6 +1676,8 @@ def run_auto_translate(
                 # 補翻的那話記在失敗清單。
                 # brief_error：Playwright 錯誤（如 fill 逾時）不附整段 Call log／原文
                 _record_failed(ch_url, retrying, brief_error(e))
+                if dlog is not None:
+                    dlog.exception("中斷整批的例外", e)
                 result.pending_url = url
                 log(f"  ❌ 失敗：{brief_error(e)} → 中斷整批"
                     + ("。" if retrying else "（此話未完成，可用它當起始網址接續）。"))
@@ -1668,6 +1705,11 @@ def run_auto_translate(
     _fill_titles_from_history(result, cache.url_history)
     if print_summary:
         _print_summary(result, log)
+    if dlog is not None:
+        dlog.write(f"結束：成功 {len(result.done)}、失敗 {len(result.failed)}、"
+                   f"已存在 {len(result.skipped)}｜停止={result.stopped} "
+                   f"額度={result.quota_paused} 模型不符={result.model_mismatch}")
+        dlog.close()
     return result
 
 

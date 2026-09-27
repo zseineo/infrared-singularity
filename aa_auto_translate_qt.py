@@ -496,7 +496,7 @@ class AutoTranslatePanel(QWidget):
         btn_hl.addWidget(btn_clear)
         # Debug Log：回報「瀏覽器卡住／逾時」這類開發端重現不出來的問題用
         btn_hl.addSpacing(12)
-        self.debug_log_cb = QCheckBox("🐞 產生 Debug Log")
+        self.debug_log_cb = QCheckBox("產生 Debug Log")
         self.debug_log_cb.setToolTip(
             "勾選後，每次執行會在設定資料夾的 debug_logs 產生一份詳細記錄檔，\n"
             "回報問題時把它（和同名的截圖）附上：\n"

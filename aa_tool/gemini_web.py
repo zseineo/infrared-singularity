@@ -306,6 +306,97 @@ def looks_quota_note(text: str) -> bool:
     return bool(_QUOTA_RESET_RE.search(text))
 
 
+# 填入輸入框的方式（連線設定「填入方式」）。實測（v2.71，1.6 萬字）：已有回覆的對話頁
+# 逐字填入要 20～26 秒（慢機器會超過 Playwright 預設 30 秒而逾時），另兩種 0.1～0.3 秒。
+INPUT_METHODS: dict[str, str] = {
+    "fill": "逐字填入（原本做法，最保險但長文較慢）",
+    "quill": "直接寫入編輯器（快，不碰剪貼簿）",
+    "clipboard": "剪貼簿貼上（快，會暫時佔用剪貼簿，貼完還原）",
+}
+DEFAULT_INPUT_METHOD = "fill"
+
+# Gemini 輸入框是 Quill 編輯器，實例掛在 .ql-container 的 __quill（內部屬性，改版可能消失
+# → 回 false 由呼叫端退回逐字填入）。以 'user' 來源設值，Gemini 才會當成使用者輸入。
+_QUILL_SET_JS = """(el, text) => {
+  const c = el.closest('.ql-container'); const q = c && c.__quill;
+  if (!q) return false;
+  q.setText(text + String.fromCharCode(10), 'user');
+  q.setSelection(q.getLength(), 0, 'user');
+  return true;
+}"""
+
+
+def _clip_lines(text: str) -> list[str]:
+    """比對輸入框內容用：去掉空行與行首尾空白（編輯器會吃掉／補上空白行）。"""
+    return [ln.strip() for ln in (text or "").replace("\r", "").split("\n") if ln.strip()]
+
+
+def _win_clipboard_get() -> str | None:
+    """讀系統剪貼簿文字（Windows）；非 Windows、沒有文字或讀不到回 None。"""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+    u32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
+    u32.GetClipboardData.restype = wintypes.HANDLE
+    k32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    k32.GlobalLock.restype = ctypes.c_void_p
+    k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    for _ in range(10):
+        if u32.OpenClipboard(None):
+            break
+        time.sleep(0.05)
+    else:
+        return None
+    try:
+        h = u32.GetClipboardData(13)  # CF_UNICODETEXT
+        if not h:
+            return None
+        p = k32.GlobalLock(h)
+        if not p:
+            return None
+        try:
+            return ctypes.wstring_at(p)
+        finally:
+            k32.GlobalUnlock(h)
+    finally:
+        u32.CloseClipboard()
+
+
+def _win_clipboard_set(text: str) -> bool:
+    """寫系統剪貼簿文字（Windows）；成功回 True。"""
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
+    u32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
+    u32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+    u32.SetClipboardData.restype = wintypes.HANDLE
+    k32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    k32.GlobalAlloc.restype = wintypes.HGLOBAL
+    k32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    k32.GlobalLock.restype = ctypes.c_void_p
+    k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    data = (text or "").encode("utf-16-le") + b"\x00\x00"
+    for _ in range(10):
+        if u32.OpenClipboard(None):
+            break
+        time.sleep(0.05)
+    else:
+        return False
+    try:
+        u32.EmptyClipboard()
+        h = k32.GlobalAlloc(0x0002, len(data))  # GMEM_MOVEABLE
+        if not h:
+            return False
+        p = k32.GlobalLock(h)
+        ctypes.memmove(p, data, len(data))
+        k32.GlobalUnlock(h)
+        return bool(u32.SetClipboardData(13, h))  # 成功後記憶體歸系統管
+    finally:
+        u32.CloseClipboard()
+
+
 def brief_error(e: BaseException) -> str:
     """例外訊息的精簡版：Playwright 的錯誤會在第一行摘要後附「Call log:」與
     整段呼叫紀錄——`fill()` 逾時時連要填入的整話原文都在裡面，Log 會被灌上
@@ -391,6 +482,7 @@ class GeminiWebSession:
         stop_event=None,
         log: Callable[[str], None] | None = None,
         debug=None,
+        input_method: str = DEFAULT_INPUT_METHOD,
     ) -> None:
         """``debug``：`aa_tool.debug_log.DebugLog`（勾「Debug Log」時由協調器傳入），
         記錄每一步耗時、頁面健康度、瀏覽器事件與錯誤截圖；None＝不記。"""
@@ -414,6 +506,8 @@ class GeminiWebSession:
         self.headless = headless
         self._log = log or (lambda m: print(f"[gemini_web] {m}"))
         self._debug = debug
+        self.input_method = (input_method if input_method in INPUT_METHODS
+                             else DEFAULT_INPUT_METHOD)
         self._channel_used = ""   # 實際啟動的瀏覽器（Debug Log 用）
         self._pw = None
         self._context = None
@@ -589,8 +683,8 @@ class GeminiWebSession:
                 editor = self._require("input")
             with self._timed("點輸入框"):
                 editor.click()
-            with self._timed("填入文字"):
-                editor.fill(text)
+            with self._timed(f"填入文字（{self.input_method}）"):
+                self._fill_input(editor, text)
             prev_count = self._response_count()
             with self._timed("按送出"):
                 self._click_send()
@@ -615,6 +709,80 @@ class GeminiWebSession:
         self._dbg(f"回覆：{reply.count(chr(10)) + 1 if reply else 0} 行／{len(reply)} 字")
         self._health("回覆後")
         return reply
+
+    # ── 填入輸入框 ──
+
+    def _fill_input(self, editor, text: str) -> None:
+        """依 ``input_method`` 把文字放進輸入框；快速方式失敗就退回逐字填入。
+
+        快速方式填完一律比對內容（行為單位），不一致就清空改用逐字填入——
+        避免 Gemini 改版或剪貼簿被搶用時送出錯誤內容。
+        """
+        method = self.input_method
+        if method == "quill":
+            try:
+                ok = bool(editor.evaluate(_QUILL_SET_JS, text))
+            except Exception as e:  # noqa: BLE001
+                ok = False
+                self._dbg(f"直接寫入編輯器失敗：{brief_error(e)}")
+            if ok and self._input_matches(editor, text, wait=2.0):
+                return
+            self._log("  （直接寫入編輯器沒成功，改用逐字填入）")
+        elif method == "clipboard":
+            if self._paste_via_clipboard(editor, text):
+                return
+            self._log("  （剪貼簿貼上沒成功，改用逐字填入）")
+        else:
+            editor.fill(text)
+            return
+        self._clear_input(editor)
+        editor.fill(text)
+
+    def _input_matches(self, editor, text: str, wait: float = 0.0) -> bool:
+        """輸入框內容與 text 逐行一致（忽略空行）。wait>0 時最多等這麼久讓頁面處理完。"""
+        want = _clip_lines(text)
+        deadline = time.time() + wait
+        while True:
+            try:
+                got = _clip_lines(editor.inner_text(timeout=5000))
+            except Exception:  # noqa: BLE001
+                got = []
+            if got == want:
+                return True
+            if time.time() >= deadline:
+                self._dbg(f"輸入框內容不一致：{len(got)} 行（應為 {len(want)} 行）")
+                return False
+            time.sleep(0.2)
+
+    def _clear_input(self, editor) -> None:
+        try:
+            editor.click()
+            self._page.keyboard.press("Control+A")
+            self._page.keyboard.press("Delete")
+        except Exception as e:  # noqa: BLE001
+            self._dbg(f"清空輸入框失敗：{brief_error(e)}")
+
+    def _paste_via_clipboard(self, editor, text: str) -> bool:
+        """暫借系統剪貼簿貼上：先備份、貼完（不論成敗）立刻還原。成功回 True。
+
+        只支援 Windows（其他平台回 False → 逐字填入）。剪貼簿原本不是文字
+        （例如圖片）時無法還原成原樣，只會清成空的——tooltip 已提醒。
+        """
+        if os.name != "nt":
+            return False
+        backup = _win_clipboard_get()
+        try:
+            if not _win_clipboard_set(text):
+                self._dbg("寫入剪貼簿失敗")
+                return False
+            editor.click()
+            self._page.keyboard.press("Control+V")
+            return self._input_matches(editor, text, wait=15.0)
+        except Exception as e:  # noqa: BLE001
+            self._dbg(f"剪貼簿貼上失敗：{brief_error(e)}")
+            return False
+        finally:
+            _win_clipboard_set(backup or "")
 
     # ── 對話管理 ──
 
@@ -713,7 +881,8 @@ class GeminiWebSession:
         except Exception:  # noqa: BLE001
             ver = ""
         dbg(f"瀏覽器：{self._channel_used or '?'} {ver}｜headless={self.headless}"
-            f"｜每 {self.max_per_session} 次送出換新對話｜要求模型 {self.required_model or '不限'}")
+            f"｜每 {self.max_per_session} 次送出換新對話｜要求模型 {self.required_model or '不限'}"
+            f"｜填入方式 {self.input_method}")
         try:
             page.on("crash", lambda *_: dbg("💥 頁面崩潰（crash 事件）"))
             page.on("close", lambda *_: dbg("頁面被關閉（close 事件）"))

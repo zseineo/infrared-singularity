@@ -614,6 +614,21 @@ class AutoTranslatePanel(QWidget):
             "目的：避免單一對話累積太多上下文使翻譯品質下降。")
         form.addRow("每 N 次送出後換新對話：", self.max_session_spin)
 
+        # 填入方式：逐字填入在「已有回覆的對話頁」長文會很慢（實測 20～26 秒，慢機器逾時）
+        from aa_tool.gemini_web import INPUT_METHODS
+        self.input_method_combo = QComboBox()
+        for value, label in INPUT_METHODS.items():
+            self.input_method_combo.addItem(label, value)
+        self.input_method_combo.setToolTip(
+            "把原文放進 Gemini 輸入框的方式：\n"
+            "・逐字填入：原本的做法。長文在已有回覆的對話裡很慢，電腦慢時可能逾時\n"
+            "  （Log 出現 Locator.fill: Timeout 30000ms exceeded）\n"
+            "・直接寫入編輯器：幾乎瞬間完成，不碰剪貼簿；Gemini 改版失效時自動改回逐字填入\n"
+            "・剪貼簿貼上：幾乎瞬間完成；會先備份剪貼簿、貼完立刻還原\n"
+            "  （剪貼簿原本是圖片等非文字內容時無法還原；貼上當下別同時複製東西）\n"
+            "快速方式填完都會核對內容，不一致就改用逐字填入。")
+        form.addRow("填入方式：", self.input_method_combo)
+
         # 分隔線：上方為通用／瀏覽器設定，下方為 API 專屬設定
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -983,6 +998,9 @@ class AutoTranslatePanel(QWidget):
         self.model_combo.setCurrentIndex(idx)
         self.max_session_spin.setValue(int(
             getattr(m, "_gemini_max_per_session", 3) or 3))
+        idx = self.input_method_combo.findData(
+            getattr(m, "_gemini_input_method", "fill") or "fill")
+        self.input_method_combo.setCurrentIndex(max(0, idx))
         # 翻譯方式現於主頁，須在開啟面板時就反映已存後端（不必先開連線設定）
         backend = (getattr(m, "_translate_backend", "browser") or "browser")
         self._set_backend(backend)
@@ -1099,6 +1117,7 @@ class AutoTranslatePanel(QWidget):
             "gem_url": self.gem_edit.text().strip(),
             "required_model": self.model_combo.currentData(),
             "max_per_session": self.max_session_spin.value(),
+            "input_method": self.input_method_combo.currentData(),
             # 進階設定：只記與預設不同的項目（預設日後調整時，未改過的項目跟著走）
             "error_policy": self._collect_error_policy(),
         }
@@ -1850,6 +1869,7 @@ class AutoTranslatePanel(QWidget):
                   self.title_filter_edit, self.btn_title_from_series,
                   self.title_auto_cb, self.debug_log_cb,
                   self.gem_edit, self.model_combo, self.max_session_spin,
+                  self.input_method_combo,
                   self.doc_title_edit, self.out_edit, self.skip_existing_cb,
                   self.btn_url_list, self.group_by_series_cb,
                   self.mask_words_cb, self.btn_mask_list,

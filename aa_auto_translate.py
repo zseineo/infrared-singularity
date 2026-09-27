@@ -1200,7 +1200,8 @@ def run_auto_translate(
             prepend_prompt=("" if cache.browser_use_gem
                             else cache.gemini_api_system_prompt),
             stop_event=stop_event,
-            headless=headless, log=log, debug=dlog)
+            headless=headless, log=log, debug=dlog,
+            input_method=getattr(cache, "gemini_input_method", "fill"))
         open_log = "開啟瀏覽器並登入 Gemini…"
 
     # 待補翻列表（v2.30）：伺服器忙碌／逾時連續重試達上限（後端丟

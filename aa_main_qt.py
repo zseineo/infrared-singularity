@@ -70,7 +70,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.70"
+APP_VERSION = "2.71"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -758,6 +758,7 @@ class MainWindow(QMainWindow):
         self._gemini_gem_url: str = ""
         self._gemini_profile_dir: str = ""
         self._gemini_max_per_session: int = 3
+        self._gemini_input_method: str = "fill"   # 瀏覽器模式填入方式（gemini_web.INPUT_METHODS）
         self._gemini_required_model: str = "pro"
         self._gemini_selectors: dict = {}
         self._auto_translate_out_dir: str = ""
@@ -1860,6 +1861,8 @@ class MainWindow(QMainWindow):
         if "max_per_session" in params:
             self._gemini_max_per_session = max(
                 1, int(params.get("max_per_session") or 3))
+        if "input_method" in params:
+            self._gemini_input_method = params.get("input_method") or "fill"
         if "error_policy" in params:
             ep = params.get("error_policy") or {}
             self._auto_translate_error_policy = (
@@ -2568,6 +2571,7 @@ class MainWindow(QMainWindow):
             gemini_gem_url=self._gemini_gem_url,
             gemini_profile_dir=self._gemini_profile_dir,
             gemini_max_per_session=self._gemini_max_per_session,
+            gemini_input_method=self._gemini_input_method,
             gemini_required_model=self._gemini_required_model,
             gemini_selectors=self._gemini_selectors,
             auto_translate_out_dir=self._auto_translate_out_dir,
@@ -2692,6 +2696,8 @@ class MainWindow(QMainWindow):
         self._gemini_profile_dir = str(cache.gemini_profile_dir or "")
         self._gemini_max_per_session = max(1, int(
             cache.gemini_max_per_session or 3))
+        self._gemini_input_method = str(
+            getattr(cache, "gemini_input_method", "fill") or "fill")
         self._gemini_required_model = (
             str(cache.gemini_required_model or "pro").lower() or "pro")
         self._gemini_selectors = dict(cache.gemini_selectors or {})

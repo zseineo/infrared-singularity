@@ -190,6 +190,8 @@ class AppCache:
     gemini_gem_url: str = ""
     gemini_profile_dir: str = ""
     gemini_max_per_session: int = 3
+    # gemini_input_method：填入輸入框的方式 fill／quill／clipboard（見 gemini_web.INPUT_METHODS）。
+    gemini_input_method: str = "fill"
     gemini_selectors: dict = field(default_factory=dict)
     auto_translate_out_dir: str = ""
     auto_translate_count: int = 5
@@ -481,6 +483,8 @@ class SettingsManager:
                     'gemini_max_per_session', cache.gemini_max_per_session))
             except (TypeError, ValueError):
                 pass
+            cache.gemini_input_method = str(data.get(
+                'gemini_input_method', cache.gemini_input_method) or "fill")
             sel = data.get('gemini_selectors', cache.gemini_selectors)
             cache.gemini_selectors = sel if isinstance(sel, dict) else {}
             cache.auto_translate_out_dir = str(data.get(
@@ -654,6 +658,7 @@ class SettingsManager:
                 'gemini_gem_url': cache.gemini_gem_url,
                 'gemini_profile_dir': cache.gemini_profile_dir,
                 'gemini_max_per_session': cache.gemini_max_per_session,
+                'gemini_input_method': cache.gemini_input_method,
                 'gemini_selectors': cache.gemini_selectors,
                 'auto_translate_out_dir': cache.auto_translate_out_dir,
                 'auto_translate_url_list': cache.auto_translate_url_list,

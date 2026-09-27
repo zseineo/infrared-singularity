@@ -83,7 +83,18 @@ _FORMAT_MIN_RATIO = 0.5
 # ② 行數：譯文的 ID 行數 ÷ 送出行數 低於此值 → 視為漏翻太多（少數行被 AI 合併或
 #    漏掉屬常見，抓 0.8 讓正常翻譯不會誤判）。
 _LINE_KEEP_MIN_RATIO = 0.8
-# 兩項檢查的送出行數下限：太短的段落本來就容易整合成幾行，不做判定。
+# ③ 殘留日文：譯文（`|` 後的文字）中平假名佔文字字元（漢字＋假名＋諺文）的比例
+#    超過此值 → 視為有一部分沒翻。只算平假名：片假名常是刻意保留的專有名詞（角色名、
+#    招式名），算進去會誤判對戰類作品。實測 847 份正常譯文 P99＝7.8%、最高 20.1%；
+#    日文原文最低 40.8%（中位 65%），約三成的行沒翻就會超過 20%。
+_JAPANESE_MAX_RATIO = 0.2
+# 譯文文字字元少於此數不做③判定（樣本太少，幾個名字就能拉高比例）。
+_JAPANESE_MIN_CHARS = 200
+_HIRAGANA_RE = re.compile(r'[ぁ-ゖ]')
+_TEXT_CHAR_RE = re.compile(
+    r'[ぁ-ゖァ-ヺｦ-ﾝ㐀-䶿一-鿿'
+    r'豈-﫿가-힯]')
+# 三項檢查的送出行數下限：太短的段落本來就容易整合成幾行，不做判定。
 _REPLY_CHECK_MIN_LINES = 5
 # 選「稍後重試」時，同一話最多排進待補翻列表幾次；超過就認賠跳過。
 # 沒有這個上限的話，若某一話每次都被回摘要，補翻階段（新的話都跑完後）會在
@@ -119,6 +130,7 @@ ERROR_POLICY_LABELS = {
     "web_censored": "回覆被換成拒絕語",
     "reply_format": "回覆格式不符",
     "reply_lines": "譯文行數少太多",
+    "reply_japanese": "譯文殘留大量日文",
     "fetch_fail": "抓取網頁失敗",
 }
 
@@ -558,15 +570,16 @@ def _send_chunk(session: GeminiWebSession, chunk_lines: list[str], label: str,
 def _check_reply_usable(sent: str, reply: str, policy: dict,
                         log: Callable[[str], None],
                         retries_done: int = 0) -> None:
-    """譯文能不能用：格式是不是 ``ID|譯文``、行數有沒有少太多。不能用就丟例外。
+    """譯文能不能用：格式是不是 ``ID|譯文``、行數有沒有少太多、有沒有殘留大量日文。
+    不能用就丟例外。
 
-    依進階設定決定丟哪一種（兩項各自獨立設定）：
+    依進階設定決定丟哪一種（三項各自獨立設定）：
       - 「跳過這一話」→ `MalformedResponse`：記入失敗清單、不存檔、續下一話。
       - 「稍後重試」→ `GeminiBusyRetriesExhausted`：排進待補翻列表，等下一話翻譯
         成功（代表 AI 恢復正常）後再補翻這一話——隔一段時間再試比當場重送有意義，
         因為 AI 不照 prompt 多半是整個對話已經歪掉。
 
-    送出行數少於 `_REPLY_CHECK_MIN_LINES` 時兩項都不判定（樣本太少容易誤判）。
+    送出行數少於 `_REPLY_CHECK_MIN_LINES` 時都不判定（樣本太少容易誤判）。
     """
     sent_lines = len([l for l in (sent or "").split("\n") if l.strip()])
     if sent_lines < _REPLY_CHECK_MIN_LINES:
@@ -593,6 +606,20 @@ def _check_reply_usable(sent: str, reply: str, policy: dict,
         _fail("reply_lines",
               f"譯文行數比原文少太多（送出 {sent_lines} 行、回來只有 {matched} 行＝"
               f"{keep:.0%}，低於 {_LINE_KEEP_MIN_RATIO:.0%}）")
+
+    ja, chars = _japanese_ratio(reply)
+    if chars >= _JAPANESE_MIN_CHARS and ja > _JAPANESE_MAX_RATIO:
+        _fail("reply_japanese",
+              f"譯文殘留大量日文（平假名佔 {ja:.1%}，超過 {_JAPANESE_MAX_RATIO:.0%}，"
+              "疑似有一部分沒翻）")
+
+
+def _japanese_ratio(reply: str) -> tuple[float, int]:
+    """譯文（各 ``ID|`` 行 `|` 之後）平假名佔文字字元的比例，與文字字元數。"""
+    body = "".join(l.split("|", 1)[1] for l in (reply or "").split("\n")
+                   if _ID_LINE_RE.match(l))
+    chars = len(_TEXT_CHAR_RE.findall(body))
+    return (len(_HIRAGANA_RE.findall(body)) / chars if chars else 0.0), chars
 
 
 def _translate(session: GeminiWebSession, extracted: str,

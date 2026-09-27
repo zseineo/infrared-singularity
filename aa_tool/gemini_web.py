@@ -88,6 +88,7 @@ ERROR_POLICY_DEFAULTS: dict[str, str] = {
     "web_censored": "stop",        # 回覆被抽換成罐頭拒絕語／極短回覆（疑似被審查）
     "reply_format": "retry",       # 回覆不是 ID|譯文 格式（AI 沒照 prompt，回了摘要）
     "reply_lines": "retry",        # 譯文 ID 行數比送出的少太多（漏翻）
+    "reply_japanese": "retry",     # 譯文殘留大量日文（平假名比例過高，部分沒翻）
     "fetch_fail": "stop",          # 抓取網頁失敗
 }
 
@@ -99,6 +100,7 @@ ERROR_POLICY_CHOICE_LABELS: dict[str, dict[str, str]] = {
     # 這兩項的 retry ＝排進待補翻列表、之後再補翻（不是當場重送）。
     "reply_format": {"retry": "稍後重試", "stop": "跳過這一話"},
     "reply_lines": {"retry": "稍後重試", "stop": "跳過這一話"},
+    "reply_japanese": {"retry": "稍後重試", "stop": "跳過這一話"},
 }
 
 

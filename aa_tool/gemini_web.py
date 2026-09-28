@@ -89,6 +89,7 @@ ERROR_POLICY_DEFAULTS: dict[str, str] = {
     "reply_format": "retry",       # 回覆不是 ID|譯文 格式（AI 沒照 prompt，回了摘要）
     "reply_lines": "retry",        # 譯文 ID 行數比送出的少太多（漏翻）
     "reply_japanese": "retry",     # 譯文殘留大量日文（平假名比例過高，部分沒翻）
+    "reply_ids": "retry",          # 譯文行號對不上（回成上一段的譯文、或上一段接在前面）
     "fetch_fail": "stop",          # 抓取網頁失敗
 }
 
@@ -101,6 +102,7 @@ ERROR_POLICY_CHOICE_LABELS: dict[str, dict[str, str]] = {
     "reply_format": {"retry": "稍後重試", "stop": "跳過這一話"},
     "reply_lines": {"retry": "稍後重試", "stop": "跳過這一話"},
     "reply_japanese": {"retry": "稍後重試", "stop": "跳過這一話"},
+    "reply_ids": {"retry": "稍後重試", "stop": "跳過這一話"},
 }
 
 

@@ -83,6 +83,14 @@ _FORMAT_MIN_RATIO = 0.5
 # ② 行數：譯文的 ID 行數 ÷ 送出行數 低於此值 → 視為漏翻太多（少數行被 AI 合併或
 #    漏掉屬常見，抓 0.8 讓正常翻譯不會誤判）。
 _LINE_KEEP_MIN_RATIO = 0.8
+# ④ 行號對不上：瀏覽器 Gemini 偶爾把「上一段」的譯文再回一次（整段換成上一段，或上一段
+#    接在這段前面），行數看起來正常，①②都抓不到，替換後會存出套錯話的檔案。
+#    - 送出的行號在譯文中出現的比例 < 此值 → 回成別段的譯文。實測 872 份既有譯文呈兩群：
+#      816 份 ≥95%、51 份 ≤20%（多為舊的錯檔），中間幾乎沒有。
+_ID_COVER_MIN_RATIO = 0.8
+#    - 譯文中「不屬於送出行號」或「重複出現」的行佔比 > 此值 → 接了另一段的譯文。
+#      正常回覆偶有少量重複行號，實測最高 23%；上一段整段接在前面通常 40% 以上。
+_ID_EXTRA_MAX_RATIO = 0.3
 # ③ 殘留日文：譯文（`|` 後的文字）中平假名佔文字字元（漢字＋假名＋諺文）的比例
 #    超過此值 → 視為有一部分沒翻。只算平假名：片假名常是刻意保留的專有名詞（角色名、
 #    招式名），算進去會誤判對戰類作品。實測 851 份正常譯文 P99＝7.8%、最高 20.1%；
@@ -132,6 +140,7 @@ ERROR_POLICY_LABELS = {
     "reply_format": "回覆格式不符",
     "reply_lines": "譯文行數少太多",
     "reply_japanese": "譯文殘留大量日文",
+    "reply_ids": "譯文行號對不上",
     "fetch_fail": "抓取網頁失敗",
 }
 
@@ -571,10 +580,10 @@ def _send_chunk(session: GeminiWebSession, chunk_lines: list[str], label: str,
 def _check_reply_usable(sent: str, reply: str, policy: dict,
                         log: Callable[[str], None],
                         retries_done: int = 0) -> None:
-    """譯文能不能用：格式是不是 ``ID|譯文``、行數有沒有少太多、有沒有殘留大量日文。
-    不能用就丟例外。
+    """譯文能不能用：格式是不是 ``ID|譯文``、行數有沒有少太多、行號對不對得上、
+    有沒有殘留大量日文。不能用就丟例外。
 
-    依進階設定決定丟哪一種（三項各自獨立設定）：
+    依進階設定決定丟哪一種（各項獨立設定）：
       - 「跳過這一話」→ `MalformedResponse`：記入失敗清單、不存檔、續下一話。
       - 「稍後重試」→ `GeminiBusyRetriesExhausted`：排進待補翻列表，等下一話翻譯
         成功（代表 AI 恢復正常）後再補翻這一話——隔一段時間再試比當場重送有意義，
@@ -608,11 +617,37 @@ def _check_reply_usable(sent: str, reply: str, policy: dict,
               f"譯文行數比原文少太多（送出 {sent_lines} 行、回來只有 {matched} 行＝"
               f"{keep:.0%}，低於 {_LINE_KEEP_MIN_RATIO:.0%}）")
 
+    sent_ids = _line_ids(sent)
+    got_ids = _line_ids(reply)
+    if sent_ids and got_ids:
+        wanted = set(sent_ids)
+        cover = len(wanted & set(got_ids)) / len(wanted)
+        if cover < _ID_COVER_MIN_RATIO:
+            _fail("reply_ids",
+                  f"譯文的行號跟原文對不上（送出的 {len(wanted)} 個行號只有 {cover:.0%} "
+                  "出現在譯文裡，疑似回成了別段——多半是上一段——的譯文）")
+        seen: set[str] = set()
+        extra = 0
+        for k in got_ids:
+            if k not in wanted or k in seen:
+                extra += 1
+            seen.add(k)
+        if extra / len(got_ids) > _ID_EXTRA_MAX_RATIO:
+            _fail("reply_ids",
+                  f"譯文多出 {extra / len(got_ids):.0%} 不屬於這段的行（原文沒有或重複的行號），"
+                  "疑似把上一段的譯文一起回了")
+
     ja, chars = _japanese_ratio(reply)
     if chars >= _JAPANESE_MIN_CHARS and ja > _JAPANESE_MAX_RATIO:
         _fail("reply_japanese",
               f"譯文殘留大量日文（平假名佔 {ja:.1%}，超過 {_JAPANESE_MAX_RATIO:.0%}，"
               "疑似有一部分沒翻）")
+
+
+def _line_ids(text: str) -> list[str]:
+    """``ID|文`` 行的 ID（依出現順序，可能重複）。"""
+    return [l.split("|", 1)[0].strip() for l in (text or "").split("\n")
+            if _ID_LINE_RE.match(l)]
 
 
 def _japanese_ratio(reply: str) -> tuple[float, int]:

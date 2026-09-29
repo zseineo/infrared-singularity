@@ -319,6 +319,16 @@ INPUT_METHODS: dict[str, str] = {
 }
 DEFAULT_INPUT_METHOD = "fill"
 
+# 按送出的方式（連線設定「送出方式」）。實測（v2.79）：某些時段 Gemini 會把「程式
+# 產生的點擊／按鍵」（Playwright 的 click、Enter，含先移動滑鼠、等待、視窗在前景）
+# 一律回「我是語言模型，幫不上忙」；同一個瀏覽器、同一份內容改由真實滑鼠點擊送出
+# （人手或 Windows 系統滑鼠）就正常。PostMessage 送按鍵／點擊也一樣被擋或送不出。
+SEND_METHODS: dict[str, str] = {
+    "program": "程式送出（原本做法，不影響滑鼠）",
+    "os_click": "系統滑鼠點擊（可避開部分時段被擋；每次送出借用滑鼠約 1～2 秒）",
+}
+DEFAULT_SEND_METHOD = "program"
+
 # Gemini 輸入框是 Quill 編輯器，實例掛在 .ql-container 的 __quill（內部屬性，改版可能消失
 # → 回 false 由呼叫端退回逐字填入）。以 'user' 來源設值，Gemini 才會當成使用者輸入。
 _QUILL_SET_JS = """(el, text) => {
@@ -488,6 +498,7 @@ class GeminiWebSession:
         log: Callable[[str], None] | None = None,
         debug=None,
         input_method: str = DEFAULT_INPUT_METHOD,
+        send_method: str = DEFAULT_SEND_METHOD,
     ) -> None:
         """``debug``：`aa_tool.debug_log.DebugLog`（勾「Debug Log」時由協調器傳入），
         記錄每一步耗時、頁面健康度、瀏覽器事件與錯誤截圖；None＝不記。
@@ -516,6 +527,8 @@ class GeminiWebSession:
         self._debug = debug
         self.input_method = (input_method if input_method in INPUT_METHODS
                              else DEFAULT_INPUT_METHOD)
+        self.send_method = (send_method if send_method in SEND_METHODS
+                            else DEFAULT_SEND_METHOD)
         self._channel_used = ""   # 實際啟動的瀏覽器（Debug Log 用）
         self._pw = None
         self._context = None
@@ -694,8 +707,8 @@ class GeminiWebSession:
             with self._timed(f"填入文字（{self.input_method}）"):
                 self._fill_input(editor, text)
             prev_count = self._response_count()
-            with self._timed("按送出"):
-                self._click_send()
+            with self._timed(f"按送出（{self.send_method}）"):
+                self._send()
             t0 = time.time()
             started = self._wait_generation_done(prev_count)
             self._dbg(f"等待生成結束：{time.time() - t0:.1f}s"
@@ -1204,6 +1217,149 @@ class GeminiWebSession:
                 f"請更新 gemini_web.DEFAULT_SELECTORS['{role}'] "
                 f"或設定檔的 gemini_selectors。")
         return loc
+
+    def _send(self) -> None:
+        """依 ``send_method`` 按送出；系統滑鼠點擊不成功就退回程式送出。"""
+        if self.send_method == "os_click":
+            try:
+                if self._os_click_send():
+                    return
+            except Exception as e:  # noqa: BLE001 — 失敗一律退回程式送出
+                self._dbg(f"系統滑鼠點擊例外：{brief_error(e)}")
+            self._log("  （系統滑鼠點擊沒成功，改用程式送出）")
+        self._click_send()
+
+    def _os_click_send(self) -> bool:
+        """用 Windows 系統滑鼠點送出鈕（與人手點擊相同的輸入事件）。
+
+        步驟：等送出鈕可按 → 暫時把分頁標題改成唯一字串找出瀏覽器視窗 → 叫到最前面
+        → 游標從目前位置分段移過去 → 以頁面收到的 mousemove 座標校正（DPI 縮放、
+        視窗邊框都不必自己算準）→ 按下放開 → 還原游標位置與原本的前景視窗。
+        對不準送出鈕就不點、回 False（交給呼叫端退回程式送出）。非 Windows 回 False。
+        """
+        if os.name != "nt":
+            return False
+        import ctypes
+        from ctypes import wintypes
+        u32 = ctypes.windll.user32
+        page = self._page
+        deadline = time.time() + 15
+        btn = None
+        while time.time() < deadline:
+            btn = self._find("send")
+            try:
+                if btn is not None and btn.is_enabled():
+                    break
+            except Exception:
+                pass
+            btn = None
+            time.sleep(0.5)
+        if btn is None:
+            return False
+        hwnd = self._find_browser_hwnd()
+        if not hwnd:
+            self._dbg("系統滑鼠點擊：找不到瀏覽器視窗")
+            return False
+        prev_fg = u32.GetForegroundWindow()
+        orig = wintypes.POINT()
+        u32.GetCursorPos(ctypes.byref(orig))
+
+        def _activate(h) -> None:
+            if u32.IsIconic(h):
+                u32.ShowWindow(h, 9)                 # SW_RESTORE
+            u32.keybd_event(0x12, 0, 0, 0)          # 按一下 Alt 解除前景鎖定
+            u32.SetForegroundWindow(h)
+            u32.keybd_event(0x12, 0, 2, 0)
+
+        try:
+            _activate(hwnd)
+            page.bring_to_front()
+            page.wait_for_timeout(500)
+            page.evaluate("""() => { if (!window.__aaLm) { window.__aaLm = 1;
+                addEventListener('mousemove', e => { window.__aaMove = [e.clientX, e.clientY]; }, true); }
+                window.__aaMove = null; }""")
+            box = btn.bounding_box()
+            if not box:
+                return False
+            tx, ty = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+            geo = page.evaluate("""() => ({sx: screenX, sy: screenY, ow: outerWidth,
+                oh: outerHeight, iw: innerWidth, ih: innerHeight, dpr: devicePixelRatio})""")
+            dpr = geo["dpr"] or 1
+            border = (geo["ow"] - geo["iw"]) / 2
+            px = (geo["sx"] + border + tx) * dpr
+            py = (geo["sy"] + geo["oh"] - geo["ih"] - border + ty) * dpr
+            steps = 25
+            for k in range(1, steps + 1):
+                u32.SetCursorPos(int(orig.x + (px - orig.x) * k / steps),
+                                 int(orig.y + (py - orig.y) * k / steps))
+                time.sleep(0.012)
+            hit = False
+            got = None
+            for _ in range(6):
+                u32.SetCursorPos(int(px) + 1, int(py))
+                time.sleep(0.04)
+                u32.SetCursorPos(int(px), int(py))
+                page.wait_for_timeout(200)
+                got = page.evaluate("window.__aaMove")
+                if not got:
+                    continue
+                ex, ey = tx - got[0], ty - got[1]
+                if abs(ex) <= box["width"] / 3 and abs(ey) <= box["height"] / 3:
+                    hit = True
+                    break
+                px += ex * dpr
+                py += ey * dpr
+            self._dbg(f"系統滑鼠點擊：{'對準' if hit else '對不準'}送出鈕"
+                      f"（頁面座標 {got}，目標 {tx:.0f},{ty:.0f}）")
+            if not hit:
+                return False
+            time.sleep(0.15)
+            u32.mouse_event(0x0002, 0, 0, 0, 0)     # 左鍵按下
+            time.sleep(0.08)
+            u32.mouse_event(0x0004, 0, 0, 0, 0)     # 左鍵放開
+            time.sleep(0.3)
+            return True
+        finally:
+            # 還原：游標回原位、原本的前景視窗回到前面（使用者正在用的程式）
+            u32.SetCursorPos(orig.x, orig.y)
+            if prev_fg and prev_fg != hwnd:
+                _activate(prev_fg)
+
+    def _find_browser_hwnd(self) -> int:
+        """找這個 Playwright 瀏覽器的頂層視窗：暫時把分頁標題改成唯一字串再比對視窗標題。
+
+        內建 Chromium／系統 Chrome／Edge 都適用，也不會找到使用者自己開的 Gemini 分頁。
+        """
+        import ctypes
+        from ctypes import wintypes
+        u32 = ctypes.windll.user32
+        page = self._page
+        token = f"aa-send-{os.getpid()}-{time.time_ns()}"
+        old = page.evaluate("document.title")
+        page.evaluate("t => { document.title = t; }", token)
+        found: list[int] = []
+        proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+        def _cb(h, _l):
+            buf = ctypes.create_unicode_buffer(256)
+            u32.GetWindowTextW(h, buf, 256)
+            if buf.value.startswith(token):
+                found.append(h)
+                return False
+            return True
+
+        try:
+            end = time.time() + 3
+            while not found and time.time() < end:
+                u32.EnumWindows(proc(_cb), 0)
+                if not found:
+                    time.sleep(0.1)
+        finally:
+            try:
+                page.evaluate("t => { document.title = t; }", old)
+            except Exception:
+                pass
+        return found[0] if found else 0
 
     def _click_send(self) -> None:
         deadline = time.time() + 15

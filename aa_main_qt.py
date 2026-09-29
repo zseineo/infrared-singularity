@@ -71,7 +71,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.75"
+APP_VERSION = "2.76"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -2260,7 +2260,33 @@ class MainWindow(QMainWindow):
         if self._auto_window is not None:
             self._auto_window.append_log("──────── 總結 ────────")
             self._auto_window.append_log(summary)
-        QMessageBox.information(self, "自動翻譯完成", summary)
+        self._show_auto_summary(summary)
+
+    def _show_auto_summary(self, summary: str) -> None:
+        """自動翻譯總結視窗：內容可捲動，話數多時「確定」鈕也不會被擠出螢幕。
+
+        原本用 QMessageBox，成功清單一長視窗就超出螢幕、看不到確定鈕。
+        """
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("自動翻譯完成")
+        vl = QVBoxLayout(dlg)
+        box = QPlainTextEdit(summary)
+        box.setReadOnly(True)
+        box.setFont(_ui_font(11))
+        vl.addWidget(box, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        bb.accepted.connect(dlg.accept)
+        bb.button(QDialogButtonBox.StandardButton.Ok).setDefault(True)
+        vl.addWidget(bb)
+        # 高度依內容，最多螢幕可用高度的 75%（超過就捲動）
+        avail = self.screen().availableGeometry()
+        lines = box.document().blockCount()
+        want_h = box.fontMetrics().lineSpacing() * (lines + 2) + 90
+        dlg.resize(min(900, int(avail.width() * 0.8)),
+                   max(220, min(want_h, int(avail.height() * 0.75))))
+        dlg.exec()
 
     # ════════════════════════════════════════════════════════════
     #  Wiki 角色日中對照抓取（非 modal QDialog）

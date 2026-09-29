@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -278,11 +279,17 @@ def _read_url_cache(url: str) -> str | None:
     path = _url_cache_path(url)
     if not os.path.exists(path):
         return None
-    try:
-        with open(path, "r", encoding="utf-8", newline="") as f:
-            text = f.read()
-    except OSError:
-        return None
+    # 另一個執行緒正在 os.replace 換上新檔的那一瞬間，Windows 會拒絕開檔 →
+    # 稍等再試（預覽只讀暫存時，讀不到就會誤報「無法判斷作品名稱」）
+    for attempt in range(5):
+        try:
+            with open(path, "r", encoding="utf-8", newline="") as f:
+                text = f.read()
+            break
+        except OSError:
+            if attempt == 4 or not os.path.exists(path):
+                return None
+            time.sleep(0.05)
     if (chr(13) + chr(13)) in text:
         return None
     return text
@@ -294,14 +301,23 @@ def _write_url_cache(url: str, page_html: str) -> None:
     **`newline=""` 不可省略**：Windows 文字模式會把 LF 轉成 CR LF，來源 HTML
     原有的 CR LF 於是變成 CR CR LF，下次讀回來又還原成兩個 LF＝每行多一個換行
     （詳見 aa_main_qt._write_url_cache 的說明）。
+
+    先寫暫存檔再 `os.replace` 換上（原子替換）：直接開 "w" 會先把檔案截成空的，
+    同時間另一個執行緒（面板的檔名預覽與標題過濾自動帶入會同時讀同一個網址）
+    讀到的就是空的／半份 HTML，解析失敗而顯示「無法判斷作品名稱」。
     """
+    path = _url_cache_path(url)
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
         os.makedirs(_URL_CACHE_DIR, exist_ok=True)
-        with open(_url_cache_path(url), "w", encoding="utf-8",
-                  newline="") as f:
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
             f.write(page_html)
+        os.replace(tmp, path)
     except OSError:
-        pass
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 # ── 流程步驟 ──
@@ -785,6 +801,15 @@ def compute_chapter_filename(
     return _unique_path(out_dir, name_base)
 
 
+_PREVIEW_LOCKS: dict[str, threading.Lock] = {}
+_PREVIEW_LOCKS_GUARD = threading.Lock()
+
+
+def _preview_lock(url: str) -> threading.Lock:
+    with _PREVIEW_LOCKS_GUARD:
+        return _PREVIEW_LOCKS.setdefault(url, threading.Lock())
+
+
 def _preview_fetch_source(
     url: str, base_dir: str, allow_network: bool,
 ) -> tuple[str, str] | None:
@@ -803,11 +828,16 @@ def _preview_fetch_source(
     if page_html is None:
         if not allow_network:
             return None
-        try:
-            page_html = url_fetcher.fetch_url(url)
-        except Exception:
-            return None
-        _write_url_cache(url, page_html)
+        # 同一個網址同時只抓一次：面板的檔名預覽與標題過濾自動帶入會同時要
+        # 同一個網址，後到的等前一個抓完直接讀暫存（少打一次站台）
+        with _preview_lock(url):
+            page_html = _read_url_cache(url)
+            if page_html is None:
+                try:
+                    page_html = url_fetcher.fetch_url(url)
+                except Exception:
+                    return None
+                _write_url_cache(url, page_html)
     try:
         text_content, _nav, page_title = url_fetcher.parse_page_html(
             page_html, url,

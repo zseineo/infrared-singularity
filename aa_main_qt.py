@@ -71,7 +71,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.77"
+APP_VERSION = "2.78"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -2371,12 +2371,21 @@ class MainWindow(QMainWindow):
         「每行寫成 `內容<br>` 加 CR LF」的站台（man001.blog.2nt.com 等），
         解析後就會每行多一個空行——讀網址當下正常、之後吃暫存才出錯，正是
         使用者回報的「勾不讀暫存就正常」。
+
+        先寫暫存檔再 `os.replace` 換上：直接開 'w' 會先截成空檔，同時讀同一個
+        網址的其他執行緒（自動翻譯面板的預覽）會讀到空的／半份 HTML。
         """
+        path = self._url_cache_path(url)
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
         try:
-            with open(self._url_cache_path(url), 'w', encoding='utf-8',
-                      newline='') as f:
+            with open(tmp, 'w', encoding='utf-8', newline='') as f:
                 f.write(page_html)
+            os.replace(tmp, path)
         except OSError:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
             return
         try:
             valid = {self._url_cache_path(h['url'])

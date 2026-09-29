@@ -1836,8 +1836,8 @@ class AutoTranslatePanel(QWidget):
         cv.addWidget(self.cur_title_label)
         v.addWidget(cur_box)
 
-        lists = QHBoxLayout()
-        lists.setSpacing(8)
+        lists = QVBoxLayout()   # 已完成在上、已跳過在下（左右並排時標題太長被切掉）
+        lists.setSpacing(4)
         v.addLayout(lists, 1)
         done_col = QVBoxLayout()
         self.done_head = _head("")

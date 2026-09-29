@@ -71,7 +71,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.82"
+APP_VERSION = "2.83"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -701,6 +701,26 @@ class TranslatePanel(QWidget):
 #  MainWindow
 # ════════════════════════════════════════════════════════════
 
+class _CurrentPageStack(QStackedWidget):
+    """只以「目前這一頁」決定尺寸提示的 QStackedWidget。
+
+    原生 QStackedWidget 的最小尺寸取所有頁面的最大值：開過自動翻譯頁（最小高度
+    最大）之後，每一頁都被撐到那麼高，放到最大的視窗就可能超出螢幕。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.currentChanged.connect(lambda _i: self.updateGeometry())
+
+    def sizeHint(self):
+        w = self.currentWidget()
+        return w.sizeHint() if w is not None else super().sizeHint()
+
+    def minimumSizeHint(self):
+        w = self.currentWidget()
+        return w.minimumSizeHint() if w is not None else super().minimumSizeHint()
+
+
 class MainWindow(QMainWindow):
     """PyQt6 主視窗。QStackedWidget 切換三個面板。"""
 
@@ -852,6 +872,11 @@ class MainWindow(QMainWindow):
         self._saved_glossary_temp_lines = 0
         self._saved_filter_lines = 0
 
+        # 固定視窗最小尺寸：否則版面的最小尺寸會隨換頁改變，而 Windows 上的 Qt 在
+        # 最小尺寸改變時會重設「最大化」視窗的大小——算錯就超出螢幕、底部被工作列蓋住
+        # （切到批次搜尋／自動翻譯再切回來時）。有明確的最小尺寸，版面就不再改它。
+        self.setMinimumSize(800, 480)
+
         # ── 中央 Widget ──
         central = QWidget()
         self.setCentralWidget(central)
@@ -865,7 +890,7 @@ class MainWindow(QMainWindow):
         self._nav_bar.hide()
 
         # ── QStackedWidget ──
-        self.stack = QStackedWidget()
+        self.stack = _CurrentPageStack()
         root.addWidget(self.stack, 1)
         # 自動翻譯狀態條（在導覽列右側）只在自動翻譯面板顯示 → 換頁時重算
         self.stack.currentChanged.connect(lambda _i: self._update_auto_banner())

@@ -58,7 +58,7 @@
 *   **Step 5**: 進入全螢幕或內嵌預覽視窗，在最終文本上進行微調（自動對話框、選區上色、對齊等），完成後點擊儲存匯出為 `.html`。
 
 ## 3. 主要模式 (Application Modes)
-主視窗以 `QStackedWidget` 管理五個面板，由 `MainWindow` 以 `show_translate_panel()` / `show_edit_panel()` / `show_batch_panel()` / `open_url_fetch_qt()` / `show_auto_translate_panel()` 切換：
+主視窗以 `QStackedWidget`（v2.83 起為子類別 `_CurrentPageStack`：`sizeHint`／`minimumSizeHint` 只看目前這一頁，換頁時 `updateGeometry`——原生的取所有頁面最大值，開過自動翻譯頁後每頁都被撐高）管理五個面板；`MainWindow` 另以 `setMinimumSize(800, 480)` 固定視窗最小尺寸，使版面最小尺寸隨換頁改變時不再改動視窗（Windows 上的 Qt 在最小尺寸改變時會重設最大化視窗的大小，算錯就超出螢幕、底部被工作列蓋住）。由 `MainWindow` 以 `show_translate_panel()` / `show_edit_panel()` / `show_batch_panel()` / `open_url_fetch_qt()` / `show_auto_translate_panel()` 切換：
 *   **index 0 — `TranslatePanel`**（翻譯主面板，預設）
 *   **index 1 — `EditWindow`**（HTML 編輯，來自 `aa_edit_qt.py`，內嵌）
 *   **index 2 — `BatchSearchWindow`**（批次搜尋，來自 `aa_batch_search_qt.py`，內嵌）

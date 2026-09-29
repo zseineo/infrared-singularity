@@ -1004,6 +1004,7 @@ def run_auto_translate(
     resume_event=None,
     error_policy: dict | None = None,
     stop_event=None,
+    discard_event=None,
     progress: Callable[[str], None] | None = None,
     on_event: Callable[[str, str, str, str], None] | None = None,
     print_summary: bool = True,
@@ -1063,6 +1064,8 @@ def run_auto_translate(
         為 True 時跑完整份清單。單話抓取失敗時與一般模式相同，中斷整批並設
         pending_url（v2.27 前會跳過該話續跑）。
     stop_event：threading.Event；設定後會在話與話之間（及分段之間）中止。
+    discard_event：threading.Event；GUI「強制停止」時與 stop_event 一起設定——正在翻的
+        這一話不存檔（存檔前檢查），瀏覽器後端等待生成時也立即中斷，盡快收尾關閉。
     progress：進度回呼（單一字串參數）；None 時印到 stdout。
     on_event：結構化進度回呼 ``(kind, url, 標題, 說明)``，供 GUI 的狀態欄使用
         （不必解析 Log 字串）。kind：``current``＝開始處理某話（新的話會送兩次：
@@ -1262,7 +1265,7 @@ def run_auto_translate(
             # 使用 Gem（內建人設）時，瀏覽器模式不送 prompt；否則才附加。
             prepend_prompt=("" if cache.browser_use_gem
                             else cache.gemini_api_system_prompt),
-            stop_event=stop_event,
+            stop_event=stop_event, abort_event=discard_event,
             headless=headless, log=log, debug=dlog,
             input_method=getattr(cache, "gemini_input_method", "fill"))
         open_log = "開啟瀏覽器並登入 Gemini…"
@@ -1573,6 +1576,8 @@ def run_auto_translate(
                 if kw_action in ("stop", "skip"):
                     words = "、".join(f"「{w}」" for w, a, _ in kw_hits if a == kw_action)
                     raise OutputKeywordHit(kw_action, f"譯文出現關鍵字{words}")
+                if discard_event is not None and discard_event.is_set():
+                    raise StopRequested()   # 強制停止：這一話捨棄，不存檔
                 log("  加入翻譯中…" if append_mode else "  替換翻譯中…")
                 result_text = translation_engine.apply_translation(
                     source, extracted, translated, cfg.glossary,

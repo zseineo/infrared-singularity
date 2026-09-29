@@ -29,11 +29,12 @@ from PyQt6.QtGui import (
     QColor, QFont, QGuiApplication, QKeySequence, QPalette, QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QFileDialog, QHBoxLayout, QInputDialog,
+    QApplication, QCheckBox, QFileDialog, QFrame, QHBoxLayout, QInputDialog,
     QLabel, QLineEdit,
     QListWidget, QListWidgetItem,
     QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-    QScrollArea, QSplitter, QStackedWidget, QTextEdit, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTextEdit, QVBoxLayout,
+    QWidget,
 )
 
 from aa_tool.constants import (
@@ -70,7 +71,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.74"
+APP_VERSION = "2.75"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -801,6 +802,10 @@ class MainWindow(QMainWindow):
         self._auto_translate_running: bool = False
         self._auto_stop_event = None  # threading.Event，執行中時設定
         self._auto_resume_event = None  # threading.Event，關鍵字暫停後按「繼續」時設定
+        self._auto_discard_event = None  # threading.Event，強制停止時設定（當前話不存檔）
+        # 每次開始 +1；強制停止也 +1，讓被丟下的背景執行緒之後的回呼全部作廢
+        self._auto_run_id: int = 0
+        self._auto_thread: threading.Thread | None = None
         self._author_only: bool = False
         self._author_name: str = ""
         # 「不讀暫存」（網址讀取面板的開關）：本次執行中**所有**讀取網址的行為
@@ -856,14 +861,11 @@ class MainWindow(QMainWindow):
         root.addWidget(self._nav_bar)
         self._nav_bar.hide()
 
-        # ── 自動翻譯進度橫幅（執行中顯示在所有面板頂部） ──
-        self._auto_banner = self._build_auto_banner()
-        root.addWidget(self._auto_banner)
-        self._auto_banner.hide()
-
         # ── QStackedWidget ──
         self.stack = QStackedWidget()
         root.addWidget(self.stack, 1)
+        # 自動翻譯狀態條（在導覽列右側）只在自動翻譯面板顯示 → 換頁時重算
+        self.stack.currentChanged.connect(lambda _i: self._update_auto_banner())
 
         # 提示訊息改以右上角浮動 toast 顯示（見 show_status）
 
@@ -929,27 +931,30 @@ class MainWindow(QMainWindow):
             self._dark_title_applied = True
 
     def _build_auto_banner(self) -> QWidget:
-        """執行自動翻譯時顯示於頁面頂部的常駐橫幅（含進度與停止鈕）。"""
-        w = QWidget()
-        w.setStyleSheet("background:#d63384;")
-        hl = QHBoxLayout(w)
-        hl.setContentsMargins(12, 6, 10, 6)
-        hl.setSpacing(10)
+        """自動翻譯執行中的狀態條（進度＋繼續／停止／強制停止鈕）。
 
-        icon = QLabel("⚡")
-        icon.setFont(_ui_font(14, bold=True))
-        icon.setStyleSheet("color:white;")
-        hl.addWidget(icon)
+        放在導覽列右側、不另佔一列（原本獨立一列會把面板底部擠到工作列下方），
+        且只在自動翻譯面板顯示（見 _update_auto_banner）。
+        """
+        w = QFrame()
+        w.setObjectName("autoBanner")
+        w.setStyleSheet("#autoBanner { background:#d63384; border-radius:4px; }")
+        hl = QHBoxLayout(w)
+        hl.setContentsMargins(8, 0, 4, 0)
+        hl.setSpacing(6)
 
         self._auto_banner_label = QLabel("自動翻譯進行中…")
-        self._auto_banner_label.setFont(_ui_font(12, bold=True))
-        self._auto_banner_label.setStyleSheet("color:white;")
+        self._auto_banner_label.setFont(_ui_font(11, bold=True))
+        self._auto_banner_label.setStyleSheet("color:white; background:transparent;")
+        # 長訊息直接截掉，不撐寬導覽列；完整內容看 tooltip／Log
+        self._auto_banner_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         hl.addWidget(self._auto_banner_label, 1)
 
         # 譯文關鍵字「暫停」時才出現：按下後接著翻下一話
         btn_resume = _make_btn("▶ 繼續", "#198754", "#146c43",
-                               font=_ui_font(11, bold=True), width=80)
-        btn_resume.setFixedHeight(28)
+                               font=_ui_font(10, bold=True), width=70)
+        btn_resume.setFixedHeight(24)
         btn_resume.setToolTip("譯文出現關鍵字而暫停：確認後按這裡接著翻下一話")
         btn_resume.clicked.connect(self._resume_auto_translate)
         btn_resume.hide()
@@ -957,14 +962,29 @@ class MainWindow(QMainWindow):
         self._auto_banner_resume_btn = btn_resume
 
         btn_stop = _make_btn("■ 停止", "#dc3545", "#b02a37",
-                             font=_ui_font(11, bold=True), width=80)
-        btn_stop.setFixedHeight(28)
-        btn_stop.setToolTip("停止自動翻譯（當前話可能未完成）")
+                             font=_ui_font(10, bold=True), width=70)
+        btn_stop.setFixedHeight(24)
+        btn_stop.setToolTip("停止自動翻譯：等當前動作結束（當前話可能未完成）")
         btn_stop.clicked.connect(self._stop_auto_translate)
         hl.addWidget(btn_stop)
         self._auto_banner_stop_btn = btn_stop
 
+        btn_force = _make_btn("⏏ 強制停止", "#6c1a2c", "#4d1320",
+                              font=_ui_font(10, bold=True), width=90)
+        btn_force.setFixedHeight(24)
+        btn_force.setToolTip(
+            "立即結束自動翻譯：正在翻的這一話直接捨棄（不存檔），\n"
+            "已完成的話不受影響；瀏覽器／連線在背景收尾後自行關閉")
+        btn_force.clicked.connect(self._force_stop_auto_translate)
+        hl.addWidget(btn_force)
+
+        w.setFixedHeight(28)
         return w
+
+    def _update_auto_banner(self) -> None:
+        """狀態條只在「自動翻譯執行中且目前在自動翻譯面板」時顯示。"""
+        self._auto_banner.setVisible(
+            self._auto_translate_running and self.stack.currentIndex() == 4)
 
     def _build_nav_bar(self) -> QWidget:
         w = QWidget()
@@ -1005,7 +1025,11 @@ class MainWindow(QMainWindow):
         self._nav_url_fetch_btn.hide()
         hl.addWidget(self._nav_url_fetch_btn)
 
-        hl.addStretch()
+        hl.addSpacing(12)
+        self._auto_banner = self._build_auto_banner()
+        self._auto_banner.hide()
+        hl.addWidget(self._auto_banner, 1)
+        hl.addStretch()   # 狀態條隱藏時把按鈕推在左邊
         return w
 
     def _nav_back(self) -> None:
@@ -1886,6 +1910,12 @@ class MainWindow(QMainWindow):
         if self._auto_translate_running:
             self.show_status("⚠️ 自動翻譯正在執行中…", "#f39c12")
             return
+        if self._auto_thread is not None and self._auto_thread.is_alive():
+            # 強制停止後被丟下的背景執行緒還在收尾：瀏覽器模式同一個 profile
+            # 不能同時開兩個瀏覽器，等它關掉再開始
+            self.show_status("⏳ 上一次強制停止的背景作業還在收尾（關閉瀏覽器／連線），"
+                             "請稍候幾秒再開始", "#f39c12")
+            return
         # 持久化到 cache（下次打開面板自動帶入）
         # 翻譯方式現於主頁，開始時即以面板選擇為準（不必先按「儲存連線設定」）
         if params.get("backend"):
@@ -1937,17 +1967,20 @@ class MainWindow(QMainWindow):
                                title_filter: str = "") -> None:
         """在背景執行緒跑自動翻譯，進度同步至橫幅、狀態列與面板 Log。"""
         self._auto_translate_running = True
+        self._auto_run_id += 1
+        run_id = self._auto_run_id
         self._auto_stop_event = threading.Event()
         self._auto_resume_event = threading.Event()
+        self._auto_discard_event = threading.Event()
         self._auto_banner_stop_btn.setEnabled(True)
         self._auto_banner_stop_btn.setText("■ 停止")
         self._auto_banner_resume_btn.hide()
         if self._translate_backend == "api":
-            self._auto_banner_label.setText("⚡ 自動翻譯啟動中（API 模式）…")
+            self._set_auto_banner_text("⚡ 自動翻譯啟動中（API 模式）…")
         else:
-            self._auto_banner_label.setText(
+            self._set_auto_banner_text(
                 "⚡ 自動翻譯啟動中（請在彈出的瀏覽器完成登入）…")
-        self._auto_banner.show()
+        self._update_auto_banner()
         if self._auto_window is not None:
             self._auto_window.set_running(True)
             self._auto_window.reset_status()
@@ -1961,38 +1994,41 @@ class MainWindow(QMainWindow):
                 f"max_per_session={max_per_session} ===")
         self.show_status("⏳ 自動翻譯啟動中…", "#17a2b8")
 
+        def _emit(fn) -> None:
+            """回到主執行緒執行；這次執行已被強制停止（run_id 變了）就丟掉。"""
+            def _guarded() -> None:
+                if self._auto_run_id == run_id:
+                    fn()
+            self._invoke_on_main.emit(_guarded)
+
         def _progress(msg: str) -> None:
             def _apply(m=msg) -> None:
-                # 橫幅：單行短訊
-                short = m.strip().replace("\n", " ")
-                if len(short) > 120:
-                    short = short[:117] + "…"
-                if self._auto_banner_label is not None:
-                    self._auto_banner_label.setText(f"⚡ {short}")
+                # 狀態條：單行短訊（寬度不夠時直接截掉）
+                self._set_auto_banner_text(f"⚡ {m.strip()}")
                 # 面板 Log：原文整段
                 if self._auto_window is not None:
                     self._auto_window.append_log(m)
-            self._invoke_on_main.emit(_apply)
+            _emit(_apply)
 
         def _on_pause(msg: str) -> None:
             """譯文關鍵字暫停（背景執行緒呼叫）：橫幅顯示「繼續」鈕並提醒使用者。"""
             def _apply(m=msg) -> None:
-                if self._auto_banner_label is not None:
-                    self._auto_banner_label.setText(f"⏸️ {m}")
+                self._set_auto_banner_text(f"⏸️ {m}")
                 self._auto_banner_resume_btn.show()
                 self.show_status(f"⏸️ {m}", "#f39c12")
                 QApplication.alert(self)  # 工作列閃爍，人不在畫面前也看得到
-            self._invoke_on_main.emit(_apply)
+            _emit(_apply)
 
         def _on_event(kind: str, url: str, title: str, detail: str) -> None:
             """協調器的結構化進度 → 面板右側狀態欄（當前／已完成／已跳過）。"""
             def _apply(a=(kind, url, title, detail)) -> None:
                 if self._auto_window is not None:
                     self._auto_window.on_translate_event(*a)
-            self._invoke_on_main.emit(_apply)
+            _emit(_apply)
 
         stop_event = self._auto_stop_event
         resume_event = self._auto_resume_event
+        discard_event = self._auto_discard_event
 
         def _bg() -> None:
             from aa_auto_translate import run_auto_translate
@@ -2026,6 +2062,7 @@ class MainWindow(QMainWindow):
                     series_folder=series_folder,
                     url_list=url_list,
                     stop_event=stop_event,
+                    discard_event=discard_event,
                     progress=_progress,
                     on_event=_on_event,
                     debug_log=self._auto_translate_debug_log,
@@ -2033,13 +2070,18 @@ class MainWindow(QMainWindow):
                     print_summary=False)  # GUI 端自己印更完整的總結
             except Exception as e:  # noqa: BLE001 — 背景執行緒須吞例外回報 UI
                 from aa_tool.gemini_web import brief_error
-                self._invoke_on_main.emit(
-                    lambda err=e: self._auto_translate_done(None, brief_error(err)))
+                _emit(lambda err=e: self._auto_translate_done(None, brief_error(err)))
                 return
-            self._invoke_on_main.emit(
-                lambda r=result: self._auto_translate_done(r, None))
+            _emit(lambda r=result: self._auto_translate_done(r, None))
 
-        threading.Thread(target=_bg, daemon=True).start()
+        self._auto_thread = threading.Thread(target=_bg, daemon=True)
+        self._auto_thread.start()
+
+    def _set_auto_banner_text(self, text: str) -> None:
+        """狀態條文字：單行；完整內容放 tooltip（標籤寬度不夠時會被截掉）。"""
+        one_line = text.replace("\n", " ")
+        self._auto_banner_label.setText(one_line)
+        self._auto_banner_label.setToolTip(one_line)
 
     def _stop_auto_translate(self) -> None:
         """由橫幅停止鈕觸發；通知背景執行緒結束。"""
@@ -2050,7 +2092,7 @@ class MainWindow(QMainWindow):
         self._auto_banner_resume_btn.hide()
         self._auto_banner_stop_btn.setEnabled(False)
         self._auto_banner_stop_btn.setText("停止中…")
-        self._auto_banner_label.setText("⏹️ 停止指令已送出，等待當前動作結束…")
+        self._set_auto_banner_text("⏹️ 停止指令已送出，等待當前動作結束…（急著結束可按強制停止）")
 
     def _resume_auto_translate(self) -> None:
         """橫幅「▶ 繼續」：譯文關鍵字暫停後，通知背景執行緒接著翻下一話。"""
@@ -2058,17 +2100,61 @@ class MainWindow(QMainWindow):
             return
         self._auto_resume_event.set()
         self._auto_banner_resume_btn.hide()
-        self._auto_banner_label.setText("⚡ 繼續自動翻譯…")
+        self._set_auto_banner_text("⚡ 繼續自動翻譯…")
 
-    def _auto_translate_done(self, result, error: 'str | None') -> None:
+    def _force_stop_auto_translate(self) -> None:
+        """「⏏ 強制停止」：不等當前動作，立刻回到可操作狀態，正在翻的這一話捨棄。
+
+        背景執行緒無法從外部砍掉：這裡設定 stop／discard 事件讓它盡快收尾
+        （discard ＝這一話不存檔；瀏覽器等生成時也會中斷），並把 run_id +1，
+        它之後送回來的進度與總結一律作廢。它關掉瀏覽器前不能開始下一批
+        （見 start_auto_translate_from_panel）。
+        """
+        if not self._auto_translate_running:
+            return
+        ans = QMessageBox.question(
+            self, "強制停止",
+            "立即結束自動翻譯？\n\n"
+            "・正在翻譯的這一話直接捨棄，不存檔\n"
+            "・已完成的話不受影響\n"
+            "・瀏覽器／連線會在背景收尾後自行關閉，關閉前無法開始下一批")
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        if not self._auto_translate_running:
+            return   # 詢問期間已自己結束
+        for ev in (self._auto_discard_event, self._auto_stop_event):
+            if ev is not None:
+                ev.set()
+        self._auto_run_id += 1
+        cur_url = ""
+        if self._auto_window is not None:
+            cur_url = getattr(self._auto_window, "_cur_url", "")
+        self._reset_auto_translate_state()
+        if self._auto_window is not None:
+            self._auto_window.append_log("⏏ 已強制停止：正在翻譯的這一話已捨棄（不存檔）。")
+            if cur_url:
+                # 接續點＝被捨棄的這一話；其他已翻好的話勾選跳過，不會重翻
+                self._auto_window.set_start_url(cur_url)
+                self._auto_window.skip_existing_cb.setChecked(True)
+                self._auto_window.append_log(
+                    "↩ 「起始網址」已帶入被捨棄的那一話，並已勾選「已存在同名檔則跳過」："
+                    + cur_url)
+        self.show_status("⏏ 已強制停止自動翻譯", "#6c757d")
+
+    def _reset_auto_translate_state(self) -> None:
+        """一批結束（正常結束或強制停止）時回到閒置狀態。"""
         self._auto_translate_running = False
         self._auto_stop_event = None
         self._auto_resume_event = None
+        self._auto_discard_event = None
         self._auto_banner_resume_btn.hide()
-        self._auto_banner.hide()
+        self._update_auto_banner()
         if self._auto_window is not None:
             self._auto_window.set_running(False)
             self._auto_window.finish_status()
+
+    def _auto_translate_done(self, result, error: 'str | None') -> None:
+        self._reset_auto_translate_state()
         if error is not None:
             if self._auto_window is not None:
                 self._auto_window.append_log(f"❌ 自動翻譯失敗：{error}")

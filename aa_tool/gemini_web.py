@@ -484,12 +484,15 @@ class GeminiWebSession:
         required_model: str = "",
         prepend_prompt: str = "",
         stop_event=None,
+        abort_event=None,
         log: Callable[[str], None] | None = None,
         debug=None,
         input_method: str = DEFAULT_INPUT_METHOD,
     ) -> None:
         """``debug``：`aa_tool.debug_log.DebugLog`（勾「Debug Log」時由協調器傳入），
-        記錄每一步耗時、頁面健康度、瀏覽器事件與錯誤截圖；None＝不記。"""
+        記錄每一步耗時、頁面健康度、瀏覽器事件與錯誤截圖；None＝不記。
+        ``abort_event``：GUI「強制停止」時設定——等待生成中也立即中止（一般停止要等
+        這一話生成完）。"""
         if not gem_url:
             raise GeminiWebError("未提供 Gem 網址（gem_url）")
         self.gem_url = gem_url
@@ -500,6 +503,7 @@ class GeminiWebSession:
         # 等於把指令放在對話開頭（後續同對話的分段靠 Gemini 自身上下文即可）。
         self.prepend_prompt = (prepend_prompt or "").strip()
         self.stop_event = stop_event  # 由協調器傳入，模型等待時用來中止
+        self.abort_event = abort_event
         # 合併使用者覆寫：覆寫值為「完整候選列表」，整項取代預設。
         self.selectors = dict(DEFAULT_SELECTORS)
         for key, val in (selectors or {}).items():
@@ -1026,6 +1030,11 @@ class GeminiWebSession:
         self._log("⚠️ 重新整理後 60 秒內未出現模型選單（可能被登出）；下次輪詢再試")
         return False
 
+    def _check_abort(self) -> None:
+        """強制停止：不等生成完，直接中止。"""
+        if self.abort_event is not None and self.abort_event.is_set():
+            raise GeminiAborted("使用者強制停止")
+
     def _sleep_with_stop(self, seconds: float) -> None:
         """可被 stop_event 中斷的睡眠（每秒檢查一次）。"""
         end = time.time() + seconds
@@ -1245,6 +1254,7 @@ class GeminiWebSession:
         start_deadline = time.time() + _GEN_NOT_STARTED_TIMEOUT
         started = False
         while time.time() < start_deadline:
+            self._check_abort()
             if self._find("stop") is not None or self._response_count() > prev_count:
                 started = True
                 break
@@ -1261,6 +1271,7 @@ class GeminiWebSession:
         stable = 0
         next_snap = time.time() + _DEBUG_GEN_EVERY
         while time.time() < gen_deadline:
+            self._check_abort()
             t_poll = time.time()
             generating = self._find("stop") is not None
             text = self._latest_response_text()

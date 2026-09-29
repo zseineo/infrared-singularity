@@ -505,6 +505,13 @@ class AutoTranslatePanel(QWidget):
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self._on_stop)
         btn_hl.addWidget(self.btn_stop)
+        self.btn_force_stop = _btn("⏏ 強制停止", "#6c1a2c", "#4d1320", width=100)
+        self.btn_force_stop.setToolTip(
+            "不等當前動作，立即結束自動翻譯：正在翻的這一話直接捨棄（不存檔），"
+            "已完成的話不受影響")
+        self.btn_force_stop.setEnabled(False)
+        self.btn_force_stop.clicked.connect(self._on_force_stop)
+        btn_hl.addWidget(self.btn_force_stop)
         btn_clear = _btn("清空 Log", "#6c757d", "#5a6268", width=80)
         btn_clear.clicked.connect(self._clear_log)
         btn_hl.addWidget(btn_clear)
@@ -1713,6 +1720,9 @@ class AutoTranslatePanel(QWidget):
     def _on_stop(self) -> None:
         self._main._stop_auto_translate()
 
+    def _on_force_stop(self) -> None:
+        self._main._force_stop_auto_translate()
+
     def _clear_log(self) -> None:
         self.log_view.clear()
 
@@ -1878,6 +1888,7 @@ class AutoTranslatePanel(QWidget):
         self._running = running
         self.btn_start.setEnabled(not running)
         self.btn_stop.setEnabled(running)
+        self.btn_force_stop.setEnabled(running)
         # 執行中鎖住設定欄位，避免使用者中途改值造成混亂
         for w in (self.url_edit, self.count_spin, self.until_last,
                   self.title_filter_edit, self.btn_title_from_series,

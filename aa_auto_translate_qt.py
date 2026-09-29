@@ -421,6 +421,33 @@ class AutoTranslatePanel(QWidget):
             b.clicked.connect(lambda _=False, v=value: self._on_backend_clicked(v))
             self._backend_btns[value] = b
             bk_hl.addWidget(b)
+        # 送出方式（只在瀏覽器模式顯示）：某些時段 Gemini 會擋「程式產生的點擊／按鍵」，
+        # 實測只有真實滑鼠點擊不被擋。常需要切換，所以放主頁、用按鈕。
+        self._send_method = "program"
+        self._send_btns: dict[str, QPushButton] = {}
+        self._send_row = QWidget()
+        sd_hl = QHBoxLayout(self._send_row)
+        sd_hl.setContentsMargins(16, 0, 0, 0)
+        sd_hl.setSpacing(6)
+        sd_hl.addWidget(QLabel("送出："))
+        send_tip = (
+            "按送出鈕的方式（只有瀏覽器模式有）：\n"
+            "・程式送出：原本的做法，完全不影響你使用電腦\n"
+            "・滑鼠點擊：用 Windows 的真實滑鼠點擊送出。某些時段 Gemini 會把程式送出的\n"
+            "  訊息一律回「我是語言模型，幫不上忙」，改用這個就正常（實測）。\n"
+            "  每次送出會把瀏覽器叫到最前面、移動游標點一下（約 1～2 秒），點完把游標與原本的\n"
+            "  視窗還原——那一瞬間正在打字或拖曳會被打斷。\n"
+            "  螢幕鎖定、有全螢幕程式擋住等點不到的情況，會自動改用程式送出。")
+        for label, value in (("程式送出", "program"), ("滑鼠點擊", "os_click")):
+            b = QPushButton(label)
+            b.setMinimumWidth(84)
+            b.setFont(_font(11, bold=True))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(send_tip)
+            b.clicked.connect(lambda _=False, v=value: self._on_send_method_clicked(v))
+            self._send_btns[value] = b
+            sd_hl.addWidget(b)
+        bk_hl.addWidget(self._send_row)
         bk_hl.addStretch()
         form.addRow("翻譯方式：", bk_row)
 
@@ -670,21 +697,6 @@ class AutoTranslatePanel(QWidget):
             "快速方式填完都會核對內容，不一致就改用逐字填入。")
         form.addRow("填入方式：", self.input_method_combo)
 
-        # 送出方式：某些時段 Gemini 會擋「程式產生的點擊／按鍵」（實測只有真實滑鼠點擊不被擋）
-        from aa_tool.gemini_web import SEND_METHODS
-        self.send_method_combo = QComboBox()
-        for value, label in SEND_METHODS.items():
-            self.send_method_combo.addItem(label, value)
-        self.send_method_combo.setToolTip(
-            "按送出鈕的方式：\n"
-            "・程式送出：原本的做法，完全不影響你使用電腦\n"
-            "・系統滑鼠點擊：用 Windows 的真實滑鼠點擊送出。某些時段 Gemini 會把程式送出的\n"
-            "  訊息一律回「我是語言模型，幫不上忙」，改用這個就正常（實測）。\n"
-            "  每次送出會把瀏覽器叫到最前面、移動游標點一下（約 1～2 秒），點完把游標與原本的\n"
-            "  視窗還原——那一瞬間正在打字或拖曳會被打斷。\n"
-            "  螢幕鎖定、有全螢幕程式擋住等點不到的情況，會自動改用程式送出。")
-        form.addRow("送出方式：", self.send_method_combo)
-
         # 分隔線：上方為通用／瀏覽器設定，下方為 API 專屬設定
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -902,7 +914,24 @@ class AutoTranslatePanel(QWidget):
         for v, b in self._backend_btns.items():
             b.setStyleSheet(_BACKEND_BTN_SEL if v == self._backend
                             else _BACKEND_BTN_UNSEL)
+        self._send_row.setVisible(self._backend == "browser")  # 送出方式只有瀏覽器模式有
         self._on_backend_changed()
+
+    def _set_send_method(self, value: str) -> None:
+        """切換送出方式並重繪兩顆鈕（選中上色）。"""
+        self._send_method = value if value in self._send_btns else "program"
+        for v, b in self._send_btns.items():
+            b.setStyleSheet(_BACKEND_BTN_SEL if v == self._send_method
+                            else _BACKEND_BTN_UNSEL)
+
+    def _on_send_method_clicked(self, value: str) -> None:
+        """使用者按送出方式鈕：切換並即時寫回主視窗存檔（同翻譯方式鈕）。"""
+        self._set_send_method(value)
+        m = self._main
+        if getattr(m, "_gemini_send_method", "program") == self._send_method:
+            return
+        m._gemini_send_method = self._send_method
+        m.save_cache()
 
     def _on_backend_clicked(self, value: str) -> None:
         """使用者按翻譯方式鈕：切換並即時寫回主視窗存檔（比照輸出資料夾）。
@@ -1057,9 +1086,7 @@ class AutoTranslatePanel(QWidget):
         idx = self.input_method_combo.findData(
             getattr(m, "_gemini_input_method", "fill") or "fill")
         self.input_method_combo.setCurrentIndex(max(0, idx))
-        idx = self.send_method_combo.findData(
-            getattr(m, "_gemini_send_method", "program") or "program")
-        self.send_method_combo.setCurrentIndex(max(0, idx))
+        self._set_send_method(getattr(m, "_gemini_send_method", "program") or "program")
         # 翻譯方式現於主頁，須在開啟面板時就反映已存後端（不必先開連線設定）
         backend = (getattr(m, "_translate_backend", "browser") or "browser")
         self._set_backend(backend)
@@ -1177,7 +1204,6 @@ class AutoTranslatePanel(QWidget):
             "required_model": self.model_combo.currentData(),
             "max_per_session": self.max_session_spin.value(),
             "input_method": self.input_method_combo.currentData(),
-            "send_method": self.send_method_combo.currentData(),
             # 進階設定：只記與預設不同的項目（預設日後調整時，未改過的項目跟著走）
             "error_policy": self._collect_error_policy(),
         }
@@ -1986,7 +2012,7 @@ class AutoTranslatePanel(QWidget):
                   self.title_filter_edit, self.btn_title_from_series,
                   self.title_auto_cb, self.debug_log_cb,
                   self.gem_edit, self.model_combo, self.max_session_spin,
-                  self.input_method_combo, self.send_method_combo,
+                  self.input_method_combo, *self._send_btns.values(),
                   self.doc_title_edit, self.out_edit, self.skip_existing_cb,
                   self.btn_url_list, self.group_by_series_cb,
                   self.mask_words_cb, self.btn_mask_list,

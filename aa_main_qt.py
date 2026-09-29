@@ -71,7 +71,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.80"
+APP_VERSION = "2.81"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -1890,8 +1890,6 @@ class MainWindow(QMainWindow):
                 1, int(params.get("max_per_session") or 3))
         if "input_method" in params:
             self._gemini_input_method = params.get("input_method") or "fill"
-        if "send_method" in params:
-            self._gemini_send_method = params.get("send_method") or "program"
         if "error_policy" in params:
             ep = params.get("error_policy") or {}
             self._auto_translate_error_policy = (

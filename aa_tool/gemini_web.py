@@ -1264,12 +1264,24 @@ class GeminiWebSession:
         orig = wintypes.POINT()
         u32.GetCursorPos(ctypes.byref(orig))
 
+        k32 = ctypes.windll.kernel32
+
         def _activate(h) -> None:
+            # 切前景視窗。**不可用「按一下 Alt」解除前景鎖定**：Chrome 會把焦點移到
+            # 「設定與其他」選單鈕，還原時也會讓使用者原本的程式（VS Code 等）選到選單列。
+            # 改成暫時共用目前前景視窗執行緒的輸入佇列，SetForegroundWindow 就不會被擋。
             if u32.IsIconic(h):
                 u32.ShowWindow(h, 9)                 # SW_RESTORE
-            u32.keybd_event(0x12, 0, 0, 0)          # 按一下 Alt 解除前景鎖定
-            u32.SetForegroundWindow(h)
-            u32.keybd_event(0x12, 0, 2, 0)
+            fg_tid = u32.GetWindowThreadProcessId(u32.GetForegroundWindow(), None)
+            me = k32.GetCurrentThreadId()
+            attached = bool(fg_tid) and fg_tid != me and \
+                bool(u32.AttachThreadInput(me, fg_tid, True))
+            try:
+                u32.SetForegroundWindow(h)
+                u32.BringWindowToTop(h)
+            finally:
+                if attached:
+                    u32.AttachThreadInput(me, fg_tid, False)
 
         try:
             _activate(hwnd)

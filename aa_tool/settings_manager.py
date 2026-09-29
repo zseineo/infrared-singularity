@@ -225,6 +225,10 @@ class AppCache:
     auto_translate_title_auto: bool = False
     # 自動翻譯「產生 Debug Log」：每次執行在 debug_logs/ 寫詳細記錄檔。預設關閉。
     auto_translate_debug_log: bool = False
+    # 自動翻譯面板分隔線位置（拖過就記住）：左右＝[設定區, Log]、上下＝[設定, 進度一覽]。
+    # 空＝用預設比例。
+    auto_translate_split_h: list = field(default_factory=list)
+    auto_translate_split_v: list = field(default_factory=list)
     # auto_translate_error_policy：連線設定「進階設定」——各種錯誤要中斷或重試，
     # {項目: "stop"|"retry"}（項目見 gemini_web.ERROR_POLICY_DEFAULTS）。面板只存
     # 與預設不同的項目；缺的項目用預設（＝v2.40 以前的固定行為）。
@@ -535,6 +539,11 @@ class SettingsManager:
                 'auto_translate_title_auto', cache.auto_translate_title_auto))
             cache.auto_translate_debug_log = bool(data.get(
                 'auto_translate_debug_log', cache.auto_translate_debug_log))
+            for key in ('auto_translate_split_h', 'auto_translate_split_v'):
+                val = data.get(key)
+                if (isinstance(val, list) and len(val) == 2
+                        and all(isinstance(x, int) and x > 0 for x in val)):
+                    setattr(cache, key, val)
             raw_policy = data.get('auto_translate_error_policy', {})
             if isinstance(raw_policy, dict):
                 cache.auto_translate_error_policy = {
@@ -680,6 +689,8 @@ class SettingsManager:
                     cache.auto_translate_loop_idle_rounds,
                 'auto_translate_title_auto': cache.auto_translate_title_auto,
                 'auto_translate_debug_log': cache.auto_translate_debug_log,
+                'auto_translate_split_h': cache.auto_translate_split_h,
+                'auto_translate_split_v': cache.auto_translate_split_v,
                 'auto_translate_group_by_series':
                     cache.auto_translate_group_by_series,
                 'gemini_required_model': cache.gemini_required_model,

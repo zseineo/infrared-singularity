@@ -71,7 +71,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.76"
+APP_VERSION = "2.77"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -784,6 +784,8 @@ class MainWindow(QMainWindow):
         self._auto_translate_loop_idle_rounds: int = 3   # 連續幾輪無進展就停（0＝不限）
         # 標題過濾「讀取網址時自動帶入」作品名（過濾文字本身不持久化）
         self._auto_translate_title_auto: bool = False
+        self._auto_translate_split_h: list = []   # 自動翻譯面板分隔線位置（空＝預設）
+        self._auto_translate_split_v: list = []
         # 自動翻譯「產生 Debug Log」（aa_tool/debug_log.py）
         self._auto_translate_debug_log: bool = False
         self._auto_translate_output_kw_rules: list = []  # [{"word", "action"}, ...]
@@ -2702,6 +2704,8 @@ class MainWindow(QMainWindow):
             auto_translate_loop_idle_rounds=self._auto_translate_loop_idle_rounds,
             auto_translate_title_auto=self._auto_translate_title_auto,
             auto_translate_debug_log=self._auto_translate_debug_log,
+            auto_translate_split_h=list(self._auto_translate_split_h),
+            auto_translate_split_v=list(self._auto_translate_split_v),
             auto_translate_output_kw_rules=list(self._auto_translate_output_kw_rules),
             auto_translate_error_policy=dict(self._auto_translate_error_policy),
             translate_backend=self._translate_backend,
@@ -2845,6 +2849,8 @@ class MainWindow(QMainWindow):
             self._auto_translate_loop_idle_rounds = 3
         self._auto_translate_title_auto = bool(
             getattr(cache, "auto_translate_title_auto", False))
+        self._auto_translate_split_h = list(getattr(cache, "auto_translate_split_h", []) or [])
+        self._auto_translate_split_v = list(getattr(cache, "auto_translate_split_v", []) or [])
         self._auto_translate_debug_log = bool(
             getattr(cache, "auto_translate_debug_log", False))
         self._auto_translate_output_kw_rules = list(

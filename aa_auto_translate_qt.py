@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 
 from PyQt6.QtCore import QEvent, Qt, QTimer
@@ -201,9 +202,13 @@ class AutoTranslatePanel(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
         root.setSpacing(8)
+        # 左 2/3：上＝設定、下＝進度一覽；右 1/3：執行 Log（佔滿整個高度）
+        main_split = QSplitter(Qt.Orientation.Horizontal)
+        main_split.setChildrenCollapsible(False)
+        root.addWidget(main_split, 1)
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.setChildrenCollapsible(False)
-        root.addWidget(splitter, 1)
+        main_split.addWidget(splitter)
 
         # ── 上半：設定 ──
         top = QWidget()
@@ -423,7 +428,7 @@ class AutoTranslatePanel(QWidget):
         loop_row = QWidget()
         loop_hl = QHBoxLayout(loop_row)
         loop_hl.setContentsMargins(0, 0, 0, 0)
-        self.loop_cb = QCheckBox("循環翻譯：重翻跳過的話，直到成功率達")
+        self.loop_cb = QCheckBox("循環翻譯：成功率")
         self.loop_cb.setToolTip(
             "勾選後，這批新的話都跑完時，把過程中因翻譯失敗而跳過的話\n"
             "（疑似被審查、疑似未翻譯、回覆無法使用、檔案過小、譯文關鍵字「跳過」）\n"
@@ -449,7 +454,7 @@ class AutoTranslatePanel(QWidget):
         self.loop_idle_spin.setToolTip(idle_tip)
         self.loop_cb.toggled.connect(self.loop_idle_spin.setEnabled)
         loop_hl.addWidget(self.loop_idle_spin)
-        idle_lbl = QLabel("輪無進展就停（0＝不限）")
+        idle_lbl = QLabel("輪無進展就停")
         idle_lbl.setToolTip(idle_tip)
         loop_hl.addWidget(idle_lbl)
         loop_hl.addStretch()
@@ -537,35 +542,50 @@ class AutoTranslatePanel(QWidget):
 
         splitter.addWidget(top)
 
-        # ── 下半：Log ──
-        bottom = QWidget()
-        bv = QVBoxLayout(bottom)
-        bv.setContentsMargins(0, 6, 0, 0)
-        bv.setSpacing(4)
+        # ── 左下：本批進度一覽（當前／已完成／已跳過），由協調器的 on_event
+        # 結構化事件驅動（MainWindow._start_auto_translate → on_translate_event）。
+        # Log 是逐行流水帳，一長就看不出「翻到哪、哪幾話沒翻」，這裡一眼看完。
+        splitter.addWidget(self._build_status_column())
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([240, 480])
+
+        # ── 右：執行 Log ──
+        log_col = QWidget()
+        lv = QVBoxLayout(log_col)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(4)
+        log_head = QHBoxLayout()
         lbl = QLabel("執行 Log")
         lbl.setFont(_font(12, bold=True))
-        bv.addWidget(lbl)
+        log_head.addWidget(lbl)
+        log_head.addStretch()
+        btn_full_log = QPushButton("⤢ 完整 Log")
+        btn_full_log.setToolTip("另開視窗顯示完整 Log（檔案寫出完整路徑，視窗較寬）")
+        btn_full_log.clicked.connect(self._open_full_log)
+        log_head.addWidget(btn_full_log)
+        lv.addLayout(log_head)
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setFont(QFont("Consolas", 10))
         self.log_view.setStyleSheet(
             "QPlainTextEdit { background:#1e1e1e; color:#dcdcdc;"
             " border:1px solid #3c3c3c; }")
-        # Log 右側：本批進度一覽（當前／已完成／已跳過），由協調器的 on_event
-        # 結構化事件驅動（MainWindow._start_auto_translate → on_translate_event）。
-        # Log 是逐行流水帳，一長就看不出「翻到哪、哪幾話沒翻」，這裡一眼看完。
-        log_split = QSplitter(Qt.Orientation.Horizontal)
-        log_split.addWidget(self.log_view)
-        log_split.addWidget(self._build_status_column())
-        log_split.setStretchFactor(0, 3)
-        log_split.setStretchFactor(1, 2)
-        log_split.setSizes([640, 360])
-        bv.addWidget(log_split, 1)
-        splitter.addWidget(bottom)
-
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([240, 480])
+        lv.addWidget(self.log_view, 1)
+        main_split.addWidget(log_col)
+        main_split.setStretchFactor(0, 2)
+        main_split.setStretchFactor(1, 1)
+        m = self._main
+        main_split.setSizes(getattr(m, "_auto_translate_split_h", None) or [1200, 600])
+        if getattr(m, "_auto_translate_split_v", None):
+            splitter.setSizes(m._auto_translate_split_v)
+        # 拖過分隔線就記住（只在使用者拖曳時觸發，視窗縮放不會）
+        main_split.splitterMoved.connect(
+            lambda *_: self._persist_split("_auto_translate_split_h", main_split))
+        splitter.splitterMoved.connect(
+            lambda *_: self._persist_split("_auto_translate_split_v", splitter))
+        self._log_full: list[str] = []      # 完整 Log（含完整路徑），給「完整 Log」視窗
+        self._full_log_view: QPlainTextEdit | None = None
 
         self._build_conn_panel()
 
@@ -1725,6 +1745,9 @@ class AutoTranslatePanel(QWidget):
 
     def _clear_log(self) -> None:
         self.log_view.clear()
+        self._log_full.clear()
+        if self._full_log_view is not None:
+            self._full_log_view.clear()
 
     # ── 由 MainWindow 主執行緒呼叫 ──
 
@@ -1738,7 +1761,7 @@ class AutoTranslatePanel(QWidget):
         """當前正在翻譯／已完成／已跳過 三區。"""
         col = QWidget()
         v = QVBoxLayout(col)
-        v.setContentsMargins(0, 0, 0, 0)
+        v.setContentsMargins(0, 6, 0, 0)
         v.setSpacing(4)
 
         def _head(text: str) -> QLabel:
@@ -1768,17 +1791,24 @@ class AutoTranslatePanel(QWidget):
         cv.addWidget(self.cur_title_label)
         v.addWidget(cur_box)
 
+        lists = QHBoxLayout()
+        lists.setSpacing(8)
+        v.addLayout(lists, 1)
+        done_col = QVBoxLayout()
         self.done_head = _head("")
-        v.addWidget(self.done_head)
+        done_col.addWidget(self.done_head)
         self.done_list = QListWidget()
         self.done_list.setStyleSheet(self._STATUS_LIST_QSS)
-        v.addWidget(self.done_list, 1)
+        done_col.addWidget(self.done_list, 1)
+        lists.addLayout(done_col, 1)
 
+        skip_col = QVBoxLayout()
         self.skip_head = _head("")
-        v.addWidget(self.skip_head)
+        skip_col.addWidget(self.skip_head)
         self.skip_list = QListWidget()
         self.skip_list.setStyleSheet(self._STATUS_LIST_QSS)
-        v.addWidget(self.skip_list, 1)
+        skip_col.addWidget(self.skip_list, 1)
+        lists.addLayout(skip_col, 1)
 
         self._cur_url = ""
         self._skip_items: dict[str, QListWidgetItem] = {}   # url → 已跳過清單項
@@ -1804,7 +1834,15 @@ class AutoTranslatePanel(QWidget):
 
     @staticmethod
     def _status_name(url: str, title: str) -> str:
-        return title or url
+        """清單顯示名：頁面標題去掉網站名（「站名 | 作品 第N話」取最長的一段）。
+
+        站名放前面的站（やる夫スレ本棚…）一長，窄欄裡話數與標題就被切掉；
+        完整標題仍在 tooltip 的網址旁可查。
+        """
+        if not title:
+            return url
+        parts = [p.strip() for p in re.split(r"\s[|｜]\s", title) if p.strip()]
+        return max(parts, key=len) if parts else title
 
     def on_translate_event(self, kind: str, url: str, title: str,
                            detail: str) -> None:
@@ -1820,10 +1858,11 @@ class AutoTranslatePanel(QWidget):
                 self._update_status_heads()
             return
         name = self._status_name(url, title)
-        tip = f"{url}\n{detail}" if detail else url
+        head = f"{title}\n{url}" if title else url   # tooltip 放完整標題＋網址
+        tip = f"{head}\n{detail}" if detail else head
         if kind == "current":
             self._cur_url = url
-            self._set_cur_title(name, url)
+            self._set_cur_title(name, head)
             return
         if kind == "done":
             # 補翻成功：從「已跳過」移除（它原本是暫時跳過）
@@ -1831,7 +1870,7 @@ class AutoTranslatePanel(QWidget):
             if old is not None:
                 self.skip_list.takeItem(self.skip_list.row(old))
             item = QListWidgetItem(name)
-            item.setToolTip(f"{url}\n已存檔：{detail}" if detail else url)
+            item.setToolTip(f"{head}\n已存檔：{detail}" if detail else head)
             self.done_list.addItem(item)
             self.done_list.scrollToBottom()
         elif kind in ("skipped", "deferred"):
@@ -1879,10 +1918,44 @@ class AutoTranslatePanel(QWidget):
             self._fit_cur_title()
         return super().eventFilter(obj, event)
 
+    # 絕對路徑（C:\…\x.html、E:/…/x.html）→ 只留檔名；Log 欄只有畫面的 1/3 寬
+    _PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\n]*?[\\/]([^\\/\n]+\.html?)")
+
     def append_log(self, msg: str) -> None:
-        self.log_view.appendPlainText(msg)
+        self._log_full.append(msg)
+        self.log_view.appendPlainText(self._PATH_RE.sub(r"\1", msg))
         sb = self.log_view.verticalScrollBar()
         sb.setValue(sb.maximum())
+        if self._full_log_view is not None:
+            self._full_log_view.appendPlainText(msg)
+
+    def _persist_split(self, attr: str, split: QSplitter) -> None:
+        setattr(self._main, attr, list(split.sizes()))
+        self._main.schedule_save()
+
+    def _open_full_log(self) -> None:
+        """「⤢ 完整 Log」：另開非模態視窗，內容含完整路徑，執行中會持續更新。"""
+        if self._full_log_view is not None:
+            win = self._full_log_view.window()
+            win.raise_()
+            win.activateWindow()
+            return
+        from PyQt6.QtWidgets import QDialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle("完整 Log")
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        v = QVBoxLayout(dlg)
+        view = QPlainTextEdit("\n".join(self._log_full))
+        view.setReadOnly(True)
+        view.setFont(QFont("Consolas", 10))
+        view.setStyleSheet(self.log_view.styleSheet())
+        v.addWidget(view)
+        self._full_log_view = view
+        dlg.destroyed.connect(lambda *_: setattr(self, "_full_log_view", None))
+        avail = self.screen().availableGeometry()
+        dlg.resize(int(avail.width() * 0.8), int(avail.height() * 0.8))
+        view.verticalScrollBar().setValue(view.verticalScrollBar().maximum())
+        dlg.show()
 
     def set_running(self, running: bool) -> None:
         self._running = running

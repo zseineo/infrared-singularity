@@ -73,6 +73,7 @@ class SettingsDialog(QWidget):
         pad_right_aa: bool,
         glossary_avoid_aa: bool,
         glossary_kana_fold: bool,
+        fix_translation_ids: bool,
         glossary_skip_extract: bool,
         glossary_auto_persist: bool,
         glossary_translation_only: bool,
@@ -101,6 +102,7 @@ class SettingsDialog(QWidget):
                        glossary_sync_to_batch_quick, korean_mode,
                        experimental_extraction, pad_right_aa,
                        glossary_avoid_aa, glossary_kana_fold,
+                       fix_translation_ids,
                        glossary_skip_extract,
                        glossary_auto_persist,
                        glossary_translation_only, fetch_auto_fill_title,
@@ -116,6 +118,7 @@ class SettingsDialog(QWidget):
                   korean_mode: bool, experimental_extraction: bool,
                   pad_right_aa: bool, glossary_avoid_aa: bool,
                   glossary_kana_fold: bool,
+                  fix_translation_ids: bool,
                   glossary_skip_extract: bool,
                   glossary_auto_persist: bool,
                   glossary_translation_only: bool,
@@ -193,6 +196,23 @@ class SettingsDialog(QWidget):
             "  • 漢字、長音符號 ー、英數等非假名字元維持原樣。\n"
             "影響所有術語套用路徑（替換翻譯、重套術語、自動翻譯等）。")
         root.addWidget(self.glossary_kana_fold_cb)
+
+        self.fix_translation_ids_cb = QCheckBox(
+            "套用翻譯時：嘗試修正譯文的錯誤 ID")
+        self.fix_translation_ids_cb.setFont(_ui_font(12))
+        self.fix_translation_ids_cb.setChecked(fix_translation_ids)
+        self.fix_translation_ids_cb.setToolTip(
+            "AI 偶爾會把 ID 的流水號寫錯（例：原文 564-1，譯文回成 564-4），\n"
+            "這種行原本會因為 ID 對不上而整行不被套用。開啟後，下列條件全部成立時\n"
+            "會把它改回正確的 ID：\n"
+            "  • 原文那一行只有一個 ID。\n"
+            "  • 譯文裡沒有那個正確的 ID（否則是 AI 把一句拆成兩行）。\n"
+            "  • 譯文裡同一行號的錯誤 ID 只有一行。\n"
+            "  • 譯文中前後的行號順序吻合（擋掉其實是行號打錯的情況）。\n"
+            "行號本身寫錯、原文同一行有多個 ID 的情況不處理。\n"
+            "修正後會直接改寫「填入翻譯」的內容並提示修了哪些；自動翻譯則寫在 Log。\n"
+            "影響：替換／加入翻譯、Alt+4 局部重套用、自動翻譯。")
+        root.addWidget(self.fix_translation_ids_cb)
 
         self.glossary_skip_extract_cb = QCheckBox(
             "提取日文時：跳過與術語原文完全相同的字串")
@@ -585,6 +605,7 @@ class SettingsDialog(QWidget):
             'pad_right_aa': self.pad_right_aa_cb.isChecked(),
             'glossary_avoid_aa': self.glossary_avoid_aa_cb.isChecked(),
             'glossary_kana_fold': self.glossary_kana_fold_cb.isChecked(),
+            'fix_translation_ids': self.fix_translation_ids_cb.isChecked(),
             'glossary_skip_extract':
                 self.glossary_skip_extract_cb.isChecked(),
             'glossary_auto_persist':

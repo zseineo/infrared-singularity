@@ -63,6 +63,8 @@ from aa_tool.text_extraction import (
 from aa_tool.translation_engine import (
     parse_glossary,
     apply_translation as _apply_translation,
+    repair_translation_ids as _repair_translation_ids,
+    format_id_fixes as _format_id_fixes,
     decode_glossary_term,
     encode_glossary_term,
 )
@@ -71,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.86"
+APP_VERSION = "2.87"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -760,6 +762,7 @@ class MainWindow(QMainWindow):
         self._pad_right_aa: bool = False
         self._glossary_avoid_aa: bool = False
         self._glossary_kana_fold: bool = False
+        self._fix_translation_ids: bool = False
         self._glossary_skip_extract: bool = False
         self._glossary_auto_persist: bool = False
         self._glossary_translation_only: bool = False
@@ -1220,6 +1223,7 @@ class MainWindow(QMainWindow):
                 pad_right_aa_provider=lambda: self._pad_right_aa,
                 glossary_avoid_aa_provider=lambda: self._glossary_avoid_aa,
                 glossary_kana_fold_provider=lambda: self._glossary_kana_fold,
+                fix_translation_ids_provider=lambda: self._fix_translation_ids,
                 url_for_text_provider=self._find_url_for_text,
                 reload_original_for_file=self.load_original_with_url_fallback,
                 copy_to_replace_provider=lambda: self._editor_copy_to_replace,
@@ -1580,6 +1584,14 @@ class MainWindow(QMainWindow):
             self.show_status(
                 "⚠️ 請確保原始文本、提取結果和翻譯結果都有內容！", "#f39c12")
             return None
+        if self._fix_translation_ids:
+            translated, id_fixes = _repair_translation_ids(extracted, translated)
+            if id_fixes:
+                # 直接改寫「填入翻譯」：畫面、暫存與之後的 Alt+4 局部重套用
+                # 看到的都是修正後的 ID。
+                self._translate_panel.ai_text.setPlainText(translated)
+                self.show_status(
+                    "🔧 " + _format_id_fixes(id_fixes), "#17a2b8", 5000)
         self.save_cache()
         self._record_work_history()
         # 覆蓋率檢查改為「貼入翻譯」即時顯示於填入翻譯區塊右側
@@ -2712,6 +2724,7 @@ class MainWindow(QMainWindow):
             pad_right_aa=self._pad_right_aa,
             glossary_avoid_aa=self._glossary_avoid_aa,
             glossary_kana_fold=self._glossary_kana_fold,
+            fix_translation_ids=self._fix_translation_ids,
             glossary_skip_extract=self._glossary_skip_extract,
             glossary_auto_persist=self._glossary_auto_persist,
             glossary_translation_only=self._glossary_translation_only,
@@ -2833,6 +2846,7 @@ class MainWindow(QMainWindow):
         self._pad_right_aa = bool(cache.pad_right_aa)
         self._glossary_avoid_aa = bool(cache.glossary_avoid_aa)
         self._glossary_kana_fold = bool(cache.glossary_kana_fold)
+        self._fix_translation_ids = bool(cache.fix_translation_ids)
         self._glossary_skip_extract = bool(cache.glossary_skip_extract)
         self._glossary_auto_persist = bool(cache.glossary_auto_persist)
         self._glossary_translation_only = bool(cache.glossary_translation_only)
@@ -3019,6 +3033,7 @@ class MainWindow(QMainWindow):
             pad_right_aa=self._pad_right_aa,
             glossary_avoid_aa=self._glossary_avoid_aa,
             glossary_kana_fold=self._glossary_kana_fold,
+            fix_translation_ids=self._fix_translation_ids,
             glossary_skip_extract=self._glossary_skip_extract,
             glossary_auto_persist=self._glossary_auto_persist,
             glossary_translation_only=self._glossary_translation_only,
@@ -3306,6 +3321,8 @@ class MainWindow(QMainWindow):
             'glossary_avoid_aa', self._glossary_avoid_aa))
         self._glossary_kana_fold = bool(values.get(
             'glossary_kana_fold', self._glossary_kana_fold))
+        self._fix_translation_ids = bool(values.get(
+            'fix_translation_ids', self._fix_translation_ids))
         self._glossary_skip_extract = bool(values.get(
             'glossary_skip_extract', self._glossary_skip_extract))
         self._glossary_auto_persist = bool(values.get(

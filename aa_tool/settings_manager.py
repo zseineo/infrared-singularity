@@ -165,6 +165,9 @@ class AppCache:
     # 套用術語表時，原文 key 的平假名↔片假名互換變體也一併套用（例：術語
     # `ライザ=萊莎` 同時等同 `らいざ=萊莎`）。預設關閉。
     glossary_kana_fold: bool = False
+    # 套用翻譯前，嘗試修正譯文中「流水號寫錯」的 ID（AI 把 564-1 回成 564-4）。
+    # 只在嚴格條件下才改，見 translation_engine.repair_translation_ids。預設關閉。
+    fix_translation_ids: bool = False
     # 提取日文後，若提取出的文字與術語表中某條術語的「原文」完全相同（含空白
     # 一字不差），則從提取結果中剔除——避免把已會被全文替換的術語再列出來翻譯。
     # 影響：主畫面提取、自動翻譯 _extract、單字假名提取 三條路徑。預設關閉。
@@ -468,6 +471,8 @@ class SettingsManager:
                 'glossary_avoid_aa', cache.glossary_avoid_aa))
             cache.glossary_kana_fold = bool(data.get(
                 'glossary_kana_fold', cache.glossary_kana_fold))
+            cache.fix_translation_ids = bool(data.get(
+                'fix_translation_ids', cache.fix_translation_ids))
             cache.glossary_skip_extract = bool(data.get(
                 'glossary_skip_extract', cache.glossary_skip_extract))
             cache.glossary_auto_persist = bool(data.get(
@@ -666,6 +671,7 @@ class SettingsManager:
                 'pad_right_aa': cache.pad_right_aa,
                 'glossary_avoid_aa': cache.glossary_avoid_aa,
                 'glossary_kana_fold': cache.glossary_kana_fold,
+                'fix_translation_ids': cache.fix_translation_ids,
                 'glossary_skip_extract': cache.glossary_skip_extract,
                 'glossary_auto_persist': cache.glossary_auto_persist,
                 'pad_space_count': cache.pad_space_count,

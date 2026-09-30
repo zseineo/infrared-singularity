@@ -602,6 +602,83 @@ def _apply_glossary_to_segment(text: str, sorted_glossary: list) -> str:
     return pattern.sub(repl, text)
 
 
+_ID_HEAD_RE = re.compile(r'^(\d+)-(\d+)$')
+
+
+def repair_translation_ids(
+    extracted: str, translated: str,
+) -> 'tuple[str, list[tuple[str, str]]]':
+    """嘗試修正譯文中「流水號寫錯」的 ID，回傳 (修正後譯文, [(錯誤 ID, 正確 ID), ...])。
+
+    AI 偶爾會把 `564-1` 回成 `564-4`；`apply_translation` 只認得原文有的 ID，
+    這種行會被整行丟掉。此處只在下列條件**全部成立**時才改寫（寧可不修也不修錯）：
+
+    1. 譯文的 ID 不在原文裡，但行號在原文裡，且原文該行號**只有一個** ID。
+    2. 譯文裡沒有那個正確 ID（否則是 AI 把一句拆成兩行，多出來的那行不能改）。
+    3. 譯文裡該行號的錯誤 ID **剛好一行**（兩行以上無法判斷哪個才對）。
+    4. 順序吻合：譯文中前／後最近的「正確 ID」行，行號要分別小於／大於這一行
+       （擋掉「其實是行號打錯」的情況）；前後都沒有正確 ID 可對照時，只有原文
+       本來就只有一個 ID 才修。
+
+    行號以整數比對，所以 `47-1`（少了補零）在符合上述條件時也會修成 `047-1`。
+    行號本身寫錯、原文同一行有多個 ID 的情況一律不處理。
+    """
+    orig_ids: set[str] = set()
+    ids_of_line: dict[int, list[str]] = {}
+    for line in extracted.split('\n'):
+        if '|' not in line:
+            continue
+        _id = line.split('|', 1)[0].strip()
+        m = _ID_HEAD_RE.match(_id)
+        if not m or _id in orig_ids:
+            continue
+        orig_ids.add(_id)
+        ids_of_line.setdefault(int(m.group(1)), []).append(_id)
+
+    lines = translated.split('\n')
+    # (譯文第幾列, ID, 行號, 是否為原文有的 ID)
+    rows: list[tuple[int, str, int, bool]] = []
+    for i, line in enumerate(lines):
+        if '|' not in line:
+            continue
+        _id = line.split('|', 1)[0].strip()
+        m = _ID_HEAD_RE.match(_id)
+        if m:
+            rows.append((i, _id, int(m.group(1)), _id in orig_ids))
+
+    present = {r[1] for r in rows}
+    wrong_count: dict[int, int] = {}
+    for _i, _id, ln, ok in rows:
+        if not ok:
+            wrong_count[ln] = wrong_count.get(ln, 0) + 1
+
+    fixes: list[tuple[str, str]] = []
+    for pos, (i, _id, ln, ok) in enumerate(rows):
+        if ok or wrong_count.get(ln) != 1:
+            continue
+        candidates = ids_of_line.get(ln)
+        if not candidates or len(candidates) != 1 or candidates[0] in present:
+            continue
+        prev_ln = next((r[2] for r in reversed(rows[:pos]) if r[3]), None)
+        next_ln = next((r[2] for r in rows[pos + 1:] if r[3]), None)
+        if prev_ln is None and next_ln is None and len(orig_ids) != 1:
+            continue
+        if (prev_ln is not None and prev_ln >= ln) or (
+                next_ln is not None and next_ln <= ln):
+            continue
+        lines[i] = candidates[0] + '|' + lines[i].split('|', 1)[1]
+        fixes.append((_id, candidates[0]))
+
+    return ('\n'.join(lines) if fixes else translated), fixes
+
+
+def format_id_fixes(fixes: 'list[tuple[str, str]]') -> str:
+    """把 `repair_translation_ids` 的修正清單寫成一行提示（最多列 3 筆）。"""
+    shown = '、'.join(f'{a}→{b}' for a, b in fixes[:3])
+    more = f' 等' if len(fixes) > 3 else ''
+    return f'已修正 {len(fixes)} 個譯文 ID：{shown}{more}'
+
+
 def apply_translation(
     source: str,
     extracted: str,

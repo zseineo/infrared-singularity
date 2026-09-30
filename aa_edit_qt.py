@@ -43,6 +43,7 @@ from aa_tool.text_extraction import extract_text as _extract_text
 from aa_tool.translation_engine import (
     apply_glossary_to_text, apply_reverse_glossary_to_text, apply_translation,
     parse_glossary, decode_glossary_term, expand_glossary_entry,
+    repair_translation_ids, format_id_fixes,
 )
 
 LINE_HEIGHT_PERCENT = 120  # 對應 CSS line-height: 1.2，與瀏覽器顯示一致
@@ -312,6 +313,7 @@ class EditWindow(QMainWindow):
         pad_right_aa_provider=None,  # () -> bool；對應主程式「替換翻譯時偵測右側 AA 圖補空白」設定
         glossary_avoid_aa_provider=None,  # () -> bool；對應主程式「套用術語表時避免套用到 AA 圖」設定
         glossary_kana_fold_provider=None,  # () -> bool；對應主程式「套用術語表時平假名術語也命中片假名寫法」設定
+        fix_translation_ids_provider=None,  # () -> bool；對應主程式「套用翻譯時嘗試修正譯文的錯誤 ID」設定
         url_for_text_provider=None,  # (text: str) -> str | None；以指紋查 url_history 取得對應網址
         reload_original_for_file=None,  # (file_path: str) -> str | None；依指紋查原文暫存
         copy_to_replace_provider=None,  # () -> bool；對應主程式「編輯器複製即填入全文替換原文」設定
@@ -372,6 +374,7 @@ class EditWindow(QMainWindow):
         self._pad_right_aa_provider = pad_right_aa_provider
         self._glossary_avoid_aa_provider = glossary_avoid_aa_provider
         self._glossary_kana_fold_provider = glossary_kana_fold_provider
+        self._fix_translation_ids_provider = fix_translation_ids_provider
         self._url_for_text_provider = url_for_text_provider
         self._reload_original_for_file = reload_original_for_file
         self._copy_to_replace_provider = copy_to_replace_provider
@@ -2740,6 +2743,26 @@ class EditWindow(QMainWindow):
             self._set_status("⚠️ 提取結果或翻譯為空", "#ffc107")
             return
 
+        id_fixes: list[tuple[str, str]] = []
+        fix_ids = False
+        if self._fix_translation_ids_provider is not None:
+            try:
+                fix_ids = bool(self._fix_translation_ids_provider())
+            except Exception:
+                fix_ids = False
+        if fix_ids:
+            new_ai, id_fixes = repair_translation_ids(new_extracted, new_ai)
+            if id_fixes:
+                self._side_ai_full = new_ai
+                # 面板也改成修正後的 ID。不走 _refresh_side_panels_to_visible：
+                # 它會先把面板上（還是錯 ID）的內容合回 _full，把修正蓋掉。
+                if self._side_visible_range is not None:
+                    lo, hi = self._side_visible_range
+                    ai_scroll = self.side_ai.verticalScrollBar().value()
+                    self.side_ai.setPlainText(
+                        self._filter_text_by_line_range(new_ai, lo, hi))
+                    self.side_ai.verticalScrollBar().setValue(ai_scroll)
+
         glossary_str = ""
         if self._glossary_provider is not None:
             try:
@@ -2832,11 +2855,14 @@ class EditWindow(QMainWindow):
         self._side_extracted_baseline = new_extracted
         self._side_ai_baseline = new_ai
 
+        fix_note = f"；🔧 {format_id_fixes(id_fixes)}" if id_fixes else ""
         if affected == 0:
-            self._set_status("ℹ️ 沒有檢出變更，未修改編輯器", "#17a2b8")
+            self._set_status(
+                "ℹ️ 沒有檢出變更，未修改編輯器" + fix_note, "#17a2b8")
         else:
             self._set_status(
-                f"✅ 已重新套用（更新 {affected} 行，其餘維持編輯器現狀）", "#0f0")
+                f"✅ 已重新套用（更新 {affected} 行，其餘維持編輯器現狀）"
+                + fix_note, "#0f0")
 
     # ════════════════════════════════════════════════════════════
     #  返回編輯模式（Alt+1）

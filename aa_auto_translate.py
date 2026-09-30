@@ -208,6 +208,7 @@ class AutoConfig:
     experimental: bool
     pad_right_aa: bool
     glossary_avoid_aa: bool
+    fix_translation_ids: bool
     glossary_skip_extract: bool
     work_title: str
 
@@ -233,6 +234,7 @@ def load_config(base_dir: str) -> AutoConfig:
         experimental=c.experimental_extraction,
         pad_right_aa=c.pad_right_aa,
         glossary_avoid_aa=c.glossary_avoid_aa,
+        fix_translation_ids=c.fix_translation_ids,
         glossary_skip_extract=c.glossary_skip_extract,
         work_title=c.doc_title,
     )
@@ -1609,6 +1611,15 @@ def run_auto_translate(
                     raise OutputKeywordHit(kw_action, f"譯文出現關鍵字{words}")
                 if discard_event is not None and discard_event.is_set():
                     raise StopRequested()   # 強制停止：這一話捨棄，不存檔
+                # 修正流水號寫錯的 ID。放在所有回覆檢查之後：那些檢查要看 AI 的
+                # 原始回覆，修正不該把「回成別段」之類的訊號蓋掉。
+                if cfg.fix_translation_ids:
+                    translated, id_fixes = (
+                        translation_engine.repair_translation_ids(
+                            extracted, translated))
+                    if id_fixes:
+                        log("  🔧 "
+                            + translation_engine.format_id_fixes(id_fixes))
                 log("  加入翻譯中…" if append_mode else "  替換翻譯中…")
                 result_text = translation_engine.apply_translation(
                     source, extracted, translated, cfg.glossary,

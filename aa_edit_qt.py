@@ -318,6 +318,7 @@ class EditWindow(QMainWindow):
         reload_original_for_file=None,  # (file_path: str) -> str | None；依指紋查原文暫存
         copy_to_replace_provider=None,  # () -> bool；對應主程式「編輯器複製即填入全文替換原文」設定
         on_open_file_list=None,  # () -> None；開啟主畫面的「檔案列表」浮層
+        on_next_file=None,  # () -> bool；開啟檔案列表中的下一話，沒有下一話回傳 False
         debug_mode_provider=None,  # () -> bool；對應主程式「Debug 模式」設定
     ) -> None:
         super().__init__()
@@ -379,6 +380,7 @@ class EditWindow(QMainWindow):
         self._reload_original_for_file = reload_original_for_file
         self._copy_to_replace_provider = copy_to_replace_provider
         self._on_open_file_list = on_open_file_list
+        self._on_next_file = on_next_file
         self._debug_mode_provider = debug_mode_provider
 
         # Alt+4 局部重套用：保留 provider 取得的「完整」提取結果與翻譯文字，
@@ -709,8 +711,13 @@ class EditWindow(QMainWindow):
         btn_file_list_top = _make_button(
             "📂 檔案列表", "#0d6efd", "#0b5ed7", width=95)
         btn_file_list_top.setToolTip(
-            "開啟主畫面的「檔案列表」浮層（同資料夾相鄰檔案）")
+            "開啟主畫面的「檔案列表」浮層（同資料夾相鄰檔案）\n"
+            "右鍵：直接開啟下一話")
         btn_file_list_top.clicked.connect(self._open_file_list)
+        btn_file_list_top.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        btn_file_list_top.customContextMenuRequested.connect(
+            lambda _pos: self._open_next_file())
         tb.addWidget(btn_file_list_top)
 
         if self._on_back is not None:
@@ -2359,6 +2366,14 @@ class EditWindow(QMainWindow):
             self._set_status("⚠️ 此模式無法開啟檔案列表", "#ffc107")
             return
         self._on_open_file_list()
+
+    def _open_next_file(self) -> None:
+        """工具列「📂 檔案列表」按鈕右鍵：依檔案列表順序開啟下一話。"""
+        if self._on_next_file is None:
+            self._set_status("⚠️ 此模式無法開啟檔案列表", "#ffc107")
+            return
+        if not self._on_next_file():
+            self._set_status("⚠️ 沒有下一話", "#ffc107")
 
     def _toggle_glossary_side(self) -> None:
         """Alt+5：開關右側「自訂過濾規則／用語集」面板。開啟時從主程式載入最新內容。"""

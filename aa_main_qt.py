@@ -1233,6 +1233,7 @@ class MainWindow(QMainWindow):
                 copy_to_replace_provider=lambda: self._editor_copy_to_replace,
                 debug_mode_provider=lambda: self._debug_mode,
                 on_open_file_list=self.toggle_file_list_panel,
+                on_next_file=self.open_next_file,
             )
             # 替換 placeholder
             self.stack.removeWidget(self._edit_placeholder)
@@ -3262,6 +3263,15 @@ class MainWindow(QMainWindow):
         item = listw.item(self._file_list_current_pos + delta)
         if item is not None:
             self._on_file_list_item_activated(item)
+
+    def open_next_file(self) -> bool:
+        """不開浮層直接開啟下一話（編輯器「📂 檔案列表」鈕右鍵）。沒有下一話回傳 False。"""
+        self._build_file_list_panel()
+        self._refresh_file_list_panel()
+        if not self._file_list_next_btn.isEnabled():
+            return False
+        self._open_adjacent_file(1)
+        return True
 
     def _on_file_list_item_activated(self, item: QListWidgetItem) -> None:
         target = item.data(Qt.ItemDataRole.UserRole)

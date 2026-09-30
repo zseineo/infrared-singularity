@@ -449,7 +449,7 @@ class SettingsDialog(QWidget):
 
         # ── Debug 模式（開發用）──
         self.debug_mode_cb = QCheckBox(
-            "Debug 模式：編輯器右鍵選單顯示「加入漏抓／誤抓／誤嵌」")
+            "Debug 模式：編輯器 F1／右鍵選單可收集漏抓／誤抓／誤嵌")
         self.debug_mode_cb.setFont(_ui_font(12))
         self.debug_mode_cb.setChecked(debug_mode)
         self.debug_mode_cb.setToolTip(
@@ -457,6 +457,7 @@ class SettingsDialog(QWidget):
             "（僅原始碼環境可用）。\n"
             "  • Alt+4 面板：在某一行按右鍵 →「加入誤抓」\n"
             "  • 編輯器主頁面：選取文字後按右鍵 →「加入漏抓」／「加入誤嵌」\n"
+            "  • 編輯器主頁面：選取文字後按 F1 → 自動判斷漏抓／誤抓\n"
             "會一併記錄來源網址、行號與該行原文。")
         root.addWidget(self.debug_mode_cb)
 

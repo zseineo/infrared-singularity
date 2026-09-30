@@ -3036,9 +3036,15 @@ class EditWindow(QMainWindow):
         return (block.text() if block.isValid() else ''), False
 
     def _add_selection_to_failcase_auto(self) -> None:
-        """F1：主編輯區選取 → 自動判斷漏抓／誤抓。非 Debug 模式時不作用。"""
+        """F1：主編輯區選取 → 自動判斷漏抓／誤抓；焦點在 Alt+4 面板時 → 把
+        選取涵蓋的列（無選取則游標所在列）加入誤抓。非 Debug 模式時不作用。"""
         if not self._debug_mode():
             return
+        # Alt+4 面板的列本來就是「已被提取的結果」，只可能是誤抓
+        for side in (self.side_extracted, self.side_ai):
+            if side.hasFocus():
+                self._add_side_rows_as_wrong(side.textCursor())
+                return
         if self._compare_active:
             self._set_status(
                 "⚠️ 比對模式下無法使用；請先回編輯模式（Alt+1）", "#ffc107")

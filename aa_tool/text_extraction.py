@@ -269,6 +269,8 @@ _SPACED_OUT_RE = re.compile(
 # 重複裝飾，於 `_find_kata_sentence` 另要求全形片假名數 ≥5 且相異片假名 ≥3。
 _KATA_SENTENCE_RE = re.compile(
     r'[A-Za-z゠-ヿ々]+(?:　[A-Za-z゠-ヿ々]+)+。?')
+# 片假名整句命中區間的鄰接字元若為平假名／漢字，代表只是混寫句子的中段切片
+_KATA_SENTENCE_NEIGHBOR_RE = re.compile(r'[ぁ-ゟ一-鿿]')
 
 # 數字選項 anchor：數字（可帶範圍 `～`）+ **全形**「：」/「．」分隔。
 # 例：「１：」、「１０：」、「１～３：」、「1．」。
@@ -1079,11 +1081,20 @@ def _find_kata_sentence(line: str) -> list[tuple[str, int, int]]:
     判斷條件（見 `_KATA_SENTENCE_RE` 註解）：≥2 詞、全形片假名數 ≥5、相異片假名
     ≥3，藉「整句全形片假名 + 全形空白分詞」這個 AA 圖罕見特徵與裝飾區隔。
     保留內部空白的理由同 `_find_spaced_out`。
+
+    兩個排除條件（誤抓「これは・・・　マフィンかな？」中段的「・・・　マフィン」）：
+    - 中黑點 `・` 不計入片假名數 — 它落在片假名 Unicode 區段，但「・・・」是省略號
+      變體而非片假名字。
+    - 命中區間前後緊鄰平假名／漢字時不算 — 那只是一般混寫句子的中段切片，不是
+      「整句片假名」；交回一般錨點流程（依全形空白切成前後兩句）。
     """
     out: list[tuple[str, int, int]] = []
     for m in _KATA_SENTENCE_RE.finditer(line):
         raw = m.group(0)
-        kata = [c for c in raw if 0x30A0 <= ord(c) <= 0x30FF]
+        if any(_KATA_SENTENCE_NEIGHBOR_RE.match(ch) for ch in (
+                line[m.start() - 1:m.start()], line[m.end():m.end() + 1])):
+            continue
+        kata = [c for c in raw if 0x30A0 <= ord(c) <= 0x30FF and c != '・']
         if len(kata) >= 5 and len(set(kata)) >= 3:
             out.append((raw, m.start(), m.end()))
     return out

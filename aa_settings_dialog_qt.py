@@ -66,6 +66,7 @@ class SettingsDialog(QWidget):
         embed_font_name: str,
         editor_default_wysiwyg: bool,
         editor_copy_to_replace: bool,
+        debug_mode: bool,
         glossary_sync_to_batch_quick: bool,
         korean_mode: bool,
         experimental_extraction: bool,
@@ -96,7 +97,7 @@ class SettingsDialog(QWidget):
                        fetch_history_count, original_cache_limit,
                        glossary_auto_search, diff_save_mode, embed_font_in_html,
                        embed_font_name, editor_default_wysiwyg,
-                       editor_copy_to_replace,
+                       editor_copy_to_replace, debug_mode,
                        glossary_sync_to_batch_quick, korean_mode,
                        experimental_extraction, pad_right_aa,
                        glossary_avoid_aa, glossary_kana_fold,
@@ -110,7 +111,7 @@ class SettingsDialog(QWidget):
                   fh_count: int, oc_limit: int, glossary_auto_search: bool,
                   diff_save_mode: bool, embed_font_in_html: bool,
                   embed_font_name: str, editor_default_wysiwyg: bool,
-                  editor_copy_to_replace: bool,
+                  editor_copy_to_replace: bool, debug_mode: bool,
                   glossary_sync_to_batch_quick: bool,
                   korean_mode: bool, experimental_extraction: bool,
                   pad_right_aa: bool, glossary_avoid_aa: bool,
@@ -446,6 +447,19 @@ class SettingsDialog(QWidget):
         row4.addStretch()
         root.addLayout(row4)
 
+        # ── Debug 模式（開發用）──
+        self.debug_mode_cb = QCheckBox(
+            "Debug 模式：編輯器右鍵選單顯示「加入漏抓／誤抓／誤嵌」")
+        self.debug_mode_cb.setFont(_ui_font(12))
+        self.debug_mode_cb.setChecked(debug_mode)
+        self.debug_mode_cb.setToolTip(
+            "開發用：收集提取演算法／術語表的失敗案例，寫入 testcase/failcase.txt\n"
+            "（僅原始碼環境可用）。\n"
+            "  • Alt+4 面板：在某一行按右鍵 →「加入誤抓」\n"
+            "  • 編輯器主頁面：選取文字後按右鍵 →「加入漏抓」／「加入誤嵌」\n"
+            "會一併記錄來源網址、行號與該行原文。")
+        root.addWidget(self.debug_mode_cb)
+
         root.addStretch()
 
         # ── 底部按鈕（確定在左、取消在右）──
@@ -561,6 +575,7 @@ class SettingsDialog(QWidget):
                 self.editor_default_wysiwyg_cb.isChecked(),
             'editor_copy_to_replace':
                 self.editor_copy_to_replace_cb.isChecked(),
+            'debug_mode': self.debug_mode_cb.isChecked(),
             'glossary_sync_to_batch_quick':
                 self.glossary_sync_to_batch_quick_cb.isChecked(),
             'korean_mode': self.korean_mode_cb.isChecked(),

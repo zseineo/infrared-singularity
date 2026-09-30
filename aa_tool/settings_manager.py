@@ -135,6 +135,9 @@ class AppCache:
     editor_default_wysiwyg: bool = False
     # 編輯器內按複製（Ctrl+C／右鍵）時，是否自動把複製內容填入全文替換的原文框
     editor_copy_to_replace: bool = False
+    # Debug 模式（開發用）：編輯器右鍵選單顯示「加入漏抓／誤抓／誤嵌」，
+    # 把失敗案例寫入 testcase/failcase.txt。預設關閉。
+    debug_mode: bool = False
     # 編輯器全文替換勾選「存入術語」時，是否同步加入批次搜尋的「快速替換」面板
     glossary_sync_to_batch_quick: bool = False
     # 另存新檔時是否把字型 Base64 內嵌到 <head>（離線手機可正確顯示，
@@ -436,6 +439,8 @@ class SettingsManager:
                 'editor_default_wysiwyg', cache.editor_default_wysiwyg))
             cache.editor_copy_to_replace = bool(data.get(
                 'editor_copy_to_replace', cache.editor_copy_to_replace))
+            cache.debug_mode = bool(data.get(
+                'debug_mode', cache.debug_mode))
             cache.glossary_sync_to_batch_quick = bool(data.get(
                 'glossary_sync_to_batch_quick',
                 cache.glossary_sync_to_batch_quick))
@@ -649,6 +654,7 @@ class SettingsManager:
                 'embed_font_in_html': cache.embed_font_in_html,
                 'editor_default_wysiwyg': cache.editor_default_wysiwyg,
                 'editor_copy_to_replace': cache.editor_copy_to_replace,
+                'debug_mode': cache.debug_mode,
                 'glossary_sync_to_batch_quick':
                     cache.glossary_sync_to_batch_quick,
                 'embed_font_name': cache.embed_font_name,

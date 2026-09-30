@@ -71,7 +71,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.83"
+APP_VERSION = "2.84"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -858,6 +858,7 @@ class MainWindow(QMainWindow):
         self._embed_font_name: str = "monapo"
         self._editor_default_wysiwyg: bool = False
         self._editor_copy_to_replace: bool = False
+        self._debug_mode: bool = False
         self._glossary_sync_to_batch_quick: bool = False
         # 編輯器右側「局部重套用」面板（Alt+4）的持久化狀態
         self._side_panel_width: int = 0
@@ -1222,6 +1223,7 @@ class MainWindow(QMainWindow):
                 url_for_text_provider=self._find_url_for_text,
                 reload_original_for_file=self.load_original_with_url_fallback,
                 copy_to_replace_provider=lambda: self._editor_copy_to_replace,
+                debug_mode_provider=lambda: self._debug_mode,
                 on_open_file_list=self.toggle_file_list_panel,
             )
             # 替換 placeholder
@@ -2700,6 +2702,7 @@ class MainWindow(QMainWindow):
             embed_font_name=self._embed_font_name,
             editor_default_wysiwyg=self._editor_default_wysiwyg,
             editor_copy_to_replace=self._editor_copy_to_replace,
+            debug_mode=self._debug_mode,
             glossary_sync_to_batch_quick=self._glossary_sync_to_batch_quick,
             side_panel_width=self._side_panel_width,
             side_auto_scroll=self._side_auto_scroll,
@@ -2813,6 +2816,7 @@ class MainWindow(QMainWindow):
         self._embed_font_name = str(cache.embed_font_name or "monapo")
         self._editor_default_wysiwyg = bool(cache.editor_default_wysiwyg)
         self._editor_copy_to_replace = bool(cache.editor_copy_to_replace)
+        self._debug_mode = bool(getattr(cache, 'debug_mode', False))
         self._glossary_sync_to_batch_quick = bool(
             cache.glossary_sync_to_batch_quick)
         try:
@@ -3008,6 +3012,7 @@ class MainWindow(QMainWindow):
             embed_font_name=self._embed_font_name,
             editor_default_wysiwyg=self._editor_default_wysiwyg,
             editor_copy_to_replace=self._editor_copy_to_replace,
+            debug_mode=self._debug_mode,
             glossary_sync_to_batch_quick=self._glossary_sync_to_batch_quick,
             korean_mode=self._korean_mode,
             experimental_extraction=self._experimental_extraction,
@@ -3286,6 +3291,8 @@ class MainWindow(QMainWindow):
             'editor_default_wysiwyg', self._editor_default_wysiwyg))
         self._editor_copy_to_replace = bool(values.get(
             'editor_copy_to_replace', self._editor_copy_to_replace))
+        self._debug_mode = bool(values.get(
+            'debug_mode', self._debug_mode))
         self._glossary_sync_to_batch_quick = bool(values.get(
             'glossary_sync_to_batch_quick',
             self._glossary_sync_to_batch_quick))

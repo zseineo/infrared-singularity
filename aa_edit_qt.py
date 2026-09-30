@@ -183,6 +183,9 @@ class CustomTextEdit(QTextEdit):
         # 「複製即填入全文替換原文」用：複製動作（Ctrl+C／右鍵選單）完成後呼叫；
         # 由 owner 設定，None＝停用（如唯讀的原文比對檢視 orig_view 不設）。
         self.copied_callback = None
+        # 右鍵選單擴充：(menu: QMenu) -> None，在標準選單建好後呼叫，由 owner
+        # 視情況追加項目（Debug 模式的「加入漏抓／誤嵌」）；None＝不擴充。
+        self.extra_menu_builder = None
 
     def _fire_copied_callback(self) -> None:
         """複製動作（Ctrl+C 或右鍵選單「複製」）完成後呼叫，交由 owner 處理。"""
@@ -251,6 +254,8 @@ class CustomTextEdit(QTextEdit):
                 if act.shortcut() == copy_seq:
                     act.triggered.connect(
                         lambda checked=False: self._fire_copied_callback())
+        if self.extra_menu_builder is not None:
+            self.extra_menu_builder(menu)
         menu.exec(ev.globalPos())
         menu.deleteLater()
 
@@ -311,6 +316,7 @@ class EditWindow(QMainWindow):
         reload_original_for_file=None,  # (file_path: str) -> str | None；依指紋查原文暫存
         copy_to_replace_provider=None,  # () -> bool；對應主程式「編輯器複製即填入全文替換原文」設定
         on_open_file_list=None,  # () -> None；開啟主畫面的「檔案列表」浮層
+        debug_mode_provider=None,  # () -> bool；對應主程式「Debug 模式」設定
     ) -> None:
         super().__init__()
         self._html_file = html_file
@@ -370,6 +376,7 @@ class EditWindow(QMainWindow):
         self._reload_original_for_file = reload_original_for_file
         self._copy_to_replace_provider = copy_to_replace_provider
         self._on_open_file_list = on_open_file_list
+        self._debug_mode_provider = debug_mode_provider
 
         # Alt+4 局部重套用：保留 provider 取得的「完整」提取結果與翻譯文字，
         # 而 side_extracted / side_ai 只顯示當前編輯器可視範圍對應的行。
@@ -483,6 +490,9 @@ class EditWindow(QMainWindow):
         # （preview_view）兩條複製路徑都掛接；原文比對檢視 orig_view 不掛。
         self.editor.copied_callback = self._on_editor_copy
         self.preview_view.copied_callback = self._on_editor_copy
+        # Debug 模式右鍵選單「加入漏抓／誤嵌」：同樣兩個可編輯 widget 都掛。
+        self.editor.extra_menu_builder = self._add_failcase_menu_actions
+        self.preview_view.extra_menu_builder = self._add_failcase_menu_actions
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self.editor)        # index 0
@@ -2033,6 +2043,12 @@ class EditWindow(QMainWindow):
         self.side_ai.setFont(QFont(self._font_family, self._font_size))
         vl.addWidget(self.side_ai, 1)
 
+        # 右鍵選單：標準選單＋Debug 模式的「加入誤抓」（兩欄皆可，以 ID 對回原文行）
+        for side in (self.side_extracted, self.side_ai):
+            side.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            side.customContextMenuRequested.connect(
+                lambda pos, w=side: self._show_side_context_menu(w, pos))
+
         return w
 
     def _on_side_auto_toggled(self, checked: bool) -> None:
@@ -3134,6 +3150,236 @@ class EditWindow(QMainWindow):
         except OSError as e:
             return False, str(e)
         return True, ''
+
+    # ════════════════════════════════════════════════════════════
+    #  Debug 模式右鍵選單：加入漏抓／誤抓／誤嵌 → testcase/failcase.txt
+    # ════════════════════════════════════════════════════════════
+    # 與 F1 的差異：F1 只記選取文字本身；這裡一律記「該行的日文原文整行」
+    # （extract_text／apply_glossary_to_text 驗證的實際輸入），並以 `#` 註解附上
+    # 來源網址、行號與目標字串，讓 extraction-testcase-maintenance 不必回頭問。
+
+    def _debug_mode(self) -> bool:
+        if self._debug_mode_provider is None:
+            return False
+        try:
+            return bool(self._debug_mode_provider())
+        except Exception:
+            return False
+
+    def _add_failcase_menu_actions(self, menu) -> None:
+        """主編輯區（editor／preview_view）右鍵選單：Debug 模式且有選取時，
+        追加「加入漏抓」「加入誤嵌」。"""
+        if not self._debug_mode():
+            return
+        if not self._active_edit_widget().textCursor().hasSelection():
+            return
+        menu.addSeparator()
+        menu.addAction("加入漏抓（failcase）",
+                       lambda: self._add_selection_as_failcase('漏抓'))
+        menu.addAction("加入誤嵌（failcase）",
+                       lambda: self._add_selection_as_failcase('誤嵌'))
+
+    def _show_side_context_menu(self, widget: QTextEdit, pos: QPoint) -> None:
+        """Alt+4 面板兩欄的右鍵選單：標準選單，Debug 模式時追加「加入誤抓」。
+
+        對象列：有選取時為選取涵蓋的所有列，否則為右鍵點到的那一列。
+        """
+        menu = widget.createStandardContextMenu()
+        if self._debug_mode():
+            cursor = widget.textCursor()
+            if not cursor.hasSelection():
+                cursor = widget.cursorForPosition(pos)
+            menu.addSeparator()
+            menu.addAction("加入誤抓（failcase）",
+                           lambda: self._add_side_rows_as_wrong(cursor))
+        menu.exec(widget.viewport().mapToGlobal(pos))
+        menu.deleteLater()
+
+    def _failcase_source_line(self, line_idx: int) -> 'tuple[str, bool]':
+        """回傳 (0-based 第 line_idx 行的日文原文行, 是否取自原文暫存)。
+
+        提取 ID 的行號、編輯器 block 與原文行三者 1:1 對應（見
+        `_get_visible_line_range`）。無原文暫存時退回編輯器現況行（可能已含譯文）。
+        """
+        if self._original_text is not None:
+            orig_lines = self._original_text.split('\n')
+            if 0 <= line_idx < len(orig_lines):
+                return orig_lines[line_idx], True
+        block = self._active_edit_widget().document().findBlockByNumber(line_idx)
+        return (block.text() if block.isValid() else ''), False
+
+    def _add_selection_as_failcase(self, kind: str) -> None:
+        """主編輯區選取 → failcase 的「漏抓」或「誤嵌」（kind）。
+
+        逐行處理選取範圍，每行一筆，案例行一律是該行的日文原文整行：
+        - 漏抓：註解標出「應抓出」的字串（＝該行被選取的部分）。
+        - 誤嵌：選取的是被術語表嵌進 AA 圖的那一小段；以術語表反查——譯文出現在
+          選取內、原文出現在該行原文的術語（選取仍是日文時改比對原文），寫成
+          案例行下方的 `@術語原文`（可多行）。
+        """
+        target = self._active_edit_widget()
+        cursor = target.textCursor()
+        if not cursor.hasSelection():
+            self._set_status("⚠️ 請先選取文字", "#ffc107")
+            return
+        glossary: dict[str, str] = {}
+        notes: list[str] = []
+        if kind == '誤嵌':
+            if self._glossary_provider is not None:
+                glossary = parse_glossary(
+                    self._glossary_provider() or "",
+                    kana_fold=self._glossary_kana_fold())
+            if not glossary:
+                self._set_status("⚠️ 術語表為空，無法判定誤嵌的術語", "#ffc107")
+                return
+            if not self._glossary_avoid_aa_settings()[0]:
+                notes.append('# ⚠ 記錄當下未開啟「套用術語表時避免套用到 AA 圖」')
+        first = target.document().findBlock(
+            cursor.selectionStart()).blockNumber()
+        pieces = cursor.selectedText().replace(' ', '\n').split('\n')
+        entries: list[tuple[list[str], list[str]]] = []
+        no_term = 0
+        for off, piece in enumerate(pieces):
+            piece = piece.strip()
+            if not piece:
+                continue
+            src, from_orig = self._failcase_source_line(first + off)
+            if not src.strip():
+                continue
+            head = list(notes)
+            if not from_orig:
+                head.append('# ⚠ 無原文暫存，以下為編輯器現況行（可能已含譯文）')
+            if kind == '漏抓':
+                head.append(f'# 第 {first + off + 1} 行｜應抓出：{piece}')
+                entries.append((head, [src]))
+                continue
+            terms = [o for o, r in glossary.items()
+                     if r and r in piece and o in src]
+            if not terms:
+                terms = [o for o in glossary if o in piece and o in src]
+            if not terms:
+                no_term += 1
+                continue
+            terms.sort(key=src.find)
+            head.append(f'# 第 {first + off + 1} 行｜誤嵌處：{piece}')
+            entries.append((head, [src] + ['@' + t for t in terms]))
+        if not entries:
+            self._set_status(
+                "⚠️ 選取內容對不到任何術語（請只選被誤嵌的那一小段）"
+                if no_term else "⚠️ 選取範圍內沒有內容", "#ffc107")
+            return
+        self._write_failcase(kind, entries)
+
+    def _add_side_rows_as_wrong(self, cursor: QTextCursor) -> None:
+        """Alt+4 面板的列（`NNN-N|文字`）→ failcase「誤抓」。
+
+        以 ID 的行號取該行日文原文整行當案例行；不應抓出的字串取「提取結果」
+        同 ID 的日文（從「填入翻譯」欄觸發時也一樣，不記譯文）。同一行的多個
+        ID 併成一筆。
+        """
+        row_re = re.compile(r'^\s*(\d+)-(\d+)\|(.*)$')
+        jp_by_id: dict[str, str] = {}
+        for raw in (self._side_extracted_full,
+                    self.side_extracted.toPlainText()):
+            for ln in raw.split('\n'):
+                m = row_re.match(ln)
+                if m:
+                    jp_by_id[f'{int(m.group(1))}-{m.group(2)}'] = m.group(3)
+        doc = cursor.document()
+        block = doc.findBlock(cursor.selectionStart())
+        last = doc.findBlock(cursor.selectionEnd())
+        # 選取止於下一列列首時，該列不算
+        if (cursor.hasSelection() and last != block
+                and cursor.selectionEnd() == last.position()):
+            last = last.previous()
+        tokens_by_line: dict[int, list[str]] = {}
+        while block.isValid() and block.blockNumber() <= last.blockNumber():
+            m = row_re.match(block.text())
+            if m:
+                rid = f'{int(m.group(1))}-{m.group(2)}'
+                token = jp_by_id.get(rid, m.group(3)).strip()
+                bucket = tokens_by_line.setdefault(int(m.group(1)), [])
+                if token and token not in bucket:
+                    bucket.append(token)
+            block = block.next()
+        entries: list[tuple[list[str], list[str]]] = []
+        for line_no in sorted(tokens_by_line):
+            src, from_orig = self._failcase_source_line(line_no - 1)
+            if not src.strip() or not tokens_by_line[line_no]:
+                continue
+            head = [] if from_orig else [
+                '# ⚠ 無原文暫存，以下為編輯器現況行（可能已含譯文）']
+            head += [f'# 第 {line_no} 行｜不應抓出：{t}'
+                     for t in tokens_by_line[line_no]]
+            entries.append((head, [src]))
+        if not entries:
+            self._set_status("⚠️ 找不到可記錄的列（需為「ID|文字」格式）", "#ffc107")
+            return
+        self._write_failcase('誤抓', entries)
+
+    def _write_failcase(self, section: str,
+                        entries: 'list[tuple[list[str], list[str]]]') -> None:
+        """把 entries（[(註解行, 案例行)]）寫入 testcase/failcase.txt 的 section
+        （'漏抓'／'誤抓'／'誤嵌'）區塊末端，並以 toast 回報。
+
+        本批上方加一行 `# 來源：<url>`（以編輯器全文指紋查得，查不到則省略）。
+        註解行與案例行都已存在於該區塊的項目視為重複、跳過。
+        """
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'testcase', 'failcase.txt')
+        if not os.path.isfile(path):
+            self._set_status(
+                "⚠️ testcase/failcase.txt 不存在（僅原始碼開發環境可用）", "#ffc107")
+            return
+        url = ''
+        if self._url_for_text_provider is not None:
+            try:
+                url = self._url_for_text_provider(
+                    self.editor.toPlainText()) or ''
+            except Exception:
+                url = ''
+        try:
+            # newline=''：保留檔案既有的換行字元（testcase 檔為 LF）
+            with open(path, encoding='utf-8', newline='') as f:
+                content = f.read()
+            nl = '\r\n' if '\r\n' in content else '\n'
+            lines = content.split(nl)
+
+            def is_header(s: str) -> bool:
+                t = s.strip()
+                return t in ('漏抓', '誤抓') or t.startswith('誤嵌')
+
+            h = next((i for i, ln in enumerate(lines) if is_header(ln)
+                      and ln.strip().startswith(section)), -1)
+            if h < 0:
+                self._set_status(
+                    f"⚠️ failcase.txt 缺少「{section}」區塊標題", "#ffc107")
+                return
+            end = next((i for i in range(h + 1, len(lines))
+                        if is_header(lines[i])), len(lines))
+            existing = set(lines[h + 1:end])
+            fresh = [(head, case) for head, case in entries
+                     if not all(ln in existing for ln in head + case)]
+            if not fresh:
+                self._set_status(f"ℹ️ 這些{section}案例已在 failcase 中", "#17a2b8")
+                return
+            block = [f'# 來源：{url}'] if url else []
+            for head, case in fresh:
+                block += head + case
+            ins = h + 1
+            for i in range(h + 1, end):
+                if lines[i].strip():
+                    ins = i + 1
+            lines[ins:ins] = block
+            with open(path, 'w', encoding='utf-8', newline='') as f:
+                f.write(nl.join(lines))
+        except OSError as e:
+            self._set_status(f"⚠️ 寫入 failcase 失敗：{e}", "#ffc107")
+            return
+        tail ="（附來源網址）" if url else "（⚠️ 查無來源網址）"
+        self._set_status(
+            f"✅ 已加入{section} {len(fresh)} 筆到 failcase{tail}", "#0f0")
 
     # ════════════════════════════════════════════════════════════
     #  複製對應網址（以投稿指紋查網址讀取紀錄）

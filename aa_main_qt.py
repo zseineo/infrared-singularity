@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.87"
+APP_VERSION = "2.88"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -933,6 +933,10 @@ class MainWindow(QMainWindow):
         self._file_list_panel: QWidget | None = None
         self._file_list_widget: QListWidget | None = None
         self._file_list_status: QLabel | None = None
+        # header 的「上一話／下一話」鈕，與目前檔案在清單中的列號（-1＝不在清單）
+        self._file_list_prev_btn: QPushButton | None = None
+        self._file_list_next_btn: QPushButton | None = None
+        self._file_list_current_pos: int = -1
         # Popup 點面板外關閉時的時間戳；防止「點工具列鈕時 Popup 先關掉、然後
         # 同一次點擊又把面板重新打開」的閃爍 reopen。
         self._file_list_hide_ts: float = 0.0
@@ -3129,6 +3133,23 @@ class MainWindow(QMainWindow):
         status.setFont(_ui_font(10))
         status.setStyleSheet("color:#adb5bd;")
         header.addWidget(status)
+        # 上一話／下一話：依清單順序開啟目前檔案的前／後一個檔案
+        nav_btns = []
+        for text, delta, tip in (("上一話", -1, "開啟清單中的上一個檔案"),
+                                 ("下一話", 1, "開啟清單中的下一個檔案")):
+            b = QPushButton(text)
+            b.setFont(_ui_font(10))
+            b.setFixedHeight(24)
+            b.setToolTip(tip)
+            b.setStyleSheet(
+                "QPushButton { background:#495057; color:white; border:none;"
+                " border-radius:3px; padding:0 8px; }"
+                "QPushButton:hover { background:#6c757d; }"
+                "QPushButton:disabled { background:#3d4349; color:#6c757d; }")
+            b.clicked.connect(
+                lambda _=False, d=delta: self._open_adjacent_file(d))
+            header.addWidget(b)
+            nav_btns.append(b)
         header.addStretch()
         btn_close = QPushButton("✕")
         btn_close.setFixedSize(24, 24)
@@ -3165,6 +3186,7 @@ class MainWindow(QMainWindow):
         self._file_list_panel = panel
         self._file_list_widget = listw
         self._file_list_status = status
+        self._file_list_prev_btn, self._file_list_next_btn = nav_btns
 
     def _refresh_file_list_panel(self) -> None:
         """依 _last_opened_file 重新填充清單；無檔時顯示提示。"""
@@ -3173,6 +3195,9 @@ class MainWindow(QMainWindow):
         if listw is None:
             return
         listw.clear()
+        self._file_list_current_pos = -1
+        self._file_list_prev_btn.setEnabled(False)
+        self._file_list_next_btn.setEnabled(False)
         path = self._last_opened_file
         if not path or not os.path.isfile(path):
             status.setText("尚無開啟過的檔案")
@@ -3225,6 +3250,18 @@ class MainWindow(QMainWindow):
             listw.scrollToItem(
                 listw.item(current_pos),
                 QListWidget.ScrollHint.PositionAtCenter)
+            self._file_list_current_pos = current_pos
+            self._file_list_prev_btn.setEnabled(current_pos > 0)
+            self._file_list_next_btn.setEnabled(current_pos < len(names) - 1)
+
+    def _open_adjacent_file(self, delta: int) -> None:
+        """「上一話／下一話」：開啟清單中目前檔案的前（-1）／後（+1）一個檔案。"""
+        listw = self._file_list_widget
+        if listw is None or self._file_list_current_pos < 0:
+            return
+        item = listw.item(self._file_list_current_pos + delta)
+        if item is not None:
+            self._on_file_list_item_activated(item)
 
     def _on_file_list_item_activated(self, item: QListWidgetItem) -> None:
         target = item.data(Qt.ItemDataRole.UserRole)
@@ -3270,7 +3307,10 @@ class MainWindow(QMainWindow):
         w, h = central.width(), central.height()
         if w <= 0 or h <= 0 or self._file_list_panel is None:
             return
-        pw = min(380, max(260, w // 3))
+        # header 多了上一話／下一話鈕後，寬度不得小於版面最小寬（否則 Qt 會把
+        # top-level 面板撐寬、右緣超出內容區）
+        pw = max(min(380, max(260, w // 3)),
+                 self._file_list_panel.minimumSizeHint().width())
         ph = min(max(360, h - 32), h - 16)
         x_local = max(8, w - pw - 8)
         top_left = central.mapToGlobal(QPoint(x_local, 8))

@@ -391,6 +391,26 @@ def _is_cjk_char(ch: str) -> bool:
             or ch in '々ー')
 
 
+# 口語詞補充表：對話中高頻、但 IPADIC 詞典不收（janome 判為未知詞或拆成單字元）
+# 的短詞 — 多為「把平假名詞寫成片假名」的口語寫法與俚語。用途：
+# - `_janome_signal`：整段等於表中詞 → 強日文；未知 token 在表中 → 視為已知詞。
+# - `_allows_len2`：右端對話區內的 2 字詞放行（如行尾單獨一句「ヤダ」）。
+# 收錄原則：實測 janome 判不出來（signal ≤ 0）才收；**不收同字重複**
+# （ハハ／ミミ 與 AA 筆畫無法區分）。
+_COLLOQUIAL_WORDS = frozenset((
+    # 指示詞／人稱的片假名寫法
+    'コレ', 'ソレ', 'アレ', 'ドレ', 'ソコ', 'ドコ', 'ナニ', 'ナゼ', 'ダレ',
+    'コイツ', 'ソイツ', 'ヤツ', 'アンタ', 'オマエ', 'テメエ', 'キサマ', 'アタシ',
+    # 感嘆／應答
+    'ヤダ', 'やだ', 'ホラ', 'オイ', 'アラ', 'ネエ', 'ウム', 'フム', 'ホウ', 'ヘエ',
+    'マア', 'サア', 'ナア', 'ヤア', 'オウ', 'ウワ', 'ウヘ', 'ゲッ', 'チッ', 'ケッ',
+    'ムウ',
+    # 俚語／形容詞語幹
+    'ヤバ', 'ヤベ', 'スゴ', 'ウザ', 'ドヤ', 'ガチ', 'ヤメ', 'マテ', 'ヨセ', 'イケ',
+    'ムズ',
+))
+
+
 @lru_cache(maxsize=4096)
 def _janome_signal(core: str) -> int:
     """以形態素解析判定 core 的「日文性」：+2 強日文／-2 強雜訊／0 不確定。
@@ -403,10 +423,14 @@ def _janome_signal(core: str) -> int:
     - ratio ≥0.95 且有 ≥2 字已知實詞 → +2；
       ratio <0.5 **或**最長已知詞僅 1 字（にんり、杙ん汐 型拼湊）→ -2。
     含半形片假名時不判定（janome 解不動，交回其他規則）。
+    口語詞補充表（`_COLLOQUIAL_WORDS`）：整段等於表中詞 → +2；未知 token 在
+    表中 → 視為已知詞。
     """
     tk = _get_janome()
     if tk is None or len(core) < 2:
         return 0
+    if core in _COLLOQUIAL_WORDS:
+        return 2
     if any(ch in _HALFWIDTH_KANA_CHARS for ch in core):
         return 0
     if len(set(core)) <= 1:
@@ -424,7 +448,7 @@ def _janome_signal(core: str) -> int:
             continue
         if not any(_is_cjk_char(c) for c in surf):
             continue  # 純數字/latin token 不計
-        if t.reading != '*':
+        if t.reading != '*' or surf in _COLLOQUIAL_WORDS:
             total += len(surf)
             known += len(surf)
             max_known_len = max(max_known_len, len(surf))
@@ -497,7 +521,19 @@ def _line_block_signal(line: str, symbol_regex: re.Pattern) -> str:
     - 'A'：平假名 ≤1、實體字元 ≥6，且「AA 噪聲字元 ∪ 同字 4 連 run」佔比 ≥ 0.5。
       同字 run 涵蓋 symbol_regex 未收錄的 AA 牆用字（全形 ニ、二、工、■…）。
     - '-'：字太少或訊號不明，交由 `_classify_blocks` 的鄰行填補決定。
+
+    「左 AA 圖＋右對話」混合行：若行有右端對話區（`_dialogue_region`，有寬
+    間隔），且間隔左側有實體內容、噪聲比 ≥0.3，則**只以左側**判定本行訊號。
+    右側對話夠長時會把整行噪聲比稀釋到 <0.3 而被標成 'T'，左側 AA 跟著享有
+    文字區塊特權（半形片假名錨點、+2）→ 誤抓「ｸﾞｯ」「ｰzゃく」這類 AA 內的
+    狀聲字／碎片。右側對話不需要文字區塊特權 — 由對話區的行尾加分保護。
     """
+    reg = _dialogue_region(line)
+    if reg is not None and reg[2]:
+        left = line[:reg[0]]
+        if (sum(1 for ch in left if not ch.isspace()) >= 3
+                and aa_noise_ratio(left, symbol_regex) >= 0.3):
+            line = left
     non_space = 0
     hira = 0
     marked = [False] * len(line)
@@ -638,6 +674,30 @@ def _find_anchors(line: str, in_text_block: bool = False) -> list[tuple[int, int
         # AA 區塊／中性行不啟用 — 半形片假名正是 AA 最大宗噪聲。
         for m in _HALFWIDTH_KANA_RUN3_RE.finditer(line):
             anchors.append((m.start(), m.end()))
+    # 右端對話區的「詞典佐證段」錨點：區內以空白分開的每一段，若上面的錨點
+    # 規則都沒命中（純漢字「対応完了」「非難轟々」、片假名 2 字「ヤダ」、
+    # 片假名＋平假名「ウケる」），只要詞典判定為強日文（含口語詞補充表）就整段
+    # 當錨點。必須有詞典佐證 — AA 右緣的「ニ二ニ」「从乂」同樣是乾淨的合法字元。
+    # 不含假名的段（純漢字）另須「寬間隔左側有內容」（真的是左圖右文）且非框線
+    # 開頭的狀態表列：獨立成行的純漢字標題（「　　○忍術」）與數值格
+    # （「┃[形態]　　討伐」）依政策不抓 — 中文讀者看得懂，或交給術語表。
+    reg = _dialogue_region(line)
+    if reg is not None and reg[2]:
+        kanji_ok = (bool(line[:reg[0]].strip())
+                    and line.lstrip(' 　')[:1] not in _BOX_LEAD_CHARS)
+        for m in re.finditer(r'\S+', line[reg[0]:reg[1]]):
+            s, e = reg[0] + m.start(), reg[0] + m.end()
+            if any(a_s < e and s < a_e for a_s, a_e in anchors):
+                continue
+            # 錨點只取去掉行尾標誌（」）❤ 等）後的本體
+            while s < e and line[s] in _RIGHT_EDGE_CLOSERS:
+                s += 1
+            while e > s and line[e - 1] in _RIGHT_EDGE_CLOSERS:
+                e -= 1
+            seg = line[s:e]
+            if ((kanji_ok or _KANA_LETTER_RE.search(seg))
+                    and _LETTER_RE.search(seg) and _janome_signal(seg) > 0):
+                anchors.append((s, e))
     anchors.sort()
     return anchors
 
@@ -668,7 +728,9 @@ def _expand_boundary(line: str, start: int, end: int,
 
     `block` 為 'text'／'struct' 時額外放行 `_TEXT_BLOCK_EXTRA_CHARS` 與
     半形片假名 — 文字行中的半形片假名是內容（「ﾓﾝｽﾀｰ」「ｹﾞﾌﾝｹﾞﾌﾝ」）
-    而非 AA 噪聲。
+    而非 AA 噪聲。右端對話區（`_dialogue_region`，有寬間隔）內另放行向右的
+    框線破折號 `─━` — 句尾拉長線（「急に何す──」），與文字區塊的
+    「お見事───」一致。
     """
     def ok(ch: str) -> bool:
         if block in ('text', 'struct') and (ch in _TEXT_BLOCK_EXTRA_CHARS
@@ -676,6 +738,7 @@ def _expand_boundary(line: str, start: int, end: int,
             return True
         return _is_valid_char(ch)
 
+    in_region = _in_dialogue_region(line, start, end)
     # 向左
     while start > 0:
         ch = line[start - 1]
@@ -690,7 +753,7 @@ def _expand_boundary(line: str, start: int, end: int,
         ch = line[end]
         if ch in (' ', '　'):
             break
-        if not ok(ch):
+        if not (ok(ch) or (in_region and ch in '─━')):
             break
         end += 1
     return start, end
@@ -1044,7 +1107,20 @@ def _score_candidate(text: str, line: str, start: int, end: int,
         # 「〕Rank4/ヒーターシールド」）max_known_len=0 必被 -2 誤殺。
         # 'text' 仍殺 — 'T' 涵蓋「左 AA＋右對話」混合行，AA 半邊的生僻
         # 漢字串（「奚从杙鈊、」）需要擊殺帶擋下。
-        if _janome_signal(core) < 0:
+        # 兩種情況不殺（詞典的已知盲點，且位置／字形證據已足夠）：
+        # - 多段式右端對話區內的候選：同一區有其他段作伴（「もう！　急に何す」
+        #   「おお、凄いじゃん　１個上だ」），而詞典會因「斷出來全是單字元詞」
+        #   （急/に/何/す、１/個/上/だ）給出強雜訊判定。
+        # - 含 ≥5 連續真平假名且相異 ≥4：擬態語開頭的口語句（「ぎゅってして
+        #   あげるから」）會被整段當成一個未知詞；AA 圖湊不出這種 run。
+        reg = _dialogue_region(line)
+        in_multi_seg_region = (
+            reg is not None and reg[2] and reg[0] <= start and end <= reg[1]
+            and any(ch.isspace() for ch in line[reg[0]:reg[1]]))
+        long_hira = any(len(set(m.group(0))) >= 4
+                        for m in _LONG_HIRA_RUN_RE.finditer(text))
+        if (not in_multi_seg_region and not long_hira
+                and _janome_signal(core) < 0):
             s = t - 1
     return s
 
@@ -1100,6 +1176,27 @@ def _find_kata_sentence(line: str) -> list[tuple[str, int, int]]:
     return out
 
 
+def _allows_len2(text: str, line: str, start: int, end: int) -> bool:
+    """長度 2 的候選是否特別放行（一般候選需 ≥ 3 char）。
+
+    - `_SHORT_UTT_RE` 匹配（假名+句末標點，如「ま！」「あ？」）
+    - `_HIRAGANA_RUN_RE` 匹配（純平假名 run，如「さぁ」「はい」）
+    以下三項**必須位於行尾對話**（`_is_right_edge_dialogue`）— 短碎片只在
+    「左圖右文」的右端才信賴，避免「二つ」「メヘ」在 AA 中段被誤抓：
+    - `_KANJI_HIRA_RE` 匹配（如行尾的「奪う」「私だ」「怖い」）
+    - `_KANJI_END_PUNCT_RE` 匹配（如行尾的「何？」「諸君！」）
+    - 詞典判定為強日文（`_janome_signal` > 0，含口語詞補充表；如行尾的
+      「ヤダ」「了解」「ダメ」）
+    """
+    if _SHORT_UTT_RE.fullmatch(text) or _HIRAGANA_RUN_RE.fullmatch(text):
+        return True
+    if not _is_right_edge_dialogue(line, start, end):
+        return False
+    return bool(_KANJI_HIRA_RE.fullmatch(text)
+                or _KANJI_END_PUNCT_RE.fullmatch(text)
+                or _janome_signal(text) > 0)
+
+
 def _is_strong_short_candidate(text: str) -> bool:
     """短候選（≤ 3 char）是否具備「強日文信號」可獨立成立。
 
@@ -1130,7 +1227,88 @@ def _is_strong_short_candidate(text: str) -> bool:
     return False
 
 
-_RIGHT_EDGE_CLOSERS = set('＞」』）〕]>―‐—–')
+# 行尾標誌：對話框收尾符號、破折號（含框線字 `─━`，常被當句尾拉長線用，如
+# 「急に何す──」），以及句尾裝飾符號（「今度は私❤」）。不視為內容。
+_RIGHT_EDGE_CLOSERS = set('＞」』）〕]>―‐—–─━❤♥♡♪♫')
+# 「實字」：真平假名／真片假名（不含 ・ー 等符號）／漢字。
+_LETTER_RE = re.compile(r'[ぁ-ゖァ-ヺ一-鿿々]')
+_KANA_LETTER_RE = re.compile(r'[ぁ-ゖァ-ヺ]')
+# AA 牆：牆面／框線用字同字連續 ≥3（「イニニニ」「寸ニニニニ」「三三三」
+# 「爻爻爻」）。正常日文不存在這種組合 — 笑聲（ハハハ／ふふふ）與拉長音
+# （あああ／ぉぉぉ）用的是別的字。含此組合的候選整個否決，不看分數、
+# 不受行尾／文字區塊豁免（47 篇實測：含此組合的 28 筆提取全是 AA 碎片）。
+_AA_WALL_RUN_RE = re.compile(r'([ニ二三ミ彡爻从乂工ﾆﾐ])\1\1')
+# 只由 1~2 個英文字母（可帶標點）構成的段：AA 右緣的筆畫字母
+_LONE_LATIN_SEG_RE = re.compile(
+    r'[、,，.．\-]*[A-Za-zＡ-Ｚａ-ｚ]{1,2}[、,，.．\-]*')
+
+
+@lru_cache(maxsize=4096)
+def _dialogue_region(line: str) -> 'tuple[int, int, bool] | None':
+    """行的「右端對話區」[start, end)＋是否有寬間隔；不成立回傳 None。
+
+    典型 AA 排版是「左側 AA 圖、寬空白、右側對話」，而右側對話常是以 1~2 個
+    空白分開的數段（「やだ　見てたい」「対応完了　帰還するぞ」）。舊的行尾判定
+    只認「候選本身在行尾且左側緊鄰 ≥3 空白」— 兩段式對話的前段不在行尾、
+    後段左側只有 1 個空白，兩段都不成立。此函式改以**區域**為單位：
+
+    - 由行尾往左，找到最近的寬間隔（≥3 個連續空白字元，`str.isspace()`）；
+      間隔右側到行尾即對話區。找不到寬間隔 → 整行（去頭尾空白）為對話區，
+      `has_gap=False`（只代表「整行是乾淨文字」，沒有 AA 隔開的位置證據）。
+    - 區首若是單一豎線邊框＋空白（「|　　嫌よ」— 只有左框的對話框），剝掉邊框。
+    - 區內所有非空白字元必須是合法內文字元（`_is_valid_char`）或行尾標誌，
+      且至少含 1 個實字。含任何 AA 噪聲字元（半形片假名、符號）即不成立 —
+      寧可不成立退回既有規則，也不把 AA 右緣誤認成對話。
+    - 區內不可有「只由 1~2 個英文字母構成」的段 — AA 右緣常以單一字母當筆畫
+      （「Ｕ につ」「l.　‐ニニニ‐」「,ニニニ,　i」），對話不會這樣寫。
+    """
+    end = len(line.rstrip())
+    if end == 0:
+        return None
+    start = None
+    run = 0
+    for i in range(end - 1, -1, -1):
+        if line[i].isspace():
+            run += 1
+            if run >= 3:
+                start = i + run
+                break
+        else:
+            run = 0
+    has_gap = start is not None
+    if start is None:
+        start = len(line) - len(line.lstrip())
+    elif (line[start] in _PIPE_MARKERS and start + 1 < end
+          and line[start + 1].isspace()):
+        start += 1
+        while start < end and line[start].isspace():
+            start += 1
+    for ch in line[start:end]:
+        if not (ch.isspace() or _is_valid_char(ch)
+                or ch in _RIGHT_EDGE_CLOSERS):
+            return None
+    segs = line[start:end].split()
+    if any(_LONE_LATIN_SEG_RE.fullmatch(seg) for seg in segs):
+        return None
+    if not _LETTER_RE.search(line[start:end]):
+        return None
+    return start, end, has_gap
+
+
+def _in_dialogue_region(line: str, start: int, end: int,
+                        require_gap: bool = True) -> bool:
+    """候選 [start, end) 是否落在 `_dialogue_region` 內。
+
+    候選的實字若是同一個字重複（「ニニニニ」— AA 牆與笑聲無法區分）不算：
+    這類候選只認 `_is_right_edge_dialogue` 的嚴格行尾判定。
+    """
+    reg = _dialogue_region(line)
+    if reg is None or (require_gap and not reg[2]):
+        return False
+    if not (reg[0] <= start and end <= reg[1]):
+        return False
+    letters = _LETTER_RE.findall(line[start:end])
+    return not (len(letters) >= 2 and len(set(letters)) == 1)
 
 
 def _is_dialogue_box_bounded(line: str, start: int, end: int) -> bool:
@@ -1144,8 +1322,9 @@ def _is_dialogue_box_bounded(line: str, start: int, end: int) -> bool:
     這類對話框內的合法日文 — 候選因鄰近 `│|｜` 邊框會被 `_local_aa_density`
     判定為高 AA 密度而誤殺，此機制把這種「自帶 AA 邊界」情境視為強信號。
     """
+    # 空白判定用 `str.isspace()`：框內常混用窄空白（U+2005／U+2009 等）微調寬度
     i = start - 1
-    while i >= 0 and line[i] in (' ', '　'):
+    while i >= 0 and line[i].isspace():
         i -= 1
     if not (i >= 0 and line[i] in _DIALOGUE_LEFT_MARKERS):
         return False
@@ -1155,7 +1334,7 @@ def _is_dialogue_box_bounded(line: str, start: int, end: int) -> bool:
     if line[i] in _PIPE_MARKERS and i - 1 >= 0 and line[i - 1] == line[i]:
         return False
     j = end
-    while j < len(line) and line[j] in (' ', '　'):
+    while j < len(line) and line[j].isspace():
         j += 1
     if not (j < len(line) and line[j] in _DIALOGUE_RIGHT_MARKERS):
         return False
@@ -1180,17 +1359,20 @@ def _is_right_edge_dialogue(line: str, start: int, end: int) -> bool:
       （如 thin space ` `、nbsp ` `）— 否則這類字元會中斷空白 run
       使右端對話被誤判為非右端（例「…{,　　　　　　 あ、みっけ」漏抓）。
     """
+    # 以上為「候選自身」的嚴格判定；不成立時再看候選是否落在有寬間隔的
+    # 「右端對話區」（`_dialogue_region`）內 — 涵蓋以 1~2 個空白分段的多段對話。
     rest = line[end:].rstrip()
     while rest and rest[-1] in _RIGHT_EDGE_CLOSERS:
         rest = rest[:-1].rstrip()
-    if rest != '':
-        return False
-    space_count = 0
-    i = start - 1
-    while i >= 0 and line[i].isspace():
-        space_count += 1
-        i -= 1
-    return space_count >= 3
+    if rest == '':
+        space_count = 0
+        i = start - 1
+        while i >= 0 and line[i].isspace():
+            space_count += 1
+            i -= 1
+        if space_count >= 3:
+            return True
+    return _in_dialogue_region(line, start, end)
 
 
 def _in_bracket_region(line: str, start: int, end: int) -> bool:
@@ -1266,25 +1448,14 @@ def _extract_experimental_line(
                and not (0x30A0 <= ord(text[-2]) <= 0x30FF)):
             text = text[:-1]
             e -= 1
-        # 一般候選需 ≥ 3 char。長度 2 的特殊放行：
-        # - `_SHORT_UTT_RE` 匹配（假名+句末標點，如「ま！」「あ？」）
-        # - `_HIRAGANA_RUN_RE` 匹配（純平假名 run，如「さぁ」「はい」）
-        # - `_KANJI_HIRA_RE` 匹配 **且** 位於行尾（如行尾的「奪う」「私だ」）
-        #   ↑ 必須行尾：避免「二つ」「メヘ」等漢字+假名片段在 AA 中段被誤抓
+        # 一般候選需 ≥ 3 char；長度 2 的特殊放行見 `_allows_len2`。
         # 注意：通過 min_len 不等於最終保留，後續的 score 過濾與孤立過濾還會
         # 進一步把可疑短候選擋下。
-        # - `_KANJI_END_PUNCT_RE` 匹配 **且** 位於行尾（如行尾的「何？」「諸君！」）
-        #   ↑ 必須行尾：純漢字+標點短碎片只在「左圖右文」右端才信賴
-        is_short_utt = bool(_SHORT_UTT_RE.fullmatch(text))
-        is_pure_hira = bool(_HIRAGANA_RUN_RE.fullmatch(text))
-        is_kanji_hira = bool(_KANJI_HIRA_RE.fullmatch(text))
-        is_kanji_end = bool(_KANJI_END_PUNCT_RE.fullmatch(text))
-        is_re = _is_right_edge_dialogue(line, s, e)
-        allow_short = (is_short_utt or is_pure_hira
-                       or (is_kanji_hira and is_re)
-                       or (is_kanji_end and is_re))
-        min_len = 2 if allow_short else 3
+        min_len = 2 if _allows_len2(text, line, s, e) else 3
         if len(text) < min_len:
+            continue
+        # AA 牆硬否決（不進落選收集 — 名牌救援不該把牆救回來）
+        if _AA_WALL_RUN_RE.search(text):
             continue
         if invalid_regex.match(text):
             continue
@@ -1308,6 +1479,10 @@ def _extract_experimental_line(
     #     「／／／ ｨへ、ヾ　 ｀＞、」中的「へ、」因孤立而剔除。
     # 文字區塊內不套用孤立過濾：段落／狀態表行的短候選（「アリス」「くさ」）
     # 本就可獨立成立，「同行長伴隨」的信賴指標只在 AA 混雜脈絡下才需要。
+    # 整行都是乾淨文字（無寬間隔的對話區）的短候選，若詞典判定為強日文（整行
+    # 只有一句「困るな」「翌朝」）或帶句末標點（旁白「朝。」「はい。」）同樣保留
+    # — 該行沒有任何 AA 噪聲字元，「AA 混雜脈絡」的前提不成立。需要這層佐證：
+    # 整行只有「して」「へへ」「ーへ、」的仍是 AA 碎片行。
     has_long_companion = any(len(t) >= 5 for t, _, _ in out)
     if not has_long_companion and block not in ('text', 'struct'):
         kept = []
@@ -1315,6 +1490,9 @@ def _extract_experimental_line(
             if (len(t) >= 4
                     or _is_strong_short_candidate(t)
                     or _is_right_edge_dialogue(line, s, e)
+                    or (_in_dialogue_region(line, s, e, require_gap=False)
+                        and (_janome_signal(t) > 0
+                             or any(ch in t for ch in '。！？…')))
                     or _is_dialogue_box_bounded(line, s, e)):
                 kept.append((t, s, e))
             elif rejected_sink is not None:
@@ -1548,15 +1726,9 @@ def extract_text(
                 text = _DICE_NOTATION_FW_RE.sub(r'\1:\2', raw_text)
                 text = _postprocess_text(text, korean_mode=False,
                                           experimental=True)
-                # 短句允許長度 2 的條件：見 `_extract_experimental_line` 內註解。
+                # 短句允許長度 2 的條件：見 `_allows_len2`。
                 # 此處走 postprocess 之後再過一次 min_len 防剝離後過短。
-                is_re_post = _is_right_edge_dialogue(line, cand_s, _e)
-                allow_short = (_SHORT_UTT_RE.fullmatch(text)
-                               or _HIRAGANA_RUN_RE.fullmatch(text)
-                               or (_KANJI_HIRA_RE.fullmatch(text)
-                                   and is_re_post)
-                               or (_KANJI_END_PUNCT_RE.fullmatch(text)
-                                   and is_re_post))
+                allow_short = _allows_len2(text, line, cand_s, _e)
                 min_len = 2 if allow_short else 3
                 if len(text) < min_len:
                     continue
@@ -1769,20 +1941,22 @@ def analyze_extraction(
                     continue
                 t = raw.strip()
                 # 與 _extract_experimental_line 一致的「長度 2 特殊放行」
-                is_re = _is_right_edge_dialogue(proc_line, s, e)
-                allow_short = (bool(_SHORT_UTT_RE.fullmatch(t))
-                               or bool(_HIRAGANA_RUN_RE.fullmatch(t))
-                               or (bool(_KANJI_HIRA_RE.fullmatch(t)) and is_re)
-                               or (bool(_KANJI_END_PUNCT_RE.fullmatch(t)) and is_re))
+                allow_short = _allows_len2(t, proc_line, s, e)
                 min_len = 2 if allow_short else 3
                 if len(t) < min_len:
                     report.append(
                         f"    -> ❌ 剔除：長度 {len(t)} < {min_len}"
                         f"（allow_short={allow_short}）。")
                     continue
+                if _AA_WALL_RUN_RE.search(t):
+                    report.append(
+                        "    -> ❌ 剔除：含 AA 牆（牆面用字同字連續 ≥3），硬否決。")
+                    continue
                 if invalid_regex.match(t):
                     report.append("    -> ❌ 剔除：全句符合 invalid_regex。")
                     continue
+                if _is_right_edge_dialogue(proc_line, s, e):
+                    report.append("    [位置] 行尾對話（嚴格行尾或右端對話區內）")
                 density = _local_aa_density(
                     proc_line, s, e, symbol_regex, 8)
                 trans = _class_transitions(t)
@@ -1833,12 +2007,7 @@ def analyze_extraction(
                 report.append(f"\n  >> '{raw_text}' (pos {cand_s}-{cand_e})")
                 if original != text:
                     report.append(f"    [後處理] '{original}' => '{text}'")
-                is_re_post = _is_right_edge_dialogue(line, cand_s, cand_e)
-                allow_short = (_SHORT_UTT_RE.fullmatch(text)
-                               or _HIRAGANA_RUN_RE.fullmatch(text)
-                               or (_KANJI_HIRA_RE.fullmatch(text) and is_re_post)
-                               or (_KANJI_END_PUNCT_RE.fullmatch(text)
-                                   and is_re_post))
+                allow_short = _allows_len2(text, line, cand_s, cand_e)
                 min_len = 2 if allow_short else 3
                 if len(text) < min_len:
                     report.append(

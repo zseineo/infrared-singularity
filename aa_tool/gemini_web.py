@@ -325,10 +325,7 @@ DEFAULT_INPUT_METHOD = "fill"
 # （人手或 Windows 系統滑鼠）就正常。PostMessage 送按鍵／點擊也一樣被擋或送不出。
 SEND_METHODS: dict[str, str] = {
     "program": "程式送出（原本做法，不影響滑鼠）",
-    "os_click": "系統滑鼠點擊（可避開部分時段被擋；每次送出借用滑鼠約 1 秒）",
-    # 實驗（v2.92）：驗證「頁面被真實滑鼠點過一次後，程式送出就不會被擋」的假設。
-    # 每個頁面（開新對話／重新整理）第一次送出用系統滑鼠點擊，之後同一頁改用程式送出。
-    "os_click_once": "點一次（實驗）：每個新對話第一次用滑鼠點擊，之後程式送出",
+    "os_click": "系統滑鼠點擊（可避開部分時段被擋；每次送出借用滑鼠一瞬間）",
 }
 DEFAULT_SEND_METHOD = "program"
 
@@ -465,7 +462,7 @@ def _send_mouse_click_at(x: int, y: int) -> bool:
 
     if not _batch(0x0002):            # LEFTDOWN
         return False
-    time.sleep(0.08)
+    time.sleep(0.05)
     if not _batch(0x0004):            # LEFTUP：按下已送出，放開一定要送到
         u32.mouse_event(0x0004, 0, 0, 0, 0)
     return True
@@ -595,8 +592,9 @@ class GeminiWebSession:
         self._page = None
         self._send_count = 0      # 當前 session 已送出次數
         self._session_index = 0   # session 序號（每開新對話 +1）
-        # 目前這個頁面是否已用系統滑鼠點過送出（os_click_once 用；頁面重新載入時歸零）
-        self._os_clicked_in_page = False
+        # 系統滑鼠點擊：上次校正出的「估算座標 → 實際座標」修正量（實體像素）。
+        # 視窗沒移動時下次直接套用，第一跳就對準，游標停在送出鈕上的時間最短。
+        self._os_click_adjust = (0.0, 0.0)
 
     # ── 生命週期 ──
 
@@ -891,7 +889,6 @@ class GeminiWebSession:
         for attempt in range(1, _GEM_OPEN_RETRIES + 1):
             with self._timed(f"開啟 Gem（第 {attempt} 次）"):
                 self._page.goto(self.gem_url, wait_until="domcontentloaded")
-            self._os_clicked_in_page = False
             # 不是 Gem 網址（沒有 /gem/<id>）就無從檢查；登入頁交給 _ensure_logged_in
             t0 = time.time()
             ok = not want or self._on_login_page() or self._stays_on_gem(want)
@@ -1094,7 +1091,6 @@ class GeminiWebSession:
         self._log("🔄 重新整理頁面，檢查額度是否已恢復…")
         try:
             self._page.reload(wait_until="domcontentloaded")
-            self._os_clicked_in_page = False
         except Exception as e:  # noqa: BLE001 — 任何重整失敗都等下一輪再試
             self._log(f"⚠️ 重新整理頁面失敗：{brief_error(e)}；下次輪詢再試")
             return False
@@ -1283,20 +1279,10 @@ class GeminiWebSession:
         return loc
 
     def _send(self) -> None:
-        """依 ``send_method`` 按送出；系統滑鼠點擊不成功就退回程式送出。
-
-        os_click_once：這個頁面已用系統滑鼠點過一次 → 直接程式送出。
-        """
-        if self.send_method == "os_click_once" and self._os_clicked_in_page:
-            self._log("  （這個對話已用滑鼠點過，這次改用程式送出〔實驗〕）")
-            self._click_send()
-            return
-        if self.send_method in ("os_click", "os_click_once"):
+        """依 ``send_method`` 按送出；系統滑鼠點擊不成功就退回程式送出。"""
+        if self.send_method == "os_click":
             try:
                 if self._os_click_send():
-                    self._os_clicked_in_page = True
-                    if self.send_method == "os_click_once":
-                        self._log("  （這個對話第一次送出：已用滑鼠點擊〔實驗〕）")
                     return
             except Exception as e:  # noqa: BLE001 — 失敗一律退回程式送出
                 self._dbg(f"系統滑鼠點擊例外：{brief_error(e)}")
@@ -1307,9 +1293,10 @@ class GeminiWebSession:
         """用 Windows 系統滑鼠點送出鈕（與人手點擊相同的輸入事件）。
 
         步驟：等送出鈕可按 → 暫時把分頁標題改成唯一字串找出瀏覽器視窗 → 叫到最前面
-        → 游標直接跳到估算位置 → 以頁面收到的 mousemove 座標校正（DPI 縮放、
-        視窗邊框都不必自己算準；使用者同時動了滑鼠的那次不採用）→ SendInput 在
-        絕對座標按下放開（使用者的移動插不進去）→ 還原游標位置與原本的前景視窗。
+        → 游標直接跳到估算位置（套用上次的修正量）→ 以頁面收到的 mousemove 座標校正
+        （DPI 縮放、視窗邊框都不必自己算準；使用者同時動了滑鼠的那次不採用）→ SendInput
+        在絕對座標按下放開（使用者的移動插不進去）→ 立刻還原游標位置與原本的前景視窗。
+        游標只在「跳過去～點完」這段離開原位（實測約 0.1 秒）。
         對不準送出鈕就不點、回 False（交給呼叫端退回程式送出）。非 Windows 回 False。
         """
         if os.name != "nt":
@@ -1361,7 +1348,7 @@ class GeminiWebSession:
         try:
             _activate(hwnd)
             page.bring_to_front()
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(200)   # 視窗還沒到前面時頁面收不到 mousemove，下面會重試
             page.evaluate("""() => { if (!window.__aaLm) { window.__aaLm = 1;
                 addEventListener('mousemove', e => { window.__aaMove = [e.clientX, e.clientY]; }, true); }
                 window.__aaMove = null; }""")
@@ -1373,17 +1360,22 @@ class GeminiWebSession:
                 oh: outerHeight, iw: innerWidth, ih: innerHeight, dpr: devicePixelRatio})""")
             dpr = geo["dpr"] or 1
             border = (geo["ow"] - geo["iw"]) / 2
-            px = (geo["sx"] + border + tx) * dpr
-            py = (geo["sy"] + geo["oh"] - geo["ih"] - border + ty) * dpr
-            # 游標直接跳到目標（v2.92 起不再分段移動：對位只需要頁面收到一次 mousemove）
+            ex0 = (geo["sx"] + border + tx) * dpr
+            ey0 = (geo["sy"] + geo["oh"] - geo["ih"] - border + ty) * dpr
+            px, py = ex0 + self._os_click_adjust[0], ey0 + self._os_click_adjust[1]
+            # 游標直接跳到目標（v2.92 起不再分段移動：對位只需要頁面收到一次 mousemove）。
+            # 先跳到旁邊 1 px 再跳回，確保游標本來就在目標上時頁面也收得到 mousemove。
             hit = False
             got = None
             for _ in range(6):
+                page.evaluate("window.__aaMove = null")
                 u32.SetCursorPos(int(px) + 1, int(py))
-                time.sleep(0.04)
                 u32.SetCursorPos(int(px), int(py))
-                page.wait_for_timeout(200)
-                got = page.evaluate("window.__aaMove")
+                wait_end = time.time() + 0.3
+                got = None
+                while got is None and time.time() < wait_end:
+                    time.sleep(0.01)
+                    got = page.evaluate("window.__aaMove")
                 if not got:
                     continue
                 # 使用者這段時間動了滑鼠：頁面收到的是使用者的位置，不能拿來校正
@@ -1401,13 +1393,13 @@ class GeminiWebSession:
                       f"（頁面座標 {got}，目標 {tx:.0f},{ty:.0f}）")
             if not hit:
                 return False
-            time.sleep(0.1)
+            self._os_click_adjust = (px - ex0, py - ey0)
+            time.sleep(0.03)
             # 「移到絕對座標＋按下」「移到絕對座標＋放開」各用一次 SendInput 送進輸入佇列：
             # 同一批事件中間插不進使用者的滑鼠移動，點擊一定落在送出鈕上。
             if not _send_mouse_click_at(int(px), int(py)):
                 self._dbg("系統滑鼠點擊：SendInput 送不出去")
                 return False
-            time.sleep(0.3)
             return True
         finally:
             # 還原：游標回原位、原本的前景視窗回到前面（使用者正在用的程式）

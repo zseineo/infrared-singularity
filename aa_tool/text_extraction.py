@@ -1659,7 +1659,8 @@ def extract_text(
 
     Returns:
         list[tuple[str, int]]: [(提取文字, 來源行號), ...]，不去重（同一行內出現
-        多次的相同文字也會全部保留，依匹配順序排列）。
+        多次的相同文字也會全部保留，依匹配順序排列）。實驗管線最後會把同一行
+        「原文只隔 1~2 個空白」的相鄰項合併為一項（見 `_merge_space_adjacent`）。
     """
     base_regex = _compile_regex(base_regex_str, DEFAULT_BASE_REGEX)
     invalid_regex = _compile_regex(invalid_regex_str, DEFAULT_INVALID_REGEX)
@@ -1668,6 +1669,9 @@ def extract_text(
 
     # 移除 Unicode 雙向控制/隱形格式字元（不影響可見文字、不改變行數）
     source = _BIDI_CONTROL_RE.sub('', source)
+    # 遮蔽前的行：空白相鄰合併（`_merge_space_adjacent`）取合併文字用 — 必須是
+    # `apply_translation` 看到的原文（只去 BIDI、未遮蔽上色標記）的子字串
+    raw_lines = source.split('\n')
     # 遮蔽上色標記，避免標籤本身被當成可翻譯文字提取（見 _mask_color_markup）
     source = _mask_color_markup(source)
     lines = source.split('\n')
@@ -1818,7 +1822,81 @@ def extract_text(
                     extracted.append((out_t, ln))
                     seen.add((out_t, ln))
 
+    if use_experimental:
+        extracted = _merge_space_adjacent(extracted, lines, raw_lines)
     return extracted
+
+
+def _merge_line_items(texts: list[str], line: str,
+                      raw_line: str) -> list[str]:
+    """同一行的提取文字中，原文裡只隔 1~2 個空白的相鄰項合併成一項（保留中間空白）。
+
+    依序在 `line`（已遮蔽上色標記）中定位每項；定位不到（後處理改過字）的項
+    維持原樣、不參與合併。合併文字取自 `raw_line`（未遮蔽）的同一區間，且只在
+    該區間未含上色標記（遮蔽前後相同）時才合併，確保結果是 `apply_translation`
+    看到的原文的子字串。
+    """
+    spans: list[tuple[int, int] | None] = []
+    pos = 0
+    for t in texts:
+        k = line.find(t, pos)
+        if k < 0:
+            spans.append(None)
+            continue
+        spans.append((k, k + len(t)))
+        pos = k + len(t)
+    out: list[str] = []
+    cur: tuple[int, int] | None = None
+    for t, sp in zip(texts, spans):
+        if sp is None:
+            if cur is not None:
+                out.append(raw_line[cur[0]:cur[1]])
+                cur = None
+            out.append(t)
+            continue
+        if cur is not None:
+            gap = line[cur[1]:sp[0]]
+            if (1 <= len(gap) <= 2 and gap.isspace()
+                    and raw_line[cur[0]:sp[1]] == line[cur[0]:sp[1]]):
+                cur = (cur[0], sp[1])
+                continue
+            out.append(raw_line[cur[0]:cur[1]])
+        cur = sp
+    if cur is not None:
+        out.append(raw_line[cur[0]:cur[1]])
+    return out
+
+
+def _merge_space_adjacent(extracted: list[tuple[str, int]], lines: list[str],
+                          raw_lines: list[str]) -> list[tuple[str, int]]:
+    """空白相鄰合併（實驗管線最後一步）：同一行裡原文只隔 1~2 個空白的相鄰
+    提取項合併成一個 ID。
+
+    AA 漫畫常以空白分段（「…やや低い　を指揮します】」「やだ　見てたい」）。
+    分成多個 ID 送翻譯時，AI 常把上下文相連的兩段譯成一句、只回傳一個 ID，
+    另一個 ID 就漏翻。合併後一句一 ID，且兩段本來就有上下文關係。
+
+    只合併「兩個都已被提取」的項、中間只有空白 — 不會把任何新字元（AA 圖）
+    捲進替換範圍。隔 ≥3 個空白（選項「はい　　　いいえ」、表格欄位）或中間夾
+    其他內容的維持分開。同一行的項依原文出現位置排序後再合併。
+    """
+    by_line: dict[int, list[str]] = {}
+    order: list[int] = []
+    for t, n in extracted:
+        if n not in by_line:
+            by_line[n] = []
+            order.append(n)
+        by_line[n].append(t)
+    out: list[tuple[str, int]] = []
+    for n in order:
+        texts = by_line[n]
+        if len(texts) >= 2 and 1 <= n <= len(lines):
+            line = lines[n - 1]
+            # 方案 H 補回的項附在最後，先依原文位置排序（找不到的排最後、保持相對順序）
+            texts = sorted(texts, key=lambda t: (line.find(t) < 0, line.find(t)))
+            texts = _merge_line_items(texts, line, raw_lines[n - 1])
+        out += [(t, n) for t in texts]
+    return out
 
 
 def format_extraction_output(extracted: list[tuple[str, int]]) -> str:
@@ -1999,6 +2077,7 @@ def analyze_extraction(
 
             report.append(
                 "\n[步驟 4] 對倖存候選做後處理／allow_short 重檢／括號補完／自訂濾網：")
+            finals: list[str] = []
             for raw_text, cand_s, cand_e in survivors:
                 text = _DICE_NOTATION_FW_RE.sub(r'\1:\2', raw_text)
                 original = text
@@ -2027,6 +2106,7 @@ def analyze_extraction(
                     continue
                 if text:
                     report.append(f"    -> ✅ 成功提取最終文字: '{text}'")
+                    finals.append(text)
             # 步驟 5：方案 H 文件級名牌救援（與 extract_text 的第二遍一致）
             rescue_hits = [(t, lns) for t, lns in sorted(rescue_map.items())
                            if line_idx in lns]
@@ -2036,6 +2116,18 @@ def analyze_extraction(
                     report.append(
                         f"  - '{t}'：同字串於全文 {len(lns)} 行落選、"
                         "且見於正文提取內容 → ✅ 救回")
+                    finals.append(t)
+            # 步驟 6：空白相鄰合併（與 extract_text 的 `_merge_space_adjacent` 一致）
+            if len(finals) >= 2:
+                ordered = sorted(finals, key=lambda t: (line.find(t) < 0,
+                                                        line.find(t)))
+                merged = _merge_line_items(ordered, line, line)
+                if len(merged) < len(ordered):
+                    report.append(
+                        "\n[步驟 6] 空白相鄰合併（原文只隔 1~2 個空白的相鄰項"
+                        "合併為一個 ID）：")
+                    for t in merged:
+                        report.append(f"  -> ✅ '{t}'")
             report.append("\n" + "=" * 40 + "\n")
             continue
 

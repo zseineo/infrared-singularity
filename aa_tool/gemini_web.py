@@ -411,6 +411,10 @@ def _win_clipboard_set(text: str) -> bool:
         u32.CloseClipboard()
 
 
+# 系統滑鼠點擊後沒送出（瀏覽器原本不在前景）時最多點幾次
+_OS_CLICK_TRIES = 3
+
+
 def _send_mouse_click_at(x: int, y: int) -> bool:
     """在螢幕座標 (x, y) 用 SendInput 點一下左鍵（Windows）；成功回 True。
 
@@ -1297,6 +1301,10 @@ class GeminiWebSession:
         （DPI 縮放、視窗邊框都不必自己算準；使用者同時動了滑鼠的那次不採用）→ SendInput
         在絕對座標按下放開（使用者的移動插不進去）→ 立刻還原游標位置與原本的前景視窗。
         游標只在「跳過去～點完」這段離開原位（實測約 0.1 秒）。
+        瀏覽器原本不在前景時，點擊可能落在視窗還沒真正啟用的空檔而沒送出（v2.94 使用者回報）：
+        點擊前等到 ``document.hasFocus()``，點完確認輸入框已清空或出現停止鈕，沒送出就再點，
+        最多 ``_OS_CLICK_TRIES`` 次。**輸入框還有字才補點**——已送出時送出鈕會變成停止鈕，
+        多點一下會中斷生成。系統層級 Enter 已測過照樣被擋，不用它補送。
         對不準送出鈕就不點、回 False（交給呼叫端退回程式送出）。非 Windows 回 False。
         """
         if os.name != "nt":
@@ -1345,10 +1353,34 @@ class GeminiWebSession:
                 if attached:
                     u32.AttachThreadInput(me, fg_tid, False)
 
+        def _wait_focus() -> bool:
+            # 視窗真的變成作用中、頁面拿到焦點才點；切不過去就再切一次
+            for _ in range(2):
+                _activate(hwnd)
+                page.bring_to_front()
+                end = time.time() + 1.0
+                while time.time() < end:
+                    try:
+                        if page.evaluate("document.hasFocus()"):
+                            return True
+                    except Exception:
+                        pass
+                    time.sleep(0.02)
+            return False
+
+        def _sent() -> bool:
+            # 送出後 Gemini 會清空輸入框並出現停止鈕
+            if self._find("stop") is not None:
+                return True
+            editor = self._find("input")
+            try:
+                return editor is not None and not (editor.inner_text(timeout=1000) or "").strip()
+            except Exception:
+                return False
+
         try:
-            _activate(hwnd)
-            page.bring_to_front()
-            page.wait_for_timeout(200)   # 視窗還沒到前面時頁面收不到 mousemove，下面會重試
+            if not _wait_focus():
+                self._dbg("系統滑鼠點擊：瀏覽器視窗 2 秒內沒有取得焦點，照樣嘗試點擊")
             page.evaluate("""() => { if (!window.__aaLm) { window.__aaLm = 1;
                 addEventListener('mousemove', e => { window.__aaMove = [e.clientX, e.clientY]; }, true); }
                 window.__aaMove = null; }""")
@@ -1395,12 +1427,33 @@ class GeminiWebSession:
                 return False
             self._os_click_adjust = (px - ex0, py - ey0)
             time.sleep(0.03)
-            # 「移到絕對座標＋按下」「移到絕對座標＋放開」各用一次 SendInput 送進輸入佇列：
-            # 同一批事件中間插不進使用者的滑鼠移動，點擊一定落在送出鈕上。
-            if not _send_mouse_click_at(int(px), int(py)):
-                self._dbg("系統滑鼠點擊：SendInput 送不出去")
-                return False
-            return True
+            for n in range(1, _OS_CLICK_TRIES + 1):
+                # 「移到絕對座標＋按下」「移到絕對座標＋放開」各用一次 SendInput 送進輸入佇列：
+                # 同一批事件中間插不進使用者的滑鼠移動，點擊一定落在送出鈕上。
+                if not _send_mouse_click_at(int(px), int(py)):
+                    self._dbg("系統滑鼠點擊：SendInput 送不出去")
+                    return False
+                u32.SetCursorPos(orig.x, orig.y)
+                end = time.time() + 1.5
+                while time.time() < end:
+                    if _sent():
+                        if n > 1:
+                            self._dbg(f"系統滑鼠點擊：第 {n} 次點擊才送出")
+                        return True
+                    time.sleep(0.05)
+                if n == _OS_CLICK_TRIES:
+                    break
+                self._dbg(f"系統滑鼠點擊：第 {n} 次點擊後沒有送出，再點一次")
+                if not _wait_focus():
+                    self._dbg("系統滑鼠點擊：瀏覽器視窗仍沒有取得焦點")
+                try:
+                    if not btn.is_enabled():
+                        break
+                except Exception:
+                    break
+            # 點了沒送出：輸入框還有字，交給呼叫端改用程式送出
+            self._dbg(f"系統滑鼠點擊：點 {_OS_CLICK_TRIES} 次都沒有送出")
+            return False
         finally:
             # 還原：游標回原位、原本的前景視窗回到前面（使用者正在用的程式）
             u32.SetCursorPos(orig.x, orig.y)

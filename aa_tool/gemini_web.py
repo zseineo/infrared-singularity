@@ -251,6 +251,16 @@ _GEN_TIMEOUT = 600          # 單次生成最長等待秒數
 # 送出後過了這麼久仍沒開始生成（出現停止鈕或新回覆） → 視為「根本沒送出去」（頁面在填字後被導走、
 # 文字被洗掉等），直接回空讓 translate() 開新對話重送，而不是空等 _GEN_TIMEOUT。
 _GEN_NOT_STARTED_TIMEOUT = 60
+# 頁面左下角的提示（Angular Material snack-bar，例：「發生錯誤 (1095)」）只停留幾秒。
+# 等待生成時順便讀，讀到就寫進 Log；送出後還沒開始生成就跳錯誤 → 再等
+# _TOAST_ERROR_GRACE 秒仍沒開始就當作沒送出，不再空等 _GEN_NOT_STARTED_TIMEOUT。
+_TOAST_SEL = ("mat-snack-bar-container, simple-snack-bar, "
+              "[class*='snack-bar'], [class*='snackbar']")
+_TOAST_JS = ("(sel) => Array.from(document.querySelectorAll(sel))"
+             ".filter(e => !(e.parentElement && e.parentElement.closest(sel)))"
+             ".map(e => (e.innerText || '').trim()).filter(Boolean)")
+_TOAST_ERROR_RE = re.compile(r'錯誤|错误|error|went wrong|出了點問題|出了点问题', re.I)
+_TOAST_ERROR_GRACE = 5.0
 # 開 Gem 後頁面網址須穩定停在 Gem 上這麼久才算開好；網路慢時 Gemini 會在
 # domcontentloaded 之後才把 Gem 網址改導到 /app（沒套用 Gem 的一般對話）。
 _GEM_URL_SETTLE = 5.0
@@ -599,6 +609,7 @@ class GeminiWebSession:
         # 系統滑鼠點擊：上次校正出的「估算座標 → 實際座標」修正量（實體像素）。
         # 視窗沒移動時下次直接套用，第一跳就對準，游標停在送出鈕上的時間最短。
         self._os_click_adjust = (0.0, 0.0)
+        self._seen_toasts: set[str] = set()   # 這次送出已記過的頁面提示
 
     # ── 生命週期 ──
 
@@ -1544,16 +1555,27 @@ class GeminiWebSession:
         t_start = time.time()
         start_deadline = time.time() + _GEN_NOT_STARTED_TIMEOUT
         started = False
+        self._seen_toasts = set()
+        toast_err_at = None
         while time.time() < start_deadline:
             self._check_abort()
             if self._find("stop") is not None or self._response_count() > prev_count:
                 started = True
                 break
+            if self._poll_toasts() and toast_err_at is None:
+                toast_err_at = time.time()
+                self._debug_screenshot("toast_error")
+            if toast_err_at and time.time() - toast_err_at >= _TOAST_ERROR_GRACE:
+                break
             time.sleep(0.3)
         self._dbg(f"開始生成：{'是' if started else '否'}（{time.time() - t_start:.1f}s）")
         if not started:
-            self._log(f"⚠️ 送出後 {_GEN_NOT_STARTED_TIMEOUT}s 仍未開始生成"
-                      f"（目前頁面：{self._page.url}），訊息可能沒送出去")
+            if toast_err_at:
+                self._log(f"⚠️ Gemini 跳出錯誤後沒有開始生成（目前頁面：{self._page.url}），"
+                          "訊息沒送出去")
+            else:
+                self._log(f"⚠️ 送出後 {_GEN_NOT_STARTED_TIMEOUT}s 仍未開始生成"
+                          f"（目前頁面：{self._page.url}），訊息可能沒送出去")
             return False
 
         # 2) 等待結束：停止鈕消失 + 回覆文字連續數次不變
@@ -1563,6 +1585,7 @@ class GeminiWebSession:
         next_snap = time.time() + _DEBUG_GEN_EVERY
         while time.time() < gen_deadline:
             self._check_abort()
+            self._poll_toasts()
             t_poll = time.time()
             generating = self._find("stop") is not None
             text = self._latest_response_text()
@@ -1584,6 +1607,23 @@ class GeminiWebSession:
             time.sleep(_POLL_INTERVAL)
         self._log("⚠️ 等待生成逾時，改用目前已取得的回覆")
         return True
+
+    def _poll_toasts(self) -> bool:
+        """讀頁面左下角提示，新出現的寫進 Log。新提示含錯誤字樣時回 True。"""
+        try:
+            texts = self._page.evaluate(_TOAST_JS, _TOAST_SEL)
+        except Exception:  # noqa: BLE001 — 頁面導向中等情況讀不到就算了
+            return False
+        err = False
+        for t in texts:
+            t = " ".join(str(t).split())
+            if t in self._seen_toasts:
+                continue
+            self._seen_toasts.add(t)
+            self._log(f"⚠️ Gemini 頁面提示：「{t}」（目前頁面：{self._page.url}）")
+            if _TOAST_ERROR_RE.search(t):
+                err = True
+        return err
 
     # ── 內部：額度偵測 ──
 

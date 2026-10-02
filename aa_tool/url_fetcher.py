@@ -453,8 +453,34 @@ def _strip_tags_keep_color(text: str) -> str:
     """
     text = _normalize_color_tags(text)
     text = _BLACK_SPAN_RE.sub(r'\1', text)
+    text = _drop_plain_span_closes(text)
     text = re.sub(r'<(?!span\s+style="color:|/span>)[^>]+>', '', text)
     return _BIDI_RE.sub('', text)
+
+
+def _drop_plain_span_closes(text: str) -> str:
+    """移除「無顏色 span」對應的 </span>（開標籤稍後由通用規則剝掉）。
+
+    例：yaruobook.com 的 `<span 紅>…<span><span 藍>&gt;&gt;1</span></span>…</span>`，
+    若只剝掉中間的 `<span>` 卻留下它的 `</span>`，外層紅色會提早結束。
+    找不到對應開標籤的 </span>（開標籤在片段外）照舊保留，交給 _cleanup_unmatched_spans。
+    """
+    out: list[str] = []
+    stack: list[bool] = []  # True = 顏色 span
+    last = 0
+    for m in re.finditer(r'<span\b[^>]*>|</span>', text):
+        tag = m.group(0)
+        if tag == '</span>':
+            keep = stack.pop() if stack else True
+        else:
+            keep = True  # 開標籤一律留給後續處理
+            stack.append(tag.startswith('<span style="color:'))
+        out.append(text[last:m.start()])
+        if keep:
+            out.append(tag)
+        last = m.end()
+    out.append(text[last:])
+    return ''.join(out)
 
 
 def _strip_all_tags(text: str) -> str:

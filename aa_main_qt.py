@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.96"
+APP_VERSION = "2.97"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -2238,7 +2238,8 @@ class MainWindow(QMainWindow):
         title_filter_stop = getattr(result, "title_filter_stop", "")
         if title_filter_stop:
             lines.append("")
-            lines.append(f"🛑 {title_filter_stop}，已中止整批（請確認標題過濾文字）。")
+            lines.append(f"🛑 {title_filter_stop}，已停止往下讀新的話"
+                         "（補翻與循環翻譯已先跑完；請確認標題過濾文字）。")
             if result.pending_url:
                 lines.append("要接續，用下列網址當起始網址：")
                 lines.append(_url_name(result.pending_url, titles))

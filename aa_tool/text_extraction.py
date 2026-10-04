@@ -2494,6 +2494,9 @@ TITLE_CHAPTER_RES = [
     re.compile(r'番外編\s*[0-9０-９〇零一二三四五六七八九十百千]*'),
     re.compile(r'後日談\s*[0-9０-９〇零一二三四五六七八九十百千]*'),
     re.compile(r'[0-9０-９]+\s*話'),
+    # 尾端獨立數字：「作品名【原作】 1」——前面隔著空白或括號的尾數多半是話數
+    #（極少數才是第幾部），黏在字後的不算（「ドラクエ3」是作品名的一部分）
+    re.compile(r'(?<=[\s　】\]）)])[0-9０-９]+[\s　]*$'),
     # 序章：本身就是一話（「作品名　プロローグ」），作品名只到它前面
     re.compile(r'プロローグ'),
 ]
@@ -2502,7 +2505,8 @@ _TITLE_LEAD_TAGS_RE = re.compile(r'^(?:[【\[][^】\]]*[】\]][\s　]*)+')
 _TITLE_TAIL_TAGS_RE = re.compile(r'(?:[\s　]*[【\[][^】\]]*[】\]])+\s*$')
 # 話數截斷後殘留在尾端的分隔符號（含全形）。刻意不含「？！」等語氣符號，
 # 那是作品名的一部分（例：「ご注文はうさぎですか？」）。
-_TITLE_TAIL_SEP_RE = re.compile(r'[\s　\t\-–—ー・~〜:：,、。．,]+$')
+# 長音「ー」只在前有空白時才算分隔符，否則是字的一部分（「ポケモンマスター」）。
+_TITLE_TAIL_SEP_RE = re.compile(r'(?:[\s　\t\-–—・~〜:：,、。．,]|(?<=[\s　])ー)+$')
 # 支線標記：話數截斷後殘留在尾端的「IF／外伝／番外編…」。
 # **必須前有空白分隔**才視為標記，避免誤砍作品名內含這些字的情形
 # （例：「やる夫の番外地」不該被砍成「やる夫の」）。
@@ -2556,3 +2560,46 @@ def extract_series_folder_name(title: str) -> str:
             break
         t = stripped
     return t.strip(' 　\t')
+
+
+# ── 本篇話數（「從資料夾」找缺話用）──
+_NUM_CLS = r'[0-9０-９]+'
+_KANJI_NUM_CLS = r'[〇零一二三四五六七八九十百千]+'
+# 這些字樣後面的編號不是本篇話數（「小話その１」「番外編3」「エピローグ2」「第2.5話」）
+_SIDE_STORY_RE = re.compile(r'番外|外伝|後日談|小話|小ネタ|埋めネタ|短編|幕間|エピローグ|アフター|過去編|過去話'
+                            r'|第\s*[0-9０-９]+[.．][0-9０-９]+\s*話')  # 第2.5話＝插話
+# 依序嘗試，第一個命中者為準；最後兩條對應自動翻譯的檔名格式
+# （手動模式「作品名_8」、同名衝突「作品名_4-2」，以及標題尾端「作品名 1」）
+_MAIN_CHAPTER_RES = [
+    re.compile(r'第\s*(' + _NUM_CLS + r')\s*話'),
+    re.compile(r'第\s*(' + _KANJI_NUM_CLS + r')\s*話'),
+    re.compile(r'[#＃]\s*(' + _NUM_CLS + r')'),
+    re.compile(r'(?<![第0-9０-９])(' + _NUM_CLS + r')\s*話'),
+    re.compile(r'その\s*(' + _NUM_CLS + r')'),
+    re.compile(r'_(' + _NUM_CLS + r')(?:-\d+)?$'),
+    re.compile(r'(?<=[\s　】\]）)])(' + _NUM_CLS + r')[\s　]*'
+               r'(?:[（(【\[][^）)】\]]*[）)】\]][\s　]*)?$'),  # 「44 (完)」
+]
+
+
+def main_chapter_number(name: str) -> int | None:
+    """從標題或檔名（不含副檔名）讀出本篇話數，番外／小話等支線與讀不到時回 None。
+
+    >>> main_chapter_number('みんなで始める、ポケモンマスター　第１０話')
+    10
+    >>> main_chapter_number('やるやらは偽りの太陽に祈るようです_4-2')
+    4
+    >>> main_chapter_number('やる夫が異世界で前を向いて生きるようです　小話その１') is None
+    True
+    """
+    if not name or _SIDE_STORY_RE.search(name):
+        return None
+    for pat in _MAIN_CHAPTER_RES:
+        m = pat.search(name)
+        if not m:
+            continue
+        s = m.group(1)
+        if s[0] in '〇零一二三四五六七八九十百千':
+            return _kanji_to_int(s)
+        return int(s.translate(str.maketrans('０１２３４５６７８９', '0123456789')))
+    return None

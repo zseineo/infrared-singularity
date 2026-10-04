@@ -12,7 +12,7 @@
 
 面板 → 主程式（直接呼叫）：
     main._handle_url_fetch_request(url, author_only, skip_cache)
-    main._find_url_for_text(text) # 「從檔案」：以投稿標頭指紋查讀取紀錄的網址
+    main._find_url_for_text(text) # 「從檔案」「從資料夾」：以投稿標頭指紋查讀取紀錄的網址
     main._skip_url_cache          # 「不讀暫存」勾選狀態（toggled 時即時同步回主程式，
                                   #   讓主畫面上一話／下一話、重找原文、自動翻譯一併適用）
     main.url_history / main.settings_mgr.clear_url_history()
@@ -33,7 +33,10 @@ from PyQt6.QtWidgets import (
 
 from aa_tool.html_io import read_html_pre_content
 from aa_tool.qt_helpers import make_button
-from aa_tool.text_extraction import TITLE_CHAPTER_RES, extract_work_title
+from aa_tool.text_extraction import (
+    TITLE_CHAPTER_RES, extract_series_folder_name, extract_work_title,
+    main_chapter_number,
+)
 
 
 class FlowLayout(QLayout):
@@ -321,6 +324,16 @@ class UrlFetchWindow(QWidget):
             "在讀取紀錄裡找出對應網址，直接讀取該網址。\n"
             "譯文檔也可以：翻譯不會改到投稿標頭。")
         self.from_file_btn.clicked.connect(self._fetch_from_file)
+
+        self.from_folder_btn = make_button("從資料夾", color="#17a2b8", hover="#138496",
+                                           font=self.ui_small_font, width=84)
+        self.from_folder_btn.setFixedHeight(28)
+        self.from_folder_btn.setToolTip(
+            "選一個作品資料夾，從檔名找出缺少的話數（中間有缺取最前面的；\n"
+            "沒缺就是最後一話的下一話），讀取那一話的網址。\n"
+            "讀取紀錄裡沒有那一話，就改讀前一話，再從關聯記事點下一話。")
+        self.from_folder_btn.clicked.connect(self._fetch_from_folder)
+        top.addWidget(self.from_folder_btn)
         top.addWidget(self.from_file_btn)
         top.addWidget(self.fetch_btn)
         layout.addLayout(top)
@@ -836,15 +849,8 @@ class UrlFetchWindow(QWidget):
         if not file_path:
             return
         name = os.path.basename(file_path)
-        # 本工具存的是 HTML（內文在 <pre>）；沒有 <pre> 就當純文字檔整份讀
         try:
-            try:
-                text = read_html_pre_content(file_path)
-            except UnicodeDecodeError:
-                text = None
-            if text is None:
-                with open(file_path, encoding="utf-8", errors="replace") as f:
-                    text = f.read()
+            text = self._read_saved_text(file_path)
         except OSError as e:
             self._set_status(f"❌ 無法讀取檔案：{e}", "#dc3545")
             return
@@ -859,6 +865,102 @@ class UrlFetchWindow(QWidget):
                 "（可能從沒在本工具讀過，或紀錄已被清除）", "#f39c12")
             return
         self._fetch_url(url)
+
+    @staticmethod
+    def _read_saved_text(file_path: str) -> str:
+        """讀已存檔案的內文：本工具存的是 HTML（內文在 <pre>），沒有 <pre> 就整份讀。"""
+        try:
+            text = read_html_pre_content(file_path)
+        except UnicodeDecodeError:
+            text = None
+        if text is None:
+            with open(file_path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        return text or ""
+
+    def _fetch_from_folder(self) -> None:
+        """「從資料夾」：由檔名找出缺少的話數，讀取該話（讀取紀錄沒有就讀前一話）的網址。
+
+        缺話＝檔名本篇話數（`main_chapter_number`）在最小～最大之間第一個缺號；
+        沒有缺號就是最大話數的下一話。
+        - 該話網址：讀取紀錄裡標題屬於同一作品、話數相符的條目。同一作品＝
+          標題的作品名主體等於資料夾名，或等於前一話檔案以指紋查到的紀錄標題的作品名主體
+          （手動模式的資料夾名是使用者打的作品名稱，不一定對得上頁面標題）。
+        - 前一話網址：前一話檔案的投稿標頭指紋（同「從檔案」），查不到再用標題比對。
+        """
+        if self._fetching:
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self, "選取作品資料夾", self._main._last_dir)
+        if not folder:
+            return
+        by_num: dict[int, list[str]] = {}
+        try:
+            names = os.listdir(folder)
+        except OSError as e:
+            self._set_status(f"❌ 無法讀取資料夾：{e}", "#dc3545")
+            return
+        for fn in names:
+            stem, ext = os.path.splitext(fn)
+            if ext.lower() not in (".html", ".htm", ".txt"):
+                continue
+            n = main_chapter_number(stem)
+            if n is not None:
+                by_num.setdefault(n, []).append(os.path.join(folder, fn))
+        folder_name = os.path.basename(os.path.normpath(folder))
+        if not by_num:
+            self._set_status(f"⚠️ {folder_name} 裡沒有讀得出話數的檔案", "#f39c12")
+            return
+        lo, hi = min(by_num), max(by_num)
+        gaps = [n for n in range(lo, hi + 1) if n not in by_num]
+        target = gaps[0] if gaps else hi + 1
+        prev = target - 1
+
+        series = {folder_name}
+        prev_url = None
+        for path in by_num.get(prev, []):
+            try:
+                prev_url = self._main._find_url_for_text(self._read_saved_text(path))
+            except OSError:
+                continue
+            if prev_url:
+                break
+        if prev_url:
+            for h in self._url_history:
+                if isinstance(h, dict) and h.get("url") == prev_url:
+                    name = extract_series_folder_name(h.get("title") or "")
+                    if name:
+                        series.add(name)
+                    break
+
+        def _history_url(num: int) -> str | None:
+            for h in self._url_history:
+                if not isinstance(h, dict) or not h.get("url"):
+                    continue
+                title = h.get("title") or ""
+                if (extract_series_folder_name(title) in series
+                        and main_chapter_number(extract_work_title(title)) == num):
+                    return h["url"]
+            return None
+
+        what = f"缺第 {target} 話" if gaps else f"已有第 {lo}～{hi} 話，下一話是第 {target} 話"
+        if len(gaps) > 1:
+            more = "、".join(str(n) for n in gaps[1:6]) + ("…" if len(gaps) > 6 else "")
+            what += f"（另缺 {more}）"
+        url = _history_url(target)
+        if url:
+            self._main.show_status(f"📂 {what}，讀取第 {target} 話", "#17a2b8", 6000)
+            self._fetch_url(url)
+            return
+        prev_url = prev_url or (_history_url(prev) if prev >= 1 else None)
+        if prev_url:
+            self._main.show_status(
+                f"📂 {what}；讀取紀錄裡沒有第 {target} 話，改讀前一話（第 {prev} 話），"
+                "請從關聯記事點下一話", "#f39c12", 8000)
+            self._fetch_url(prev_url)
+            return
+        self._set_status(
+            f"⚠️ {what}，但讀取紀錄裡找不到第 {target} 話與第 {prev} 話的網址", "#f39c12")
 
     def _do_fetch(self):
         if self._fetching:

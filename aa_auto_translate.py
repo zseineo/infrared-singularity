@@ -988,8 +988,9 @@ def _fill_titles_from_history(result: AutoResult, url_history: list) -> None:
 # until_last 模式下的安全上限，避免關聯連結異常時無限迴圈。
 _UNTIL_LAST_CAP = 9999
 
-# 標題過濾：連續這麼多話都不符就中止（跳過的話不計話數，過濾文字打錯時才不會
-# 一路抓到最後，關聯連結成環時也不會無限迴圈）。
+# 標題過濾：連續這麼多話都不符就不再往下讀新的話（跳過的話不計話數，過濾文字
+# 打錯時才不會一路抓到最後，關聯連結成環時也不會無限迴圈）。之後照「新的話跑完」
+# 處理：先跑完補翻與循環翻譯再結束（常見情況是作品完結、後面接別部作品）。
 _TITLE_FILTER_MAX_CONSECUTIVE = 50
 
 # 循環翻譯：連續這麼多輪都沒有任何一話翻成功就停止循環（預設值；可由
@@ -1054,8 +1055,8 @@ def run_auto_translate(
         （抓到仍回寫暫存）。對應主畫面「不讀暫存」開關，GUI 由該開關帶入。
     title_filter：標題過濾文字。非空時，抓到的頁面標題（page_title）不含此文字
         （不分大小寫）的話直接跳過、讀下一話；跳過的話**不計入 count**，也不參與
-        作品資料夾名的決定。連續 `_TITLE_FILTER_MAX_CONSECUTIVE` 話都不符就中止整批
-        （`title_filter_stop`、`pending_url`）。
+        作品資料夾名的決定。連續 `_TITLE_FILTER_MAX_CONSECUTIVE` 話都不符就不再讀新的話，
+        先跑完補翻與循環翻譯再結束（`title_filter_stop`、`pending_url`）。
     group_by_series：為 True 時在 ``out_dir`` 底下依作品名開一層子資料夾，整批的
         HTML 都寫進去（已存在就直接沿用）。None 時讀 cache 的
         auto_translate_group_by_series（預設 False）。**資料夾名整批只決定一次**
@@ -1445,13 +1446,14 @@ def run_auto_translate(
         i = 0                 # 已開始處理的「新」話數（補翻、標題過濾跳過的不計）
         list_pos = 0          # 清單模式：已讀到清單第幾個網址（標題過濾跳過的也算）
         filtered_run = 0      # 連續幾話不符標題過濾
+        filter_stopped = False  # 連續太多話不符標題過濾 → 不再讀新的話（補翻／循環照跑）
         while True:
             if _stopping():
                 result.stopped = True
                 log("⏹️ 已收到停止指令，中止。")
                 break
             # 新的話都跑完了（跑滿話數或沒有下一話）
-            no_more_new = i >= total or not url
+            no_more_new = i >= total or not url or filter_stopped
             # 這一輪先補翻的時機：上一話翻譯成功（伺服器已恢復），或新的話已跑完
             # ——後者持續補翻到列表清空為止（v2.31；要中止就按停止）。
             retrying = bool(deferred) and (retry_ready or no_more_new)
@@ -1463,7 +1465,9 @@ def run_auto_translate(
             if not retrying and no_more_new and _start_loop_round(i):
                 continue
             if not retrying and no_more_new:
-                if i >= total:
+                if filter_stopped:
+                    pass  # 接續網址已放在 pending_url
+                elif i >= total:
                     # 跑滿設定話數而結束 → url 為下一話續接網址，供 GUI 把它帶回
                     # 「起始網址」直接接續下一批（已是最後一話時 url 為空）。
                     if url:
@@ -1538,9 +1542,10 @@ def run_auto_translate(
                         result.title_filter_stop = (
                             f"連續 {filtered_run} 話標題都不含「{title_filter}」")
                         result.pending_url = url
-                        log(f"  🛑 {result.title_filter_stop} → 中止整批"
-                            "（請確認標題過濾文字；下一話可用來當起始網址接續）。")
-                        break
+                        log(f"  🛑 {result.title_filter_stop} → 不再往下讀新的話，"
+                            "先跑完補翻與循環翻譯再結束（請確認標題過濾文字；"
+                            "下一話可用來當起始網址接續）。")
+                        filter_stopped = True
                     continue
                 filtered_run = 0
                 # 1.4) 依作品名分資料夾：用第一話的標題定一次，之後各話沿用。
@@ -1842,7 +1847,8 @@ def _print_summary(result: AutoResult, log: Callable[[str], None]) -> None:
         for u, _t in result.filtered:
             log(f"  ⏭️ {format_url_with_title(u, result.titles)}")
     if result.title_filter_stop:
-        log(f"🛑 {result.title_filter_stop}，已中止整批。")
+        log(f"🛑 {result.title_filter_stop}，已停止往下讀新的話"
+            "（補翻與循環翻譯已先跑完）。")
         if result.pending_url:
             log("   要接續，可用此網址當 --url："
                 + format_url_with_title(result.pending_url, result.titles))

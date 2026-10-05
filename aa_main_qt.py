@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.97"
+APP_VERSION = "2.98"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -273,6 +273,15 @@ class TranslatePanel(QWidget):
         btn_auto.setToolTip("連續多話全自動翻譯（操控網頁版 Gemini）")
         btn_auto.clicked.connect(self._main.show_auto_translate_panel)
         row.addWidget(btn_auto)
+
+        btn_order = _make_btn("整理順序", "#fd7e14", "#dc6a0a",
+                              font=_ui_font(11), width=90)
+        btn_order.setToolTip(
+            "選一個作品資料夾，依每個檔案內文第一個投稿標頭的日期（作者發表順序）\n"
+            "替檔名加上 001_、002_… 編號，沒有話數的番外／幕間也會排在正確位置。\n"
+            "重跑會先去掉舊編號再重編。")
+        btn_order.clicked.connect(self._main.reorder_folder_files)
+        row.addWidget(btn_order)
 
         right = QWidget()
         row = QHBoxLayout(right)
@@ -795,6 +804,8 @@ class MainWindow(QMainWindow):
         # 自動翻譯：在輸出資料夾下依作品名開一層子資料夾（資料夾名不持久化，
         # 由面板每次依起始網址重算，避免換作品時沿用舊名）。
         self._auto_translate_group_by_series: bool = False
+        # 自動翻譯：自動產生編號（結束後依投稿日期替作品資料夾檔名編號）
+        self._auto_translate_auto_number: bool = False
         # 自動翻譯：加入翻譯（True，保留原文）／替換翻譯（False）。預設替換。
         self._auto_translate_append_mode: bool = False
         # 自動翻譯：送給 AI 前把過濾詞清單（一行一個）裡的詞換成 ○，降低被審查機率
@@ -1832,6 +1843,69 @@ class MainWindow(QMainWindow):
         else:
             self.show_status("⚠️ 尚未讀取過網址！", "#f39c12")
 
+    def reorder_folder_files(self) -> None:
+        """首頁「整理順序」：依投稿日期替作品資料夾的檔名加上閱讀順序編號。"""
+        from aa_tool import reading_order
+        folder = QFileDialog.getExistingDirectory(
+            self, "選取要整理順序的作品資料夾", self._last_dir)
+        if not folder:
+            return
+        try:
+            renames, undated = reading_order.plan_order(folder)
+        except OSError as e:
+            self.show_status(f"❌ 無法讀取資料夾：{e}", "#dc3545")
+            return
+        if not renames:
+            self.show_status("⚠️ 資料夾裡沒有 HTML 檔", "#f39c12")
+            return
+        changes = sum(1 for old, new in renames if old != new)
+        if not changes:
+            self.show_status("✅ 順序已是最新，不必改名", "#28a745")
+            return
+        preview = "\n".join(new for _old, new in renames[:15])
+        if len(renames) > 15:
+            preview += f"\n…（共 {len(renames)} 個檔案）"
+        msg = (f"將依投稿日期替「{os.path.basename(folder)}」的 {len(renames)} 個檔案編號，"
+               f"其中 {changes} 個會改名。\n")
+        if undated:
+            msg += f"有 {len(undated)} 個檔案讀不到投稿日期，會排在最後。\n"
+        msg += "\n新的順序（前 15 個）：\n" + preview
+        if QMessageBox.question(
+                self, "整理順序", msg,
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel
+        ) != QMessageBox.StandardButton.Ok:
+            return
+        try:
+            renamed = reading_order.apply_order(folder, renames)
+        except OSError as e:
+            QMessageBox.warning(
+                self, "整理順序",
+                f"改名途中失敗（檔案可能被其他程式開著）：\n{e}\n\n"
+                "已改好的檔案維持新名稱，關掉佔用的程式後再按一次即可補齊。")
+            self.show_status("⚠️ 整理順序未完成", "#f39c12")
+            return
+        self._remap_renamed_paths(renamed)
+        self.show_status(f"✅ 已整理順序：{len(renamed)} 個檔案改名", "#28a745")
+
+    def _remap_renamed_paths(self, renamed: dict) -> None:
+        """檔案改名後，把記住的「最後開啟檔」與編輯器開著的檔案路徑換成新名稱。"""
+        if not renamed:
+            return
+        norm = {os.path.normcase(os.path.abspath(k)): v for k, v in renamed.items()}
+
+        def _new(path: str) -> str | None:
+            return norm.get(os.path.normcase(os.path.abspath(path))) if path else None
+
+        new = _new(self._last_opened_file)
+        if new:
+            self._last_opened_file = new
+            self.schedule_save()
+        ew = getattr(self, "_edit_window", None)
+        if ew is not None:
+            new = _new(getattr(ew, "_html_file", "") or "")
+            if new:
+                ew._html_file = new
+
     def _find_url_for_text(self, text: str) -> str | None:
         """以投稿標頭指紋查 url_history，回傳對應網址；找不到回 None。
 
@@ -2107,6 +2181,7 @@ class MainWindow(QMainWindow):
                     title_filter=title_filter,
                     group_by_series=self._auto_translate_group_by_series,
                     series_folder=series_folder,
+                    auto_number=self._auto_translate_auto_number,
                     url_list=url_list,
                     stop_event=stop_event,
                     discard_event=discard_event,
@@ -2208,6 +2283,7 @@ class MainWindow(QMainWindow):
             self.show_status(f"❌ 自動翻譯失敗：{error}", "#dc3545")
             QMessageBox.critical(self, "自動翻譯失敗", error)
             return
+        self._remap_renamed_paths(getattr(result, "renamed", {}) or {})
         # 把接續網址回填到「起始網址」，方便直接接續：resume_url＝本批第一個沒翻到
         # 的話（跳過的也算）；都翻到了＝pending_url（停止／暫停／中止時未完成的話）
         # 或 next_url（跑滿話數後的下一話）。
@@ -2753,6 +2829,7 @@ class MainWindow(QMainWindow):
             auto_translate_skip_existing=self._auto_translate_skip_existing,
             auto_translate_group_by_series=(
                 self._auto_translate_group_by_series),
+            auto_translate_auto_number=self._auto_translate_auto_number,
             auto_translate_append_mode=self._auto_translate_append_mode,
             auto_translate_mask_words=self._auto_translate_mask_words,
             auto_translate_mask_word_list=self._auto_translate_mask_word_list,
@@ -2921,6 +2998,8 @@ class MainWindow(QMainWindow):
             getattr(cache, "auto_translate_error_policy", {}) or {})
         self._auto_translate_group_by_series = bool(
             getattr(cache, "auto_translate_group_by_series", False))
+        self._auto_translate_auto_number = bool(
+            getattr(cache, "auto_translate_auto_number", False))
         self._translate_backend = str(cache.translate_backend or "browser")
         self._api_provider = str(getattr(cache, "api_provider", "gemini") or "gemini")
         self._gemini_api_model = str(

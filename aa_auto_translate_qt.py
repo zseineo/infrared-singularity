@@ -267,7 +267,7 @@ class AutoTranslatePanel(QWidget):
         self.title_filter_edit.setToolTip(
             "讀取網址時讀到的標題若不含這段文字（不分大小寫），就跳過該話、讀下一話。\n"
             "・跳過的話不計入「連續話數」，也不存檔\n"
-            "・連續多話（50 話）都不符會自動中止，避免過濾文字打錯時一路抓到最後\n"
+            "・連續多話（50 話）都不符就不再往下讀（先跑完補翻與循環翻譯），避免過濾文字打錯時一路抓到最後\n"
             "・直接比對文字，不是正則")
         # 「⤵ 作品名」：用與「作品資料夾」同一套規則（頁面標題去掉話數後的作品名
         # 主體）填進過濾欄——同一個作品的每一話標題都含作品名，拿它當過濾字最準，
@@ -324,6 +324,17 @@ class AutoTranslatePanel(QWidget):
         name_hl.addWidget(self.doc_title_edit, 1)
         name_hl.addWidget(self.filename_suffix)
         name_hl.addWidget(self.filename_preview, 1)
+        # 自動產生編號：整批結束後依投稿日期替作品資料夾的檔名加上閱讀順序編號
+        # （reading_order，與首頁「整理順序」同一套），番外／幕間也排在正確位置。
+        self.auto_number_cb = QCheckBox("自動產生編號")
+        self.auto_number_cb.setToolTip(
+            "整批結束後，依每個檔案內文第一個投稿標頭的日期（作者發表順序），\n"
+            "替作品資料夾裡的檔名加上 001_、002_… 編號，沒有話數的番外／幕間也會排在正確位置。\n"
+            "・只在有勾「依照標題過濾建立資料夾」、實際存進作品資料夾時才編號\n"
+            "  （輸出資料夾本身可能混著別的作品）\n"
+            "・已編號的檔案仍算「已存在同名檔」，不會重翻\n"
+            "・與首頁「整理順序」相同，之後新增的話會重新編號")
+        name_hl.addWidget(self.auto_number_cb)
         form.addRow("檔名：", name_row)
 
         out_row = QWidget()
@@ -343,42 +354,47 @@ class AutoTranslatePanel(QWidget):
         out_hl.addWidget(btn_browse)
         form.addRow("輸出資料夾：", out_row)
 
-        # 依作品名分資料夾：勾選後在輸出資料夾底下開一層以作品命名的子資料夾。
-        # 名稱整批只算一次（起始網址那一話），故不會一話一個資料夾。
-        self.group_by_series_cb = QCheckBox(
-            "依作品名稱建立資料夾（同名資料夾已存在則直接放進去）")
+        # 依標題過濾分資料夾：勾選後在輸出資料夾底下開一層子資料夾，名稱＝標題過濾
+        # 文字（同一作品各話標題都含它）；過濾留空時退回舊規則（頁面標題去掉話數／
+        # 手動模式的作品名稱）。名稱整批只算一次，故不會一話一個資料夾。
+        self.group_by_series_cb = QCheckBox("依照標題過濾建立資料夾")
         self.group_by_series_cb.setToolTip(
-            "勾選後在輸出資料夾底下開一層以作品命名的子資料夾，本批各話都存進去。\n"
-            "・資料夾名整批只決定一次（依起始網址那一話），不會每話開一個資料夾\n"
-            "・自動填入作品名稱模式 → 由頁面標題去掉話數後取得作品名主體\n"
-            "・手動模式 → 直接用上面檔名欄的作品名稱\n"
-            "・同名資料夾已存在就直接沿用，不另外建新的\n"
-            "算出的名稱會顯示在下面「作品資料夾」欄。")
-        self.group_by_series_cb.toggled.connect(self._set_series_row_enabled)
+            "勾選後在輸出資料夾底下開一層子資料夾，本批各話都存進去。\n"
+            "・資料夾名＝上面「標題過濾」的文字，改過濾文字右邊預覽立即跟著變\n"
+            "・標題過濾留空時 → 自動填入作品名稱模式用頁面標題去掉話數後的作品名，\n"
+            "  手動模式用檔名欄的作品名稱\n"
+            "・資料夾名整批只決定一次，不會每話開一個資料夾\n"
+            "・同名資料夾已存在就直接放進去，不另外建新的")
+        self.group_by_series_cb.toggled.connect(
+            lambda _c: self._set_series_row_enabled(not self._running))
         # 勾選與否決定存進輸出資料夾還是作品子資料夾，同名序號要重算
         self.group_by_series_cb.toggled.connect(lambda _c: self._schedule_refresh())
-        form.addRow("", self.group_by_series_cb)
 
-        # 作品資料夾名（唯讀）：跟著檔名欄的模式——手動模式等於作品名稱，
-        # 自動模式由頁面標題去掉話數後產生。要改名就改作品名稱（手動模式）。
+        # 作品資料夾名預覽（唯讀，放在勾選框右邊；沒勾時不建資料夾，整個隱藏）
         self.series_folder_edit = QLineEdit()
         self.series_folder_edit.setReadOnly(True)
         self.series_folder_edit.setStyleSheet(_READONLY_FIELD_QSS)
         self.series_folder_edit.setToolTip(
             "本批實際會使用的作品資料夾名稱（輸出資料夾底下的一層），不能手動修改。\n"
-            "・手動模式 → 等於檔名欄的作品名稱\n"
-            "・自動填入作品名稱模式 → 起始網址的頁面標題去掉話數後的作品名主體")
-        self._series_folder_value = ""  # 目前起始網址算出的有效名稱（開始時帶給協調器）
+            "・有標題過濾 → 等於標題過濾文字\n"
+            "・標題過濾留空 → 手動模式等於作品名稱；自動填入作品名稱模式為頁面標題去掉話數後的作品名")
+        self._series_folder_value = ""  # 開始時帶給協調器的有效名稱（_apply_series_folder）
+        # 不看標題過濾時的名稱與顯示文字（頁面標題推算／手動模式作品名稱）
+        self._computed_series: tuple[str, str | None] = ("", None)
         # 右側提示：輸出資料夾底下是否已有同名資料夾（已存在就直接放進去）
         self.series_exists_label = QLabel("")
         series_row = QWidget()
         series_hl = QHBoxLayout(series_row)
         series_hl.setContentsMargins(0, 0, 0, 0)
         series_hl.setSpacing(6)
+        series_hl.addWidget(self.group_by_series_cb)
         series_hl.addWidget(self.series_folder_edit, 1)
         series_hl.addWidget(self.series_exists_label)
-        form.addRow("作品資料夾：", series_row)
-        self._series_folder_label = form.labelForField(series_row)
+        form.addRow("", series_row)
+        # 改標題過濾 → 資料夾名立即跟著變；同名序號（看子資料夾）延遲重算
+        self.title_filter_edit.textChanged.connect(lambda _t: self._apply_series_folder())
+        self.title_filter_edit.textChanged.connect(
+            lambda _t: self.group_by_series_cb.isChecked() and self._schedule_refresh())
 
         # 起始網址等欄位變動後延遲一下再重算檔名／作品資料夾（連續輸入只算一次）
         self._refresh_timer = QTimer(self)
@@ -1014,6 +1030,8 @@ class AutoTranslatePanel(QWidget):
             (self.output_kw_cb, "_auto_translate_output_kw", self.output_kw_cb.isChecked),
             (self.group_by_series_cb, "_auto_translate_group_by_series",
              self.group_by_series_cb.isChecked),
+            (self.auto_number_cb, "_auto_translate_auto_number",
+             self.auto_number_cb.isChecked),
             (self.loop_cb, "_auto_translate_loop", self.loop_cb.isChecked),
             (self.loop_ratio_spin, "_auto_translate_loop_ratio",
              self.loop_ratio_spin.value),
@@ -1111,7 +1129,9 @@ class AutoTranslatePanel(QWidget):
         self._update_output_kw_btn()
         group_series = bool(getattr(m, "_auto_translate_group_by_series", False))
         self.group_by_series_cb.setChecked(group_series)
-        self._set_series_row_enabled(group_series)
+        self._set_series_row_enabled(not self._running)
+        self.auto_number_cb.setChecked(bool(
+            getattr(m, "_auto_translate_auto_number", False)))
         self.loop_cb.setChecked(bool(getattr(m, "_auto_translate_loop", False)))
         self.loop_ratio_spin.setValue(int(
             getattr(m, "_auto_translate_loop_ratio", 100) or 100))
@@ -1279,20 +1299,39 @@ class AutoTranslatePanel(QWidget):
         self.filename_suffix.setVisible(not auto_fill)
         self.filename_preview.setVisible(auto_fill)
         self.series_folder_edit.setPlaceholderText(
-            "（依起始網址的頁面標題自動產生）" if auto_fill else "（等於作品名稱）")
+            "（標題過濾留空 → 依起始網址的頁面標題自動產生）" if auto_fill
+            else "（標題過濾留空 → 等於作品名稱）")
         self._previewed_url = ""
 
     def _set_series_row_enabled(self, enabled: bool) -> None:
-        """作品資料夾欄位（含標籤）僅在勾選「依作品名稱建立資料夾」時可用。"""
+        """作品資料夾預覽只在勾選「依照標題過濾建立資料夾」時顯示；enabled＝非執行中。"""
+        shown = self.group_by_series_cb.isChecked()
+        self.series_folder_edit.setVisible(shown)
+        self.series_exists_label.setVisible(shown)  # 沒勾選時不建資料夾，不必提示
         self.series_folder_edit.setEnabled(enabled)
-        self.series_exists_label.setVisible(enabled)  # 沒勾選時不建資料夾，不必提示
-        if self._series_folder_label is not None:
-            self._series_folder_label.setEnabled(enabled)
 
     def _set_series_folder(self, value: str, display: str | None = None) -> None:
-        """設定作品資料夾：value 為開始時帶給協調器的名稱，display 為欄位顯示文字。"""
-        self._series_folder_value = value
-        self.series_folder_edit.setText(value if display is None else display)
+        """設定不看標題過濾時的作品資料夾：value 為名稱，display 為欄位顯示文字。"""
+        self._computed_series = (value, display)
+        self._apply_series_folder()
+
+    def _filter_series_folder(self) -> str:
+        """標題過濾文字清理成資料夾名（與協調器同一套清理規則）；過濾留空回空字串。"""
+        import aa_auto_translate as a
+        return a.compute_series_folder_name(
+            doc_title=self.title_filter_edit.text(), fetch_auto_fill_title=False,
+            page_title="")
+
+    def _apply_series_folder(self) -> None:
+        """有效作品資料夾：有標題過濾就用它，否則用推算的名稱。"""
+        name = self._filter_series_folder()
+        if name:
+            self._series_folder_value = name
+            self.series_folder_edit.setText(name)
+        else:
+            value, display = self._computed_series
+            self._series_folder_value = value
+            self.series_folder_edit.setText(value if display is None else display)
         self._update_series_exists()
 
     def _update_series_exists(self) -> None:
@@ -1335,8 +1374,8 @@ class AutoTranslatePanel(QWidget):
         """
         self._preview_gen += 1
         if self._title_auto:
-            self._series_folder_value = ""
-            self._update_series_exists()
+            self._computed_series = ("", self._computed_series[1])
+            self._apply_series_folder()
         self._refresh_timer.start()
 
     def _refresh_previews(self) -> None:
@@ -1372,7 +1411,8 @@ class AutoTranslatePanel(QWidget):
                 self._set_series_folder("", "⏳ 讀取網址中…")
         out_dir = self.out_edit.text().strip()
         group = self.group_by_series_cb.isChecked()
-        manual_folder = self._series_folder_value if not auto_fill else ""
+        manual_folder = self._computed_series[0] if not auto_fill else ""
+        filter_folder = self._filter_series_folder()
         # 與主程式一致（統一為設定資料夾），讓預覽讀到正確設定
         base_dir = getattr(self._main, "_settings_base_dir", None) \
             or app_paths.data_dir()
@@ -1390,7 +1430,7 @@ class AutoTranslatePanel(QWidget):
                     folder = a.preview_series_folder(
                         url, base_dir=base_dir, doc_title=doc_title,
                         fetch_auto_fill_title=True, allow_network=False)
-                sub = folder if auto_fill else manual_folder
+                sub = filter_folder or (folder if auto_fill else manual_folder)
                 if name and group and sub and out_dir:
                     # 依作品名稱建立資料夾時實際存進子資料夾，同名序號要看那裡
                     # （算不出資料夾名時協調器存回輸出資料夾，上面的結果即正確）
@@ -1483,8 +1523,9 @@ class AutoTranslatePanel(QWidget):
             if not quiet:
                 self._main.show_status("⚠️ 請先填入起始網址（或手動網址清單）", "#f39c12")
             return
-        if self._title_auto and self._series_folder_value:
-            self._set_title_filter(self._series_folder_value)
+        if self._title_auto and self._computed_series[0]:
+            # 用推算的名稱（_series_folder_value 可能就是目前的過濾文字本身）
+            self._set_title_filter(self._computed_series[0])
             return
         doc_title = self.doc_title_edit.text().strip()
         base_dir = getattr(self._main, "_settings_base_dir", None) \
@@ -2014,7 +2055,7 @@ class AutoTranslatePanel(QWidget):
                   self.gem_edit, self.model_combo, self.max_session_spin,
                   self.input_method_combo, *self._send_btns.values(),
                   self.doc_title_edit, self.out_edit, self.skip_existing_cb,
-                  self.btn_url_list, self.group_by_series_cb,
+                  self.btn_url_list, self.group_by_series_cb, self.auto_number_cb,
                   self.mask_words_cb, self.btn_mask_list,
                   self.output_kw_cb, self.btn_output_kw, self.loop_cb,
                   *self._backend_btns.values(), *self._count_quick_btns):

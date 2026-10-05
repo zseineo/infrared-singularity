@@ -31,6 +31,7 @@ from typing import Callable
 
 from aa_tool import app_paths, constants, html_io, original_cache
 from aa_tool import debug_log as debug_log_mod
+from aa_tool import reading_order
 from aa_tool import settings_manager
 from aa_tool import text_extraction, translation_engine, url_fetcher
 from aa_tool.gemini_web import (
@@ -263,6 +264,7 @@ class AutoResult:
     # 那種沒有可翻文字的除外）；都翻到了就是 pending_url／next_url。GUI 用它回填起始網址。
     resume_url: str = ""
     debug_log_path: str = ""                        # 勾「Debug Log」時這次的記錄檔
+    renamed: dict = field(default_factory=dict)     # 自動產生編號：{舊路徑: 新路徑}
 
 
 # ── URL 快取（沿用 aa_main_qt 的 %TEMP%/aa_url_cache/<md5>.html 格式）──
@@ -716,16 +718,15 @@ def _unique_path(out_dir: str, name_base: str) -> str:
 
     第一個檔案不加任何後綴（例：``Title_34.html``），第二個起以 ``-N`` 區分
     （例：``Title_34-2.html``），這樣與作品中常見的「34、34-2」並列習慣一致。
+    資料夾裡已加上閱讀順序編號（``012_Title_34.html``）的檔案視同 ``Title_34.html``。
     """
-    path = os.path.join(out_dir, f"{name_base}.html")
-    if not os.path.exists(path):
-        return path
+    taken = reading_order.taken_names(out_dir)
+    name = f"{name_base}.html"
     i = 2
-    while True:
-        candidate = os.path.join(out_dir, f"{name_base}-{i}.html")
-        if not os.path.exists(candidate):
-            return candidate
+    while name.casefold() in taken:
+        name = f"{name_base}-{i}.html"
         i += 1
+    return os.path.join(out_dir, name)
 
 
 def compute_chapter_name_base(
@@ -1033,6 +1034,7 @@ def run_auto_translate(
     output_keyword_rules: list | None = None,
     loop_ratio: int | None = None,
     loop_max_idle: int | None = None,
+    auto_number: bool | None = None,
     on_pause: Callable[[str], None] | None = None,
     resume_event=None,
     error_policy: dict | None = None,
@@ -1062,6 +1064,10 @@ def run_auto_translate(
         auto_translate_group_by_series（預設 False）。**資料夾名整批只決定一次**
         （手動模式用 doc_title；自動模式用第一話 page_title 收斂出的作品名主體），
         之後的話一律沿用，故不會發生「一話一個資料夾」。算不出名字時退回 out_dir。
+    auto_number：自動產生編號。整批結束後依投稿日期替作品資料夾的檔名重新加上
+        閱讀順序編號（``reading_order.renumber_folder``），對照記在 ``renamed``。
+        只在實際存進作品子資料夾時才做（輸出資料夾可能混著別的作品）。None 時讀
+        cache 的 auto_translate_auto_number（預設 False）。
     series_folder：明確指定的作品資料夾名（GUI 面板算好的；CLI 可用 --series-folder 指定）。
         非空時直接採用，不再從標題推算——面板顯示什麼就存到哪，所見即所得。
     append_mode：對應主畫面「加入翻譯」（True，保留原文、翻譯附在原文之後）／「替換
@@ -1133,6 +1139,8 @@ def run_auto_translate(
     if group_by_series is None:
         group_by_series = getattr(
             cache, "auto_translate_group_by_series", False)
+    if auto_number is None:
+        auto_number = getattr(cache, "auto_translate_auto_number", False)
     if mask_words_enabled is None:
         mask_words_enabled = getattr(cache, "auto_translate_mask_words", False)
     if mask_word_list is None:
@@ -1560,8 +1568,10 @@ def run_auto_translate(
                         doc_title=doc_title,
                         fetch_auto_fill_title=fetch_auto_fill_title,
                         source=source, page_title=page_title, fallback_index=i)
-                    existing = os.path.join(effective_out_dir, f"{name_base}.html")
-                    if os.path.exists(existing):
+                    # 已加上閱讀順序編號（012_…）的檔案也算同名
+                    existing = reading_order.find_existing(
+                        effective_out_dir, f"{name_base}.html")
+                    if existing:
                         result.skipped.append((url, f"{name_base}.html"))
                         _event("skipped", url, page_title,
                                f"已存在同名檔：{name_base}.html")
@@ -1801,6 +1811,21 @@ def run_auto_translate(
     finally:
         session.close()
 
+    # 自動產生編號：依投稿日期替作品資料夾重新編號（只動作品子資料夾）
+    if auto_number and result.done:
+        if effective_out_dir == out_dir:
+            log("🔢 自動產生編號：本批沒有存進作品資料夾（輸出資料夾可能混著別的作品），略過編號。")
+        else:
+            try:
+                renamed, undated = reading_order.renumber_folder(effective_out_dir)
+            except OSError as e:
+                log(f"⚠️ 自動產生編號失敗（檔案可能被其他程式開著）：{e}")
+            else:
+                result.renamed = renamed
+                result.done = [renamed.get(p, p) for p in result.done]
+                log(f"🔢 已依投稿日期重新編號：{len(renamed)} 個檔案改名"
+                    + (f"（{len(undated)} 個讀不到日期，排在最後）" if undated else "") + "。")
+
     # 仍留在待補翻列表的話＝暫時跳過後始終沒補翻成功 → 列入失敗，總結才看得到
     for d_url, *_ in deferred:
         reason = "伺服器忙碌／逾時，重試達上限而暫時跳過，之後未能補翻成功"
@@ -1896,6 +1921,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="在輸出資料夾下依作品名開子資料夾存放（整批同一個）")
     parser.add_argument("--series-folder", default="",
                         help="指定作品資料夾名（不指定則從第一話標題推算）")
+    parser.add_argument("--auto-number", action="store_true",
+                        help="結束後依投稿日期替作品資料夾的檔名加上閱讀順序編號")
     parser.add_argument("--out", required=True, help="輸出 HTML 的資料夾")
     parser.add_argument("--gem-url", default=None,
                         help="Gemini Gem 網址（預設讀設定 gemini_gem_url）")
@@ -1927,6 +1954,7 @@ def main(argv: list[str] | None = None) -> int:
             title_filter=args.title_filter,
             group_by_series=(True if args.group_by_series else None),
             series_folder=args.series_folder,
+            auto_number=(True if args.auto_number else None),
             append_mode=(True if args.append else None),
             max_per_session=args.max_per_session,
             required_model=args.required_model,

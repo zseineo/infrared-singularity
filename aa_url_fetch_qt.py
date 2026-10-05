@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
 
 from aa_tool.html_io import read_html_pre_content
 from aa_tool.qt_helpers import make_button
+from aa_tool.reading_order import strip_order_prefix
 from aa_tool.text_extraction import (
     TITLE_CHAPTER_RES, extract_series_folder_name, extract_work_title,
     main_chapter_number,
@@ -904,7 +905,7 @@ class UrlFetchWindow(QWidget):
             stem, ext = os.path.splitext(fn)
             if ext.lower() not in (".html", ".htm", ".txt"):
                 continue
-            n = main_chapter_number(stem)
+            n = main_chapter_number(strip_order_prefix(stem))
             if n is not None:
                 by_num.setdefault(n, []).append(os.path.join(folder, fn))
         folder_name = os.path.basename(os.path.normpath(folder))

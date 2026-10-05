@@ -196,9 +196,9 @@ class AppCache:
     gemini_gem_url: str = ""
     gemini_profile_dir: str = ""
     gemini_max_per_session: int = 3
-    # gemini_input_method：填入輸入框的方式 fill／quill／clipboard（見 gemini_web.INPUT_METHODS）。
+    # gemini_input_method：填入輸入框的方式 fill／quill／clipboard／os_paste（見 gemini_web.INPUT_METHODS）。
     gemini_input_method: str = "fill"
-    # gemini_send_method：按送出的方式 program／os_click（見 gemini_web.SEND_METHODS）。
+    # gemini_send_method：按送出的方式 program／os_click／os_click_input（見 gemini_web.SEND_METHODS）。
     gemini_send_method: str = "program"
     gemini_selectors: dict = field(default_factory=dict)
     auto_translate_out_dir: str = ""

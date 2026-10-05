@@ -278,6 +278,10 @@ _HEALTH_JS = ("() => ({n: document.getElementsByTagName('*').length,"
 # （等同「按下複製鍵到實際取得內容之間的緩衝」）。
 _POST_GEN_SETTLE = 3.0
 
+# 填入內容後、按送出前的停頓秒數。使用者回報：不論哪種送出方式，填完立刻送出
+# 很容易遇到「發生錯誤 (1095)」，推測頁面還沒處理完輸入內容（v2.99）。
+_PRE_SEND_PAUSE = 0.5
+
 # 自動切換模型失敗（選單選擇器失效）時，退回等使用者手動切換的最長秒數。
 _MODEL_WAIT_TIMEOUT = 300   # 5 分鐘
 _MODEL_WAIT_POLL = 3        # 每 3 秒重讀一次模型字串
@@ -326,6 +330,9 @@ INPUT_METHODS: dict[str, str] = {
     "fill": "逐字填入（原本做法，最保險但長文較慢）",
     "quill": "直接寫入編輯器（快，不碰剪貼簿）",
     "clipboard": "剪貼簿貼上（快，會暫時佔用剪貼簿，貼完還原）",
+    # v2.99 實驗：程式的 Ctrl+V 是 Playwright 模擬的按鍵；改用 Windows 真實鍵盤事件，
+    # 與使用者手動 Ctrl+V 走同一條路（會把瀏覽器叫到前面一瞬間）
+    "os_paste": "系統鍵盤貼上（實驗；與手動 Ctrl+V 相同，會暫時佔用剪貼簿並切到瀏覽器）",
 }
 DEFAULT_INPUT_METHOD = "fill"
 
@@ -336,6 +343,8 @@ DEFAULT_INPUT_METHOD = "fill"
 SEND_METHODS: dict[str, str] = {
     "program": "程式送出（原本做法，不影響滑鼠）",
     "os_click": "系統滑鼠點擊（可避開部分時段被擋；每次送出借用滑鼠一瞬間）",
+    # v2.99 實驗：只點送出鈕仍有一定比例被擋 → 連輸入框也用真實滑鼠點，再填字、點送出
+    "os_click_input": "系統滑鼠點輸入框＋送出鈕（實驗；每次送出借用滑鼠兩次）",
 }
 DEFAULT_SEND_METHOD = "program"
 
@@ -425,18 +434,10 @@ def _win_clipboard_set(text: str) -> bool:
 _OS_CLICK_TRIES = 3
 
 
-def _send_mouse_click_at(x: int, y: int) -> bool:
-    """在螢幕座標 (x, y) 用 SendInput 點一下左鍵（Windows）；成功回 True。
-
-    按下與放開各送一批「移到絕對座標＋按鍵」：同一批 SendInput 的事件不會被使用者的
-    滑鼠移動插隊，所以就算使用者正在動滑鼠，按下與放開也都落在 (x, y)。
-    座標以整個虛擬桌面正規化到 0～65535（多螢幕適用）。
-    """
-    if os.name != "nt":
-        return False
+def _win_input_types():
+    """SendInput 用的 (INPUT, MOUSEINPUT, KEYBDINPUT) 結構（Windows）。"""
     import ctypes
     from ctypes import wintypes
-    u32 = ctypes.windll.user32
 
     class _MOUSEINPUT(ctypes.Structure):
         _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
@@ -457,6 +458,47 @@ def _send_mouse_click_at(x: int, y: int) -> bool:
 
     class _INPUT(ctypes.Structure):
         _fields_ = [("type", wintypes.DWORD), ("u", _U)]
+
+    return _INPUT, _MOUSEINPUT, _KEYBDINPUT
+
+
+def _send_ctrl_v() -> bool:
+    """用 SendInput 按一下 Ctrl+V（Windows 真實鍵盤事件，送往目前的前景視窗）。"""
+    if os.name != "nt":
+        return False
+    import ctypes
+    u32 = ctypes.windll.user32
+    _INPUT, _MOUSEINPUT, _KEYBDINPUT = _win_input_types()
+    vk_ctrl, vk_v, keyup = 0x11, 0x56, 0x0002
+
+    def _key(vk: int, flags: int) -> bool:
+        arr = (_INPUT * 1)()
+        arr[0].type = 1                                       # INPUT_KEYBOARD
+        arr[0].u.ki = _KEYBDINPUT(vk, u32.MapVirtualKeyW(vk, 0), flags, 0, 0)
+        return u32.SendInput(1, arr, ctypes.sizeof(_INPUT)) == 1
+
+    ok = _key(vk_ctrl, 0)
+    time.sleep(0.03)
+    ok = ok and _key(vk_v, 0)
+    time.sleep(0.05)
+    _key(vk_v, keyup)                 # 放開一定要送，避免 Ctrl／V 卡在按下狀態
+    time.sleep(0.03)
+    _key(vk_ctrl, keyup)
+    return ok
+
+
+def _send_mouse_click_at(x: int, y: int) -> bool:
+    """在螢幕座標 (x, y) 用 SendInput 點一下左鍵（Windows）；成功回 True。
+
+    按下與放開各送一批「移到絕對座標＋按鍵」：同一批 SendInput 的事件不會被使用者的
+    滑鼠移動插隊，所以就算使用者正在動滑鼠，按下與放開也都落在 (x, y)。
+    座標以整個虛擬桌面正規化到 0～65535（多螢幕適用）。
+    """
+    if os.name != "nt":
+        return False
+    import ctypes
+    u32 = ctypes.windll.user32
+    _INPUT, _MOUSEINPUT, _KEYBDINPUT = _win_input_types()
 
     vx, vy = u32.GetSystemMetrics(76), u32.GetSystemMetrics(77)   # 虛擬桌面左上
     vw, vh = u32.GetSystemMetrics(78), u32.GetSystemMetrics(79)   # 虛擬桌面寬高
@@ -642,6 +684,38 @@ class GeminiWebSession:
         self._ensure_logged_in(login_timeout)
         self._ensure_model()
 
+    def open_for_manual_test(self, stop_event) -> None:
+        """手動測試用：以同一個 profile、同樣的啟動參數開瀏覽器並進入 Gem，不做任何操作。
+
+        讓使用者在「與自動翻譯完全相同的瀏覽器」裡手動送訊息對照（判斷被擋是瀏覽器
+        本身的問題，還是自動化操作的問題）。阻塞到使用者關掉所有分頁、或 stop_event
+        被設定為止，結束時關閉瀏覽器。
+        """
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as e:
+            raise GeminiWebError(
+                "未安裝 playwright，請執行：pip install playwright "
+                "並接著 playwright install chromium") from e
+        if self.profile_dir:
+            os.makedirs(self.profile_dir, exist_ok=True)
+        _use_system_browsers_path(self._log)
+        self._pw = sync_playwright().start()
+        try:
+            self._context = self._launch_context()
+            pages = self._context.pages
+            self._page = pages[0] if pages else self._context.new_page()
+            self._page.goto(self.gem_url, wait_until="domcontentloaded")
+            while not stop_event.is_set():
+                try:
+                    if not self._context.pages:
+                        break
+                    self._context.pages[0].wait_for_timeout(500)
+                except Exception:  # noqa: BLE001 — 瀏覽器被使用者關掉
+                    break
+        finally:
+            self.close()
+
     def _launch_context(self):
         """依 ``_BROWSER_CHANNELS`` 順序啟動，回傳第一個成功的 persistent context。
 
@@ -778,9 +852,11 @@ class GeminiWebSession:
             with self._timed("找輸入框"):
                 editor = self._require("input")
             with self._timed("點輸入框"):
-                editor.click()
+                self._click_input(editor)
             with self._timed(f"填入文字（{self.input_method}）"):
                 self._fill_input(editor, text)
+            if _PRE_SEND_PAUSE > 0:
+                time.sleep(_PRE_SEND_PAUSE)
             prev_count = self._response_count()
             with self._timed(f"按送出（{self.send_method}）"):
                 self._send()
@@ -828,6 +904,10 @@ class GeminiWebSession:
             if self._paste_via_clipboard(editor, text):
                 return
             self._log("  （剪貼簿貼上沒成功，改用逐字填入）")
+        elif method == "os_paste":
+            if self._paste_via_os_keyboard(editor, text):
+                return
+            self._log("  （系統鍵盤貼上沒成功，改用逐字填入）")
         else:
             editor.fill(text)
             return
@@ -879,6 +959,49 @@ class GeminiWebSession:
             return False
         finally:
             _win_clipboard_set(backup or "")
+
+    def _paste_via_os_keyboard(self, editor, text: str) -> bool:
+        """暫借剪貼簿，把瀏覽器叫到前面後用 Windows 真實鍵盤按 Ctrl+V（v2.99 實驗）。
+
+        與 ``_paste_via_clipboard`` 的差別只在按鍵來源：那邊是 Playwright 模擬的按鍵，
+        這裡是 SendInput，與使用者手動 Ctrl+V 相同。輸入框沒有焦點時先用程式點一下
+        （送出方式為「點框＋送出」時，前一步已用系統滑鼠點過）。貼完核對內容，
+        還原剪貼簿與原本的前景視窗。非 Windows 或找不到瀏覽器視窗回 False。
+        """
+        if os.name != "nt":
+            return False
+        import ctypes
+        u32 = ctypes.windll.user32
+        hwnd = self._find_browser_hwnd()
+        if not hwnd:
+            self._dbg("系統鍵盤貼上：找不到瀏覽器視窗")
+            return False
+        backup = _win_clipboard_get()
+        prev_fg = u32.GetForegroundWindow()
+        try:
+            if not _win_clipboard_set(text):
+                self._dbg("寫入剪貼簿失敗")
+                return False
+            if not self._wait_page_focus(hwnd):
+                self._dbg("系統鍵盤貼上：瀏覽器視窗沒有取得焦點，照樣嘗試")
+            try:
+                focused = bool(editor.evaluate(
+                    "el => el === document.activeElement || el.contains(document.activeElement)"))
+            except Exception:  # noqa: BLE001
+                focused = False
+            if not focused:
+                editor.click()
+            if not _send_ctrl_v():
+                self._dbg("系統鍵盤貼上：SendInput 送不出去")
+                return False
+            return self._input_matches(editor, text, wait=15.0)
+        except Exception as e:  # noqa: BLE001
+            self._dbg(f"系統鍵盤貼上失敗：{brief_error(e)}")
+            return False
+        finally:
+            _win_clipboard_set(backup or "")
+            if prev_fg and prev_fg != hwnd:
+                self._activate_window(prev_fg)
 
     # ── 對話管理 ──
 
@@ -1293,9 +1416,26 @@ class GeminiWebSession:
                 f"或設定檔的 gemini_selectors。")
         return loc
 
+    def _click_input(self, editor) -> None:
+        """點輸入框。送出方式為「點輸入框＋送出鈕」時用系統滑鼠點，點不到就退回程式點擊。"""
+        if self.send_method == "os_click_input":
+            def _focused() -> bool:
+                try:
+                    return bool(editor.evaluate(
+                        "el => el === document.activeElement || el.contains(document.activeElement)"))
+                except Exception:  # noqa: BLE001
+                    return False
+            try:
+                if self._os_click_locator(editor, "輸入框", _focused, lambda: True):
+                    return
+            except Exception as e:  # noqa: BLE001 — 失敗一律退回程式點擊
+                self._dbg(f"系統滑鼠點輸入框例外：{brief_error(e)}")
+            self._log("  （系統滑鼠點輸入框沒成功，改用程式點擊）")
+        editor.click()
+
     def _send(self) -> None:
         """依 ``send_method`` 按送出；系統滑鼠點擊不成功就退回程式送出。"""
-        if self.send_method == "os_click":
+        if self.send_method in ("os_click", "os_click_input"):
             try:
                 if self._os_click_send():
                     return
@@ -1320,10 +1460,6 @@ class GeminiWebSession:
         """
         if os.name != "nt":
             return False
-        import ctypes
-        from ctypes import wintypes
-        u32 = ctypes.windll.user32
-        page = self._page
         deadline = time.time() + 15
         btn = None
         while time.time() < deadline:
@@ -1337,47 +1473,6 @@ class GeminiWebSession:
             time.sleep(0.5)
         if btn is None:
             return False
-        hwnd = self._find_browser_hwnd()
-        if not hwnd:
-            self._dbg("系統滑鼠點擊：找不到瀏覽器視窗")
-            return False
-        prev_fg = u32.GetForegroundWindow()
-        orig = wintypes.POINT()
-        u32.GetCursorPos(ctypes.byref(orig))
-
-        k32 = ctypes.windll.kernel32
-
-        def _activate(h) -> None:
-            # 切前景視窗。**不可用「按一下 Alt」解除前景鎖定**：Chrome 會把焦點移到
-            # 「設定與其他」選單鈕，還原時也會讓使用者原本的程式（VS Code 等）選到選單列。
-            # 改成暫時共用目前前景視窗執行緒的輸入佇列，SetForegroundWindow 就不會被擋。
-            if u32.IsIconic(h):
-                u32.ShowWindow(h, 9)                 # SW_RESTORE
-            fg_tid = u32.GetWindowThreadProcessId(u32.GetForegroundWindow(), None)
-            me = k32.GetCurrentThreadId()
-            attached = bool(fg_tid) and fg_tid != me and \
-                bool(u32.AttachThreadInput(me, fg_tid, True))
-            try:
-                u32.SetForegroundWindow(h)
-                u32.BringWindowToTop(h)
-            finally:
-                if attached:
-                    u32.AttachThreadInput(me, fg_tid, False)
-
-        def _wait_focus() -> bool:
-            # 視窗真的變成作用中、頁面拿到焦點才點；切不過去就再切一次
-            for _ in range(2):
-                _activate(hwnd)
-                page.bring_to_front()
-                end = time.time() + 1.0
-                while time.time() < end:
-                    try:
-                        if page.evaluate("document.hasFocus()"):
-                            return True
-                    except Exception:
-                        pass
-                    time.sleep(0.02)
-            return False
 
         def _sent() -> bool:
             # 送出後 Gemini 會清空輸入框並出現停止鈕
@@ -1388,6 +1483,38 @@ class GeminiWebSession:
                 return editor is not None and not (editor.inner_text(timeout=1000) or "").strip()
             except Exception:
                 return False
+
+        def _can_retry() -> bool:
+            # 輸入框還有字（送出鈕仍可按）才補點；已送出時多點會中斷生成
+            try:
+                return btn.is_enabled()
+            except Exception:
+                return False
+
+        return self._os_click_locator(btn, "送出鈕", _sent, _can_retry)
+
+    def _os_click_locator(self, loc, label: str, done, can_retry) -> bool:
+        """用 Windows 系統滑鼠點 ``loc``（對位、點擊、還原游標與前景視窗見 ``_os_click_send``）。
+
+        ``done()`` 為點擊生效的判定；沒生效且 ``can_retry()`` 為真就再點，最多
+        ``_OS_CLICK_TRIES`` 次。對不準或點了沒生效回 False。
+        """
+        import ctypes
+        from ctypes import wintypes
+        u32 = ctypes.windll.user32
+        page = self._page
+        btn = loc
+        hwnd = self._find_browser_hwnd()
+        if not hwnd:
+            self._dbg("系統滑鼠點擊：找不到瀏覽器視窗")
+            return False
+        prev_fg = u32.GetForegroundWindow()
+        orig = wintypes.POINT()
+        u32.GetCursorPos(ctypes.byref(orig))
+        _activate = self._activate_window
+
+        def _wait_focus() -> bool:
+            return self._wait_page_focus(hwnd)
 
         try:
             if not _wait_focus():
@@ -1432,7 +1559,7 @@ class GeminiWebSession:
                     break
                 px += ex * dpr
                 py += ey * dpr
-            self._dbg(f"系統滑鼠點擊：{'對準' if hit else '對不準'}送出鈕"
+            self._dbg(f"系統滑鼠點擊：{'對準' if hit else '對不準'}{label}"
                       f"（頁面座標 {got}，目標 {tx:.0f},{ty:.0f}）")
             if not hit:
                 return False
@@ -1447,7 +1574,7 @@ class GeminiWebSession:
                 u32.SetCursorPos(orig.x, orig.y)
                 end = time.time() + 1.5
                 while time.time() < end:
-                    if _sent():
+                    if done():
                         if n > 1:
                             self._dbg(f"系統滑鼠點擊：第 {n} 次點擊才送出")
                         return True
@@ -1457,19 +1584,56 @@ class GeminiWebSession:
                 self._dbg(f"系統滑鼠點擊：第 {n} 次點擊後沒有送出，再點一次")
                 if not _wait_focus():
                     self._dbg("系統滑鼠點擊：瀏覽器視窗仍沒有取得焦點")
-                try:
-                    if not btn.is_enabled():
-                        break
-                except Exception:
+                if not can_retry():
                     break
-            # 點了沒送出：輸入框還有字，交給呼叫端改用程式送出
-            self._dbg(f"系統滑鼠點擊：點 {_OS_CLICK_TRIES} 次都沒有送出")
+            # 點了沒生效，交給呼叫端改用程式點擊／送出
+            self._dbg(f"系統滑鼠點擊：點{label} {_OS_CLICK_TRIES} 次都沒有生效")
             return False
         finally:
             # 還原：游標回原位、原本的前景視窗回到前面（使用者正在用的程式）
             u32.SetCursorPos(orig.x, orig.y)
             if prev_fg and prev_fg != hwnd:
                 _activate(prev_fg)
+
+    @staticmethod
+    def _activate_window(h) -> None:
+        """切前景視窗（Windows）。
+
+        **不可用「按一下 Alt」解除前景鎖定**：Chrome 會把焦點移到「設定與其他」選單鈕，
+        還原時也會讓使用者原本的程式（VS Code 等）選到選單列。改成暫時共用目前前景
+        視窗執行緒的輸入佇列，SetForegroundWindow 就不會被擋。
+        """
+        import ctypes
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        if u32.IsIconic(h):
+            u32.ShowWindow(h, 9)                 # SW_RESTORE
+        fg_tid = u32.GetWindowThreadProcessId(u32.GetForegroundWindow(), None)
+        me = k32.GetCurrentThreadId()
+        attached = bool(fg_tid) and fg_tid != me and \
+            bool(u32.AttachThreadInput(me, fg_tid, True))
+        try:
+            u32.SetForegroundWindow(h)
+            u32.BringWindowToTop(h)
+        finally:
+            if attached:
+                u32.AttachThreadInput(me, fg_tid, False)
+
+    def _wait_page_focus(self, hwnd) -> bool:
+        """把瀏覽器視窗切到前景，等頁面真的拿到焦點（document.hasFocus）；切不過去再切一次。"""
+        page = self._page
+        for _ in range(2):
+            self._activate_window(hwnd)
+            page.bring_to_front()
+            end = time.time() + 1.0
+            while time.time() < end:
+                try:
+                    if page.evaluate("document.hasFocus()"):
+                        return True
+                except Exception:
+                    pass
+                time.sleep(0.02)
+        return False
 
     def _find_browser_hwnd(self) -> int:
         """找這個 Playwright 瀏覽器的頂層視窗：暫時把分頁標題改成唯一字串再比對視窗標題。

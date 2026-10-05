@@ -179,6 +179,7 @@ class AutoTranslatePanel(QWidget):
         super().__init__()
         self._main = main_window
         self._running = False
+        self._manual_stop: threading.Event | None = None  # 手動測試瀏覽器開著時的關閉訊號
         self._loading = False   # _load_from_main 設值中：不要把半套值寫回主視窗
         self._build_ui()
         self._load_from_main()
@@ -453,8 +454,11 @@ class AutoTranslatePanel(QWidget):
             "  訊息一律回「我是語言模型，幫不上忙」，改用這個就正常（實測）。\n"
             "  每次送出會把瀏覽器叫到最前面（約半秒），游標跳到送出鈕點一下立刻跳回（約 0.1 秒），\n"
             "  再把原本的視窗還原——那一瞬間正在打字或拖曳會被打斷；點擊本身不會被你的滑鼠帶偏。\n"
-            "  螢幕鎖定、有全螢幕程式擋住等點不到的情況，會自動改用程式送出。")
-        for label, value in (("程式送出", "program"), ("滑鼠點擊", "os_click")):
+            "  螢幕鎖定、有全螢幕程式擋住等點不到的情況，會自動改用程式送出。\n"
+            "・點框＋送出（實驗）：輸入框也用真實滑鼠點一下，再填入內容、真實滑鼠點送出鈕。\n"
+            "  只點送出鈕仍被擋時試試；每次送出會借用滑鼠兩次。")
+        for label, value in (("程式送出", "program"), ("滑鼠點擊", "os_click"),
+                             ("點框＋送出", "os_click_input")):
             b = QPushButton(label)
             b.setMinimumWidth(84)
             b.setFont(_font(11, bold=True))
@@ -580,6 +584,19 @@ class AutoTranslatePanel(QWidget):
         btn_debug_dir.setFixedWidth(32)
         btn_debug_dir.clicked.connect(self._open_debug_dir)
         btn_hl.addWidget(btn_debug_dir)
+        # 手動測試瀏覽器（勾 Debug Log 才顯示）：用與自動翻譯相同的 profile／啟動參數
+        # 開 Gem，讓使用者在同一個瀏覽器手動送訊息，對照被擋是瀏覽器還是自動操作的問題。
+        self.btn_manual_browser = QPushButton("🧪 開啟測試瀏覽器")
+        self.btn_manual_browser.setToolTip(
+            "用與自動翻譯完全相同的瀏覽器（同一個登入資料、同樣的啟動參數）開啟 Gem 網址，\n"
+            "程式不做任何操作，讓你手動貼上、送出做對照：\n"
+            "・手動送也會被擋 → 問題在瀏覽器本身\n"
+            "・手動送不會被擋 → 問題在自動化的操作方式\n"
+            "關掉瀏覽器視窗即結束。開著時不能開始自動翻譯（兩者共用登入資料，不能同時開）。")
+        self.btn_manual_browser.clicked.connect(self._open_manual_browser)
+        self.btn_manual_browser.setVisible(False)
+        self.debug_log_cb.toggled.connect(self.btn_manual_browser.setVisible)
+        btn_hl.addWidget(self.btn_manual_browser)
         btn_hl.addStretch()
         form.addRow(btn_row)
 
@@ -710,6 +727,8 @@ class AutoTranslatePanel(QWidget):
             "・直接寫入編輯器：幾乎瞬間完成，不碰剪貼簿；Gemini 改版失效時自動改回逐字填入\n"
             "・剪貼簿貼上：幾乎瞬間完成；會先備份剪貼簿、貼完立刻還原\n"
             "  （剪貼簿原本是圖片等非文字內容時無法還原；貼上當下別同時複製東西）\n"
+            "・系統鍵盤貼上（實驗）：同剪貼簿貼上，但 Ctrl+V 改用 Windows 真實鍵盤送出，\n"
+            "  與你手動貼上相同；會把瀏覽器叫到前面一瞬間\n"
             "快速方式填完都會核對內容，不一致就改用逐字填入。")
         form.addRow("填入方式：", self.input_method_combo)
 
@@ -1043,6 +1062,45 @@ class AutoTranslatePanel(QWidget):
              self.debug_log_cb.isChecked),
         ]
 
+    def _open_manual_browser(self) -> None:
+        """「🧪 開啟測試瀏覽器」：背景執行緒開瀏覽器（Playwright sync API 要留在同一執行緒）。"""
+        if self._running:
+            self._main.show_status("⚠️ 自動翻譯執行中，不能另開測試瀏覽器", "#f39c12")
+            return
+        if self._manual_stop is not None:
+            self._main.show_status("ℹ️ 測試瀏覽器已經開著", "#3498db")
+            return
+        gem = self.gem_edit.text().strip() or getattr(self._main, "_gemini_gem_url", "")
+        if not gem:
+            self._main.show_status("⚠️ 請先在連線設定填入 Gemini Gem 網址", "#f39c12")
+            return
+        import tempfile
+        profile = (getattr(self._main, "_gemini_profile_dir", "")
+                   or os.path.join(tempfile.gettempdir(), "aa_gemini_profile"))
+        stop = threading.Event()
+        self._manual_stop = stop
+        self.btn_manual_browser.setText("🧪 測試瀏覽器開啟中…")
+        self.btn_manual_browser.setEnabled(False)
+        self.append_log("🧪 開啟測試瀏覽器（與自動翻譯相同的瀏覽器與登入資料），關掉視窗即結束。")
+
+        def _bg() -> None:
+            from aa_tool.gemini_web import GeminiWebSession
+            err = ""
+            try:
+                GeminiWebSession(gem, profile).open_for_manual_test(stop)
+            except Exception as e:  # noqa: BLE001 — 只是測試工具，失敗顯示即可
+                err = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+
+            def _done() -> None:
+                self._manual_stop = None
+                self.btn_manual_browser.setText("🧪 開啟測試瀏覽器")
+                self.btn_manual_browser.setEnabled(not self._running)
+                self.append_log(f"❌ 測試瀏覽器開啟失敗：{err}" if err
+                                else "🧪 測試瀏覽器已關閉。")
+            self._main._invoke_on_main.emit(_done)
+
+        threading.Thread(target=_bg, daemon=True).start()
+
     def _open_debug_dir(self) -> None:
         from aa_tool import debug_log
         base_dir = getattr(self._main, "_settings_base_dir", None) \
@@ -1139,6 +1197,8 @@ class AutoTranslatePanel(QWidget):
             getattr(m, "_auto_translate_loop_idle_rounds", 3)))
         self.title_auto_cb.setChecked(bool(
             getattr(m, "_auto_translate_title_auto", False)))
+        self.btn_manual_browser.setVisible(bool(
+            getattr(m, "_auto_translate_debug_log", False)))
         self.debug_log_cb.setChecked(bool(
             getattr(m, "_auto_translate_debug_log", False)))
         self.loop_ratio_spin.setEnabled(self.loop_cb.isChecked() and not self._running)
@@ -1818,6 +1878,10 @@ class AutoTranslatePanel(QWidget):
         m.save_cache()
 
     def _on_start(self) -> None:
+        if self._manual_stop is not None:
+            self._main.show_status(
+                "⚠️ 請先關閉測試瀏覽器（與自動翻譯共用登入資料，不能同時開）", "#f39c12")
+            return
         params = self.collect_params()
         if params is None:
             return

@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "2.99"
+APP_VERSION = "3.00"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -273,15 +273,6 @@ class TranslatePanel(QWidget):
         btn_auto.setToolTip("連續多話全自動翻譯（操控網頁版 Gemini）")
         btn_auto.clicked.connect(self._main.show_auto_translate_panel)
         row.addWidget(btn_auto)
-
-        btn_order = _make_btn("整理順序", "#fd7e14", "#dc6a0a",
-                              font=_ui_font(11), width=90)
-        btn_order.setToolTip(
-            "選一個作品資料夾，依每個檔案內文第一個投稿標頭的日期（作者發表順序）\n"
-            "替檔名加上 001_、002_… 編號，沒有話數的番外／幕間也會排在正確位置。\n"
-            "重跑會先去掉舊編號再重編。")
-        btn_order.clicked.connect(self._main.reorder_folder_files)
-        row.addWidget(btn_order)
 
         right = QWidget()
         row = QHBoxLayout(right)
@@ -1843,11 +1834,14 @@ class MainWindow(QMainWindow):
         else:
             self.show_status("⚠️ 尚未讀取過網址！", "#f39c12")
 
-    def reorder_folder_files(self) -> None:
-        """首頁「整理順序」：依投稿日期替作品資料夾的檔名加上閱讀順序編號。"""
+    def reorder_folder_files(self, start_dir: str = "") -> None:
+        """自動翻譯面板「整理順序」：依投稿日期替作品資料夾的檔名加上閱讀順序編號。
+
+        start_dir：選資料夾對話框的起始位置（面板傳目前的作品資料夾），空字串用 _last_dir。
+        """
         from aa_tool import reading_order
         folder = QFileDialog.getExistingDirectory(
-            self, "選取要整理順序的作品資料夾", self._last_dir)
+            self, "選取要整理順序的作品資料夾", start_dir or self._last_dir)
         if not folder:
             return
         try:

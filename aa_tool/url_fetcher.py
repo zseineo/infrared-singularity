@@ -21,6 +21,9 @@
     最多 10 話、不另發 HTTP；頁面上沒有時才退回分類頁 ?cat=N&paged=K）
   - yomuaa.r401.net（Nuxt SSR；article.aa > dl.aa-article 的 dt=コマ編號 + dd=內文，
     dd 內無 <br>、換行為字面換行字元；本身無關聯記事，改由作品頁 /series/N?page=K 取得）
+  - touhouyaruosure.com（東方やる夫スレ纏め；HonoX SSR，內文由前端 JS 另從
+    /api/chapters/N/content 載入 → `fetch_url` 抓頁面後順手抓 API 並嵌進 #c-chapter-content，
+    暫存的就是完整頁面；內文為 dl.thread 的 dt/dd；關聯記事取頁面「目次」ul（已是舊→新））
   - naitomeazirou.fc2.net（走預設 article div 解析；模板無 relate_dl，關聯記事改由全記事一覽
     archives.html サイトマップ 依分類編號篩出同系列，見 `_fetch_fc2_sitemap_nav`）
 
@@ -39,6 +42,7 @@ from __future__ import annotations
 
 import gzip
 import html
+import json
 import re
 import errno
 import socket
@@ -372,7 +376,29 @@ def fetch_url(url: str, *, timeout: int = 20) -> str:
         raw, charset = _fetch_raw(url, timeout=timeout, extra_headers={'Cookie': 'age_check=1'})
         page_html = _decode_bytes(raw, charset)
 
-    return page_html
+    return _inject_touhou_content(url, page_html, timeout)
+
+
+_TOUHOU_API_RE = re.compile(r'href="(/api/chapters/\d+/content)"')
+_TOUHOU_ANCHOR_RE = re.compile(r'<div\s+id="c-chapter-content"[^>]*>')
+
+
+def _inject_touhou_content(url: str, page_html: str, timeout: int) -> str:
+    """touhouyaruosure.com：內文不在頁面 HTML 裡，由前端 JS 另抓 ``/api/chapters/N/content``。
+
+    抓頁面時順手抓 API，把回傳的 ``<dl class="thread">`` 插進 ``#c-chapter-content``
+    開頭——解析器照一般頁面處理，本機網頁暫存存的也是含內文的完整頁面。
+    其他網域、或頁面上找不到 API 連結／容器時原樣回傳；API 抓取失敗照常丟出例外。
+    """
+    if 'touhouyaruosure.com' not in _resolve_domain(url):
+        return page_html
+    api_m = _TOUHOU_API_RE.search(page_html)
+    anchor = _TOUHOU_ANCHOR_RE.search(page_html)
+    if not api_m or not anchor or '<dl class="thread"' in page_html:
+        return page_html
+    raw, charset = _fetch_raw(urljoin(url, api_m.group(1)), timeout=timeout)
+    content = _decode_bytes(raw, charset)
+    return page_html[:anchor.end()] + content + page_html[anchor.end():]
 
 
 # ════════════════════════════════════════════════════════════════
@@ -2005,6 +2031,66 @@ def _parse_yomuaa(page_html: str, base_url: str, *,
     return text_content, nav_links, page_title
 
 
+_TOUHOU_TOC_RE = re.compile(r'<ul\s+class="divide-y divide-line">(.*?)</ul>', re.DOTALL)
+_TOUHOU_ITEM_RE = re.compile(
+    r'<a\s+href="(/chapters/\d+)"[^>]*>.*?<h4[^>]*>(.*?)</h4>', re.DOTALL)
+_TOUHOU_PROPS_RE = re.compile(
+    r'component-export="ReaderEnhancements"\s+data-serialized-props="([^"]*)"')
+
+
+def _parse_touhouyaruosure(page_html: str, base_url: str, *,
+                           author_name: str = "",
+                           author_only: bool = False) -> tuple[str | None, list[dict], str]:
+    """解析 touhouyaruosure.com（東方やる夫スレ纏め）——HonoX SSR 頁面。
+
+    內文：頁面本身只有載入中的骨架，內文由 `fetch_url` 從 `/api/chapters/N/content`
+          抓來嵌進 `#c-chapter-content`（見 `_inject_touhou_content`），為
+          `<dl class="thread">` 的標準 dt/dd（dt＝`514 ： ◆trip：日期 ID:xxx`），
+          走 `_extract_dt_dd_posts`，貼文間空一行（同 `_parse_default`）。
+    標題：`ReaderEnhancements` island 的 props 有 seriesTitle／chapterTitle，組成
+          「作品名　話名」（作品名在前，與其他站一致）；沒有時退回 `<title>` 去站名。
+    關聯：頁面上的「目次 全N話」`<ul class="divide-y divide-line">`，伺服器端輸出即為
+          「1話から」的舊→新順序（章節 ID 不連號，**不可依 ID 排序**）。
+    """
+    # ── 標題 ──
+    page_title = ""
+    props_m = _TOUHOU_PROPS_RE.search(page_html)
+    if props_m:
+        try:
+            props = json.loads(html.unescape(props_m.group(1)))
+            series = (props.get('seriesTitle') or '').strip()
+            chapter = (props.get('chapterTitle') or '').strip()
+            page_title = '\u3000'.join(x for x in (series, chapter) if x)
+        except (ValueError, AttributeError):
+            page_title = ""
+    if not page_title:
+        t_m = re.search(r'<title>([^<]+)</title>', page_html)
+        page_title = html.unescape(t_m.group(1)).strip() if t_m else ""
+        page_title = re.sub(r'\s*\|\s*東方やる夫スレ纏め.*$', '', page_title)
+
+    # ── 內文 ──
+    text_content = None
+    dl_m = re.search(r'<dl\s+class="thread"[^>]*>(.*?)</dl>', page_html, re.DOTALL)
+    if dl_m:
+        posts = _extract_dt_dd_posts(dl_m.group(1) + '</dl>', author_name, author_only)
+        if posts:
+            text_content = '\n\n'.join(posts)
+
+    # ── 關聯記事：目次 ──
+    nav_links: list[dict] = []
+    toc_m = _TOUHOU_TOC_RE.search(page_html)
+    if toc_m:
+        cur = _norm_episode_url(base_url)
+        for m in _TOUHOU_ITEM_RE.finditer(toc_m.group(1)):
+            href = urljoin(base_url, m.group(1))
+            title = html.unescape(re.sub(r'<[^>]+>', '', m.group(2))).strip()
+            is_current = _norm_episode_url(href) == cur
+            nav_links.append({'title': title, 'url': None if is_current else href,
+                              'is_current': is_current})
+
+    return text_content, nav_links, page_title
+
+
 # ════════════════════════════════════════════════════════════════
 #  公開入口
 # ════════════════════════════════════════════════════════════════
@@ -2024,6 +2110,7 @@ _DOMAIN_PARSERS: dict[str, callable] = {
     'yaruo-matome.com': _parse_yaruo_matome,
     'asitayaruo.com': _parse_asitayaruo,
     'yomuaa.r401.net': _parse_yomuaa,
+    'touhouyaruosure.com': _parse_touhouyaruosure,
 }
 
 

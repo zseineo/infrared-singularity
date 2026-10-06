@@ -198,7 +198,7 @@ class AppCache:
     gemini_max_per_session: int = 3
     # gemini_input_method：填入輸入框的方式 fill／quill／clipboard／os_paste（見 gemini_web.INPUT_METHODS）。
     gemini_input_method: str = "fill"
-    # gemini_send_method：按送出的方式 program／os_click／os_click_input（見 gemini_web.SEND_METHODS）。
+    # gemini_send_method：按送出的方式 program／os_click／human（見 gemini_web.SEND_METHODS）。
     gemini_send_method: str = "program"
     gemini_selectors: dict = field(default_factory=dict)
     auto_translate_out_dir: str = ""
@@ -507,6 +507,8 @@ class SettingsManager:
                 'gemini_send_method', cache.gemini_send_method) or "program")
             if cache.gemini_send_method == "os_click_once":   # v2.92 實驗選項，v2.93 移除
                 cache.gemini_send_method = "os_click"
+            if cache.gemini_send_method == "os_click_input":  # v2.99 實驗，v3.00 併入擬人操作
+                cache.gemini_send_method = "human"
             sel = data.get('gemini_selectors', cache.gemini_selectors)
             cache.gemini_selectors = sel if isinstance(sel, dict) else {}
             cache.auto_translate_out_dir = str(data.get(

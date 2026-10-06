@@ -336,6 +336,14 @@ class AutoTranslatePanel(QWidget):
             "・已編號的檔案仍算「已存在同名檔」，不會重翻\n"
             "・與首頁「整理順序」相同，之後新增的話會重新編號")
         name_hl.addWidget(self.auto_number_cb)
+        # 手動整理順序（與自動產生編號同一套）：對已翻好的作品資料夾補編號用
+        self.btn_reorder = QPushButton("整理順序…")
+        self.btn_reorder.setToolTip(
+            "選一個作品資料夾，依每個檔案內文第一個投稿標頭的日期（作者發表順序）\n"
+            "替檔名加上 001_、002_… 編號，沒有話數的番外／幕間也會排在正確位置。\n"
+            "改名前會先列出新順序確認；重跑會先去掉舊編號再重編。")
+        self.btn_reorder.clicked.connect(self._on_reorder_clicked)
+        name_hl.addWidget(self.btn_reorder)
         form.addRow("檔名：", name_row)
 
         out_row = QWidget()
@@ -455,10 +463,13 @@ class AutoTranslatePanel(QWidget):
             "  每次送出會把瀏覽器叫到最前面（約半秒），游標跳到送出鈕點一下立刻跳回（約 0.1 秒），\n"
             "  再把原本的視窗還原——那一瞬間正在打字或拖曳會被打斷；點擊本身不會被你的滑鼠帶偏。\n"
             "  螢幕鎖定、有全螢幕程式擋住等點不到的情況，會自動改用程式送出。\n"
-            "・點框＋送出（實驗）：輸入框也用真實滑鼠點一下，再填入內容、真實滑鼠點送出鈕。\n"
-            "  只點送出鈕仍被擋時試試；每次送出會借用滑鼠兩次。")
+            "・擬人操作（實驗）：點輸入框、貼上、點送出全部用真實滑鼠／鍵盤，並比照真人：\n"
+            "  滑鼠沿曲線移動、停一下再按，各步之間隨機停頓，新對話載入後與上一則回覆後\n"
+            "  都會先等幾秒（等待時不佔用滑鼠）。整段做完才把原本的視窗還原。\n"
+            "  每次送出會佔用滑鼠與前景約 4～7 秒（新對話第一則再多幾秒），這段時間別用電腦；\n"
+            "  不論「填入方式」選什麼，都用系統鍵盤貼上（失敗才改逐字填入）。")
         for label, value in (("程式送出", "program"), ("滑鼠點擊", "os_click"),
-                             ("點框＋送出", "os_click_input")):
+                             ("擬人操作", "human")):
             b = QPushButton(label)
             b.setMinimumWidth(84)
             b.setFont(_font(11, bold=True))
@@ -1061,6 +1072,16 @@ class AutoTranslatePanel(QWidget):
             (self.debug_log_cb, "_auto_translate_debug_log",
              self.debug_log_cb.isChecked),
         ]
+
+    def _on_reorder_clicked(self) -> None:
+        """「整理順序…」：選資料夾對話框從目前的作品資料夾開始（存在時）。"""
+        out_dir = self.out_edit.text().strip()
+        start = out_dir
+        if out_dir and self._series_folder_value:
+            sub = os.path.join(out_dir, self._series_folder_value)
+            if os.path.isdir(sub):
+                start = sub
+        self._main.reorder_folder_files(start)
 
     def _open_manual_browser(self) -> None:
         """「🧪 開啟測試瀏覽器」：背景執行緒開瀏覽器（Playwright sync API 要留在同一執行緒）。"""
@@ -2120,6 +2141,7 @@ class AutoTranslatePanel(QWidget):
                   self.input_method_combo, *self._send_btns.values(),
                   self.doc_title_edit, self.out_edit, self.skip_existing_cb,
                   self.btn_url_list, self.group_by_series_cb, self.auto_number_cb,
+                  self.btn_reorder,
                   self.mask_words_cb, self.btn_mask_list,
                   self.output_kw_cb, self.btn_output_kw, self.loop_cb,
                   *self._backend_btns.values(), *self._count_quick_btns):

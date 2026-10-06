@@ -11,7 +11,10 @@
 from __future__ import annotations
 
 import contextlib
+import json
+import math
 import os
+import random
 import re
 import time
 from typing import Callable
@@ -270,9 +273,16 @@ _HEALTH_TIMEOUT_MS = 5000
 # Debug Log：等待生成期間每隔幾秒記一次進度快照
 _DEBUG_GEN_EVERY = 15.0
 # 頁面健康檢查：DOM 元素數、JS heap（Chrome 的 performance.memory）
-_HEALTH_JS = ("() => ({n: document.getElementsByTagName('*').length,"
+_HEALTH_JS = ("({n: document.getElementsByTagName('*').length,"
               " heap: (performance.memory || {}).usedJSHeapSize || 0,"
               " limit: (performance.memory || {}).jsHeapSizeLimit || 0})")
+
+# 頁面看得到的 Playwright 痕跡（v3.00 實測）：bounding_box()、locator.evaluate()、
+# wait_for_function() 第一次呼叫時，會在頁面本身的 JS 環境註冊一批全域事件監聽器
+# （事件名稱包含「__playwright_global_listeners_check__」），頁面腳本只要改寫
+# addEventListener 就看得到。click／fill／inner_text／is_enabled／is_visible／
+# get_attribute／鍵盤／截圖／page.evaluate 則不會。送出流程一律避開前三者：
+# 元素位置改由獨立 JS 環境讀（_box_of），健康檢查改用 get_attribute 探測。
 # 生成判定完成後，再多等這秒數才讀取回覆文字。
 # 目的：避免串流尾端／DOM 尚未完全 render 時就讀走半截或舊內容
 # （等同「按下複製鍵到實際取得內容之間的緩衝」）。
@@ -281,6 +291,26 @@ _POST_GEN_SETTLE = 3.0
 # 填入內容後、按送出前的停頓秒數。使用者回報：不論哪種送出方式，填完立刻送出
 # 很容易遇到「發生錯誤 (1095)」，推測頁面還沒處理完輸入內容（v2.99）。
 _PRE_SEND_PAUSE = 0.5
+
+# 擬人操作（send_method="human"，v3.00 實驗）。Debug Log 統計（30 次送出）：回覆被抽換成
+# 「我是語言模型」的比例，新對話的第一則 8/12，同對話第 2、3 則 5/18；同一個瀏覽器
+# 手動操作則不會被擋 → 推測與頁面上觀察得到的操作行為有關（瞬移點擊、焦點反覆切換、
+# 載入後立刻送出、毫無間隔的節奏）。以下皆為 (最短, 最長) 秒數，每次隨機取值。
+_HUMAN_WARMUP = (8.0, 14.0)       # 新對話載入完成後，至少過這麼久才開始操作
+_HUMAN_GAP = (3.0, 7.0)           # 同對話上一則回覆完成後，至少過這麼久（閱讀時間）
+_HUMAN_PRE_PASTE = (0.4, 0.9)     # 點輸入框後到按 Ctrl+V
+_HUMAN_PASTE_PAUSE = (1.0, 2.5)   # 貼上後到移向送出鈕
+_HUMAN_HOVER = (0.12, 0.3)        # 游標停在目標上到按下
+_HUMAN_CLICK_HOLD = (0.07, 0.13)  # 按下到放開
+
+# 頁面座標校正用的 mousemove 監聽器。一律在獨立 JS 環境（_iso_eval）安裝：頁面腳本看不到
+# 這些變數，改寫 addEventListener 之類內建函式的偵測腳本也攔不到這次呼叫。
+_MOVE_LISTENER_JS = (
+    "(() => { if (!window.__aaLm) { window.__aaLm = 1; addEventListener('mousemove',"
+    " e => { window.__aaMove = [e.clientX, e.clientY]; }, true); }"
+    " window.__aaMove = null; return 0; })()")
+_EDITOR_FOCUSED_JS = (
+    "(() => { const a = document.activeElement; return !!(a && a.isContentEditable); })()")
 
 # 自動切換模型失敗（選單選擇器失效）時，退回等使用者手動切換的最長秒數。
 _MODEL_WAIT_TIMEOUT = 300   # 5 分鐘
@@ -343,8 +373,10 @@ DEFAULT_INPUT_METHOD = "fill"
 SEND_METHODS: dict[str, str] = {
     "program": "程式送出（原本做法，不影響滑鼠）",
     "os_click": "系統滑鼠點擊（可避開部分時段被擋；每次送出借用滑鼠一瞬間）",
-    # v2.99 實驗：只點送出鈕仍有一定比例被擋 → 連輸入框也用真實滑鼠點，再填字、點送出
-    "os_click_input": "系統滑鼠點輸入框＋送出鈕（實驗；每次送出借用滑鼠兩次）",
+    # v3.00 實驗（取代 v2.99 的 os_click_input「點框＋送出」）：整段「點輸入框→貼上→
+    # 點送出」都用系統滑鼠／鍵盤、軌跡與節奏比照真人，期間瀏覽器維持在前景，見
+    # GeminiWebSession._human_compose_and_send
+    "human": "擬人操作（實驗；每次送出佔用滑鼠與前景數秒）",
 }
 DEFAULT_SEND_METHOD = "program"
 
@@ -462,33 +494,76 @@ def _win_input_types():
     return _INPUT, _MOUSEINPUT, _KEYBDINPUT
 
 
-def _send_ctrl_v() -> bool:
-    """用 SendInput 按一下 Ctrl+V（Windows 真實鍵盤事件，送往目前的前景視窗）。"""
+def _send_ctrl_key(vk: int, human: bool = False) -> bool:
+    """用 SendInput 按一下 Ctrl+<vk>（Windows 真實鍵盤事件，送往目前的前景視窗）。
+
+    human=True 時各鍵之間的間隔隨機、比照真人（約 0.15～0.35 秒完成）。
+    """
     if os.name != "nt":
         return False
     import ctypes
     u32 = ctypes.windll.user32
     _INPUT, _MOUSEINPUT, _KEYBDINPUT = _win_input_types()
-    vk_ctrl, vk_v, keyup = 0x11, 0x56, 0x0002
+    vk_ctrl, keyup = 0x11, 0x0002
 
-    def _key(vk: int, flags: int) -> bool:
+    def _key(code: int, flags: int) -> bool:
         arr = (_INPUT * 1)()
         arr[0].type = 1                                       # INPUT_KEYBOARD
-        arr[0].u.ki = _KEYBDINPUT(vk, u32.MapVirtualKeyW(vk, 0), flags, 0, 0)
+        arr[0].u.ki = _KEYBDINPUT(code, u32.MapVirtualKeyW(code, 0), flags, 0, 0)
         return u32.SendInput(1, arr, ctypes.sizeof(_INPUT)) == 1
 
+    gaps = ((random.uniform(0.06, 0.14), random.uniform(0.05, 0.11),
+             random.uniform(0.03, 0.09)) if human else (0.03, 0.05, 0.03))
     ok = _key(vk_ctrl, 0)
-    time.sleep(0.03)
-    ok = ok and _key(vk_v, 0)
-    time.sleep(0.05)
-    _key(vk_v, keyup)                 # 放開一定要送，避免 Ctrl／V 卡在按下狀態
-    time.sleep(0.03)
+    time.sleep(gaps[0])
+    ok = ok and _key(vk, 0)
+    time.sleep(gaps[1])
+    _key(vk, keyup)                   # 放開一定要送，避免 Ctrl／按鍵卡在按下狀態
+    time.sleep(gaps[2])
     _key(vk_ctrl, keyup)
     return ok
 
 
-def _send_mouse_click_at(x: int, y: int) -> bool:
-    """在螢幕座標 (x, y) 用 SendInput 點一下左鍵（Windows）；成功回 True。
+def _send_ctrl_v(human: bool = False) -> bool:
+    """用 SendInput 按一下 Ctrl+V。"""
+    return _send_ctrl_key(0x56, human)
+
+
+def _human_path(x0: int, y0: int, x1: int, y1: int,
+                rnd: random.Random) -> tuple[list[tuple[int, int]], float]:
+    """擬人滑鼠軌跡：微彎的三次貝茲曲線、頭尾慢中間快、帶一點抖動。
+
+    回傳 (各點螢幕座標, 每步間隔秒數)；距離越遠越久（約 0.2～0.9 秒）。最後一點必為終點。
+    """
+    dist = math.hypot(x1 - x0, y1 - y0)
+    if dist < 3:
+        return [(x1, y1)], 0.0
+    dur = min(0.9, 0.2 + dist / 1800.0) * rnd.uniform(0.85, 1.2)
+    steps = max(10, int(dur * 80))
+    nx, ny = -(y1 - y0) / dist, (x1 - x0) / dist          # 垂直方向（讓路徑微彎）
+    b1, b2 = rnd.uniform(-0.18, 0.18) * dist, rnd.uniform(-0.18, 0.18) * dist
+    c1 = (x0 + (x1 - x0) * 0.3 + nx * b1, y0 + (y1 - y0) * 0.3 + ny * b1)
+    c2 = (x0 + (x1 - x0) * 0.7 + nx * b2, y0 + (y1 - y0) * 0.7 + ny * b2)
+    pts: list[tuple[int, int]] = []
+    for i in range(1, steps + 1):
+        t = i / steps
+        s = t * t * (3 - 2 * t)                             # 頭尾慢、中間快
+        a, b, c, d = (1 - s) ** 3, 3 * (1 - s) ** 2 * s, 3 * (1 - s) * s * s, s ** 3
+        x = a * x0 + b * c1[0] + c * c2[0] + d * x1
+        y = a * y0 + b * c1[1] + c * c2[1] + d * y1
+        if i < steps:
+            x += rnd.uniform(-0.7, 0.7)
+            y += rnd.uniform(-0.7, 0.7)
+        p = (round(x), round(y))
+        if not pts or p != pts[-1]:
+            pts.append(p)
+    if pts[-1] != (x1, y1):
+        pts.append((x1, y1))
+    return pts, dur / steps
+
+
+def _send_mouse_click_at(x: int, y: int, hold: float = 0.05) -> bool:
+    """在螢幕座標 (x, y) 用 SendInput 點一下左鍵（Windows）；成功回 True。hold＝按住秒數。
 
     按下與放開各送一批「移到絕對座標＋按鍵」：同一批 SendInput 的事件不會被使用者的
     滑鼠移動插隊，所以就算使用者正在動滑鼠，按下與放開也都落在 (x, y)。
@@ -518,7 +593,7 @@ def _send_mouse_click_at(x: int, y: int) -> bool:
 
     if not _batch(0x0002):            # LEFTDOWN
         return False
-    time.sleep(0.05)
+    time.sleep(hold)
     if not _batch(0x0004):            # LEFTUP：按下已送出，放開一定要送到
         u32.mouse_event(0x0004, 0, 0, 0, 0)
     return True
@@ -652,6 +727,12 @@ class GeminiWebSession:
         # 視窗沒移動時下次直接套用，第一跳就對準，游標停在送出鈕上的時間最短。
         self._os_click_adjust = (0.0, 0.0)
         self._seen_toasts: set[str] = set()   # 這次送出已記過的頁面提示
+        self._hwnd = 0              # 瀏覽器頂層視窗（_find_browser_hwnd 快取）
+        self._matched_sel: dict[str, str] = {}   # role → _find 最近命中的選擇器（_box_of 用）
+        self._cdp = None            # 獨立 JS 環境用的 CDP session（_iso_eval）
+        self._iso_id = None         # 獨立 JS 環境的 executionContextId（頁面導向後失效）
+        self._page_ready_at = 0.0   # 新對話頁面載入完成的時間（擬人操作的暖機基準）
+        self._last_reply_at = 0.0   # 上一則回覆讀完的時間（擬人操作的閱讀間隔基準）
 
     # ── 生命週期 ──
 
@@ -851,17 +932,23 @@ class GeminiWebSession:
         try:
             with self._timed("找輸入框"):
                 editor = self._require("input")
-            with self._timed("點輸入框"):
-                self._click_input(editor)
-            with self._timed(f"填入文字（{self.input_method}）"):
-                self._fill_input(editor, text)
-            if _PRE_SEND_PAUSE > 0:
-                time.sleep(_PRE_SEND_PAUSE)
-            prev_count = self._response_count()
-            with self._timed(f"按送出（{self.send_method}）"):
-                self._send()
+            if self.send_method == "human":
+                prev_count = self._response_count()
+                with self._timed("擬人操作（點輸入框、貼上、點送出）"):
+                    self._human_compose_and_send(editor, text)
+            else:
+                with self._timed("點輸入框"):
+                    self._click_input(editor)
+                with self._timed(f"填入文字（{self.input_method}）"):
+                    self._fill_input(editor, text)
+                if _PRE_SEND_PAUSE > 0:
+                    time.sleep(_PRE_SEND_PAUSE)
+                prev_count = self._response_count()
+                with self._timed(f"按送出（{self.send_method}）"):
+                    self._send()
             t0 = time.time()
             started = self._wait_generation_done(prev_count)
+            self._last_reply_at = time.time()
             self._dbg(f"等待生成結束：{time.time() - t0:.1f}s"
                       + ("" if started else "（沒開始生成）"))
             if not started:
@@ -893,7 +980,10 @@ class GeminiWebSession:
         method = self.input_method
         if method == "quill":
             try:
-                ok = bool(editor.evaluate(_QUILL_SET_JS, text))
+                sel = self._matched_sel.get("input")
+                ok = bool(self._page.evaluate(
+                    f"([sel, text]) => ({_QUILL_SET_JS})(document.querySelector(sel), text)",
+                    [sel, text]) if sel else editor.evaluate(_QUILL_SET_JS, text))
             except Exception as e:  # noqa: BLE001
                 ok = False
                 self._dbg(f"直接寫入編輯器失敗：{brief_error(e)}")
@@ -926,7 +1016,12 @@ class GeminiWebSession:
             if got == want:
                 return True
             if time.time() >= deadline:
-                self._dbg(f"輸入框內容不一致：{len(got)} 行（應為 {len(want)} 行）")
+                i = next((k for k, (a, b) in enumerate(zip(got, want)) if a != b),
+                         min(len(got), len(want)))
+                ga = len(got[i]) if i < len(got) else "-"
+                wa = len(want[i]) if i < len(want) else "-"
+                self._dbg(f"輸入框內容不一致：{len(got)} 行（應為 {len(want)} 行），"
+                          f"第 {i + 1} 行起不同（該行 {ga} 字，應為 {wa} 字）")
                 return False
             time.sleep(0.2)
 
@@ -964,9 +1059,9 @@ class GeminiWebSession:
         """暫借剪貼簿，把瀏覽器叫到前面後用 Windows 真實鍵盤按 Ctrl+V（v2.99 實驗）。
 
         與 ``_paste_via_clipboard`` 的差別只在按鍵來源：那邊是 Playwright 模擬的按鍵，
-        這裡是 SendInput，與使用者手動 Ctrl+V 相同。輸入框沒有焦點時先用程式點一下
-        （送出方式為「點框＋送出」時，前一步已用系統滑鼠點過）。貼完核對內容，
-        還原剪貼簿與原本的前景視窗。非 Windows 或找不到瀏覽器視窗回 False。
+        這裡是 SendInput，與使用者手動 Ctrl+V 相同。實際貼上見 ``_os_paste_into``；
+        這裡只負責把瀏覽器叫到前面、貼完還原原本的前景視窗。
+        非 Windows 或找不到瀏覽器視窗回 False。
         """
         if os.name != "nt":
             return False
@@ -976,22 +1071,37 @@ class GeminiWebSession:
         if not hwnd:
             self._dbg("系統鍵盤貼上：找不到瀏覽器視窗")
             return False
-        backup = _win_clipboard_get()
         prev_fg = u32.GetForegroundWindow()
+        try:
+            if not self._wait_page_focus(hwnd):
+                self._dbg("系統鍵盤貼上：瀏覽器視窗沒有取得焦點，照樣嘗試")
+            return self._os_paste_into(editor, text)
+        finally:
+            if prev_fg and prev_fg != hwnd:
+                self._activate_window(prev_fg)
+
+    def _os_paste_into(self, editor, text: str, human: bool = False) -> bool:
+        """（瀏覽器已在前景時）暫借剪貼簿、用系統鍵盤 Ctrl+V 貼上並核對內容，貼完還原剪貼簿。
+
+        輸入框沒有焦點先用程式點一下；裡面已經有字（上一則沒清乾淨、草稿被還原等）
+        就先 Ctrl+A 全選，讓這次貼上直接取代掉。human=True 時按鍵節奏比照真人。
+        """
+        backup = _win_clipboard_get()
         try:
             if not _win_clipboard_set(text):
                 self._dbg("寫入剪貼簿失敗")
                 return False
-            if not self._wait_page_focus(hwnd):
-                self._dbg("系統鍵盤貼上：瀏覽器視窗沒有取得焦點，照樣嘗試")
-            try:
-                focused = bool(editor.evaluate(
-                    "el => el === document.activeElement || el.contains(document.activeElement)"))
-            except Exception:  # noqa: BLE001
-                focused = False
-            if not focused:
+            if not self._editor_focused():
                 editor.click()
-            if not _send_ctrl_v():
+            try:
+                leftover = (editor.inner_text(timeout=2000) or "").strip()
+            except Exception:  # noqa: BLE001
+                leftover = ""
+            if leftover:
+                self._dbg(f"系統鍵盤貼上：輸入框原本有 {len(leftover)} 字，先全選再貼上")
+                _send_ctrl_key(0x41, human)                     # Ctrl+A
+                time.sleep(0.1)
+            if not _send_ctrl_v(human):
                 self._dbg("系統鍵盤貼上：SendInput 送不出去")
                 return False
             return self._input_matches(editor, text, wait=15.0)
@@ -1000,8 +1110,6 @@ class GeminiWebSession:
             return False
         finally:
             _win_clipboard_set(backup or "")
-            if prev_fg and prev_fg != hwnd:
-                self._activate_window(prev_fg)
 
     # ── 對話管理 ──
 
@@ -1041,6 +1149,8 @@ class GeminiWebSession:
                       "先照目前頁面繼續")
         self._send_count = 0
         self._session_index += 1
+        self._page_ready_at = time.time()
+        self._iso_id = None         # 頁面導向後舊的獨立 JS 環境已失效
 
     # ── Debug Log（self._debug 為 None 時全部不做事） ──
 
@@ -1062,16 +1172,17 @@ class GeminiWebSession:
     def _health(self, tag: str) -> None:
         """頁面健康度：在頁面內跑一小段 JS 量回應延遲、DOM 元素數、JS heap。
 
-        用 wait_for_function（有逾時）而非 evaluate（沒有逾時）：頁面凍結時
-        evaluate 會一直卡住，這裡最多等 _HEALTH_TIMEOUT_MS 就記「沒回應」。
+        先用有逾時的 get_attribute 探測頁面有沒有回應（頁面凍結時最多等
+        _HEALTH_TIMEOUT_MS 就記「沒回應」），有回應才在獨立 JS 環境量數字。
+        v3.00 前用 wait_for_function，會在頁面留下 Playwright 監聽器（見 _HEALTH_JS 註解）。
         """
         if self._debug is None or self._page is None:
             return
         from aa_tool.debug_log import system_memory
         t0 = time.time()
         try:
-            v = self._page.wait_for_function(
-                _HEALTH_JS, polling=100, timeout=_HEALTH_TIMEOUT_MS).json_value()
+            self._page.locator("html").get_attribute("lang", timeout=_HEALTH_TIMEOUT_MS)
+            v = self._iso_eval(_HEALTH_JS)
             mb = 1024 * 1024
             heap = (f"JS heap {v['heap'] / mb:.0f}／{v['limit'] / mb:.0f} MB"
                     if v.get("heap") else "JS heap 讀不到")
@@ -1397,11 +1508,12 @@ class GeminiWebSession:
     # ── 內部：元素定位 ──
 
     def _find(self, role: str):
-        """回傳該 role 第一個命中且可見的 locator；找不到回 None。"""
+        """回傳該 role 第一個命中且可見的 locator；找不到回 None。命中的選擇器記在 _matched_sel。"""
         for sel in self.selectors.get(role, []):
             try:
                 loc = self._page.locator(sel)
                 if loc.count() > 0 and loc.first.is_visible():
+                    self._matched_sel[role] = sel
                     return loc.first
             except Exception:
                 continue
@@ -1417,25 +1529,15 @@ class GeminiWebSession:
         return loc
 
     def _click_input(self, editor) -> None:
-        """點輸入框。送出方式為「點輸入框＋送出鈕」時用系統滑鼠點，點不到就退回程式點擊。"""
-        if self.send_method == "os_click_input":
-            def _focused() -> bool:
-                try:
-                    return bool(editor.evaluate(
-                        "el => el === document.activeElement || el.contains(document.activeElement)"))
-                except Exception:  # noqa: BLE001
-                    return False
-            try:
-                if self._os_click_locator(editor, "輸入框", _focused, lambda: True):
-                    return
-            except Exception as e:  # noqa: BLE001 — 失敗一律退回程式點擊
-                self._dbg(f"系統滑鼠點輸入框例外：{brief_error(e)}")
-            self._log("  （系統滑鼠點輸入框沒成功，改用程式點擊）")
+        """點輸入框（程式點擊；擬人操作另走 _human_compose_and_send）。"""
         editor.click()
 
     def _send(self) -> None:
-        """依 ``send_method`` 按送出；系統滑鼠點擊不成功就退回程式送出。"""
-        if self.send_method in ("os_click", "os_click_input"):
+        """依 ``send_method`` 按送出；系統滑鼠點擊不成功就退回程式送出。
+
+        擬人操作找不到瀏覽器視窗而退回一般流程時，也走系統滑鼠點擊。
+        """
+        if self.send_method in ("os_click", "human"):
             try:
                 if self._os_click_send():
                     return
@@ -1460,40 +1562,51 @@ class GeminiWebSession:
         """
         if os.name != "nt":
             return False
-        deadline = time.time() + 15
-        btn = None
+        btn = self._wait_send_enabled()
+        if btn is None:
+            return False
+        return self._os_click_locator(btn, "送出鈕", self._sent_check,
+                                      lambda: self._still_enabled(btn), role="send")
+
+    def _wait_send_enabled(self, timeout: float = 15.0):
+        """等送出鈕出現且可按（填入後要一點時間），回傳 locator；逾時回 None。"""
+        deadline = time.time() + timeout
         while time.time() < deadline:
             btn = self._find("send")
             try:
                 if btn is not None and btn.is_enabled():
-                    break
+                    return btn
             except Exception:
                 pass
-            btn = None
             time.sleep(0.5)
-        if btn is None:
+        return None
+
+    def _sent_check(self) -> bool:
+        """送出生效：出現停止鈕，或輸入框已被清空。"""
+        if self._find("stop") is not None:
+            return True
+        editor = self._find("input")
+        try:
+            return editor is not None and not (editor.inner_text(timeout=1000) or "").strip()
+        except Exception:
             return False
 
-        def _sent() -> bool:
-            # 送出後 Gemini 會清空輸入框並出現停止鈕
-            if self._find("stop") is not None:
-                return True
-            editor = self._find("input")
-            try:
-                return editor is not None and not (editor.inner_text(timeout=1000) or "").strip()
-            except Exception:
-                return False
+    @staticmethod
+    def _still_enabled(btn) -> bool:
+        """補點的前提：送出鈕仍可按（輸入框還有字）。已送出時多點會中斷生成。"""
+        try:
+            return btn.is_enabled()
+        except Exception:
+            return False
 
-        def _can_retry() -> bool:
-            # 輸入框還有字（送出鈕仍可按）才補點；已送出時多點會中斷生成
-            try:
-                return btn.is_enabled()
-            except Exception:
-                return False
+    def _editor_focused(self) -> bool:
+        """焦點在可編輯區（Gemini 輸入框）裡。"""
+        try:
+            return bool(self._iso_eval(_EDITOR_FOCUSED_JS))
+        except Exception:  # noqa: BLE001
+            return False
 
-        return self._os_click_locator(btn, "送出鈕", _sent, _can_retry)
-
-    def _os_click_locator(self, loc, label: str, done, can_retry) -> bool:
+    def _os_click_locator(self, loc, label: str, done, can_retry, role: str = "send") -> bool:
         """用 Windows 系統滑鼠點 ``loc``（對位、點擊、還原游標與前景視窗見 ``_os_click_send``）。
 
         ``done()`` 為點擊生效的判定；沒生效且 ``can_retry()`` 為真就再點，最多
@@ -1502,7 +1615,6 @@ class GeminiWebSession:
         import ctypes
         from ctypes import wintypes
         u32 = ctypes.windll.user32
-        page = self._page
         btn = loc
         hwnd = self._find_browser_hwnd()
         if not hwnd:
@@ -1519,33 +1631,26 @@ class GeminiWebSession:
         try:
             if not _wait_focus():
                 self._dbg("系統滑鼠點擊：瀏覽器視窗 2 秒內沒有取得焦點，照樣嘗試點擊")
-            page.evaluate("""() => { if (!window.__aaLm) { window.__aaLm = 1;
-                addEventListener('mousemove', e => { window.__aaMove = [e.clientX, e.clientY]; }, true); }
-                window.__aaMove = null; }""")
-            box = btn.bounding_box()
+            self._iso_eval(_MOVE_LISTENER_JS)
+            box = self._box_of(role, btn)
             if not box:
                 return False
             tx, ty = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
-            geo = page.evaluate("""() => ({sx: screenX, sy: screenY, ow: outerWidth,
-                oh: outerHeight, iw: innerWidth, ih: innerHeight, dpr: devicePixelRatio})""")
-            dpr = geo["dpr"] or 1
-            border = (geo["ow"] - geo["iw"]) / 2
-            ex0 = (geo["sx"] + border + tx) * dpr
-            ey0 = (geo["sy"] + geo["oh"] - geo["ih"] - border + ty) * dpr
+            ex0, ey0, dpr = self._client_to_screen(tx, ty)
             px, py = ex0 + self._os_click_adjust[0], ey0 + self._os_click_adjust[1]
             # 游標直接跳到目標（v2.92 起不再分段移動：對位只需要頁面收到一次 mousemove）。
             # 先跳到旁邊 1 px 再跳回，確保游標本來就在目標上時頁面也收得到 mousemove。
             hit = False
             got = None
             for _ in range(6):
-                page.evaluate("window.__aaMove = null")
+                self._iso_eval("window.__aaMove = null")
                 u32.SetCursorPos(int(px) + 1, int(py))
                 u32.SetCursorPos(int(px), int(py))
                 wait_end = time.time() + 0.3
                 got = None
                 while got is None and time.time() < wait_end:
                     time.sleep(0.01)
-                    got = page.evaluate("window.__aaMove")
+                    got = self._iso_eval("window.__aaMove")
                 if not got:
                     continue
                 # 使用者這段時間動了滑鼠：頁面收到的是使用者的位置，不能拿來校正
@@ -1628,7 +1733,7 @@ class GeminiWebSession:
             end = time.time() + 1.0
             while time.time() < end:
                 try:
-                    if page.evaluate("document.hasFocus()"):
+                    if self._iso_eval("document.hasFocus()"):
                         return True
                 except Exception:
                     pass
@@ -1639,10 +1744,13 @@ class GeminiWebSession:
         """找這個 Playwright 瀏覽器的頂層視窗：暫時把分頁標題改成唯一字串再比對視窗標題。
 
         內建 Chromium／系統 Chrome／Edge 都適用，也不會找到使用者自己開的 Gemini 分頁。
+        找到後快取（v3.00）：改標題頁面看得到，不必每次點擊都改一次。視窗失效才重找。
         """
         import ctypes
         from ctypes import wintypes
         u32 = ctypes.windll.user32
+        if self._hwnd and u32.IsWindow(self._hwnd):
+            return self._hwnd
         page = self._page
         token = f"aa-send-{os.getpid()}-{time.time_ns()}"
         old = page.evaluate("document.title")
@@ -1669,7 +1777,252 @@ class GeminiWebSession:
                 page.evaluate("t => { document.title = t; }", old)
             except Exception:
                 pass
-        return found[0] if found else 0
+        self._hwnd = found[0] if found else 0
+        return self._hwnd
+
+    # ── 獨立 JS 環境與座標換算 ──
+
+    def _iso_eval(self, expression: str):
+        """在獨立 JS 環境（isolated world）執行 expression 並回傳結果（v3.00）。
+
+        與頁面共用 DOM、不共用 JS 全域：我們加的變數與事件監聽器頁面腳本看不到，
+        頁面若改寫 addEventListener 等內建函式也攔不到我們的呼叫（實測）。頁面導向後
+        舊環境失效 → 自動重建；CDP 不可用時退回 page.evaluate（頁面本身的環境）。
+        expression 必須是運算式（函式請寫成立即執行的形式）。
+        """
+        last: Exception | None = None
+        for _ in range(2):
+            try:
+                if self._cdp is None:
+                    self._cdp = self._context.new_cdp_session(self._page)
+                if self._iso_id is None:
+                    tree = self._cdp.send("Page.getFrameTree")
+                    self._iso_id = self._cdp.send("Page.createIsolatedWorld", {
+                        "frameId": tree["frameTree"]["frame"]["id"],
+                        "worldName": "aa_tool"})["executionContextId"]
+                    self._dbg(f"建立獨立 JS 環境（#{self._iso_id}）")
+                r = self._cdp.send("Runtime.evaluate", {
+                    "expression": expression, "contextId": self._iso_id,
+                    "returnByValue": True})
+                if "exceptionDetails" in r:
+                    raise GeminiWebError(
+                        (r["exceptionDetails"].get("exception") or {}).get("description")
+                        or r["exceptionDetails"].get("text") or "JS 例外")
+                return (r.get("result") or {}).get("value")
+            except Exception as e:  # noqa: BLE001 — 多半是頁面導向後環境失效，重建一次
+                last = e
+                self._iso_id = None
+        self._dbg(f"獨立 JS 環境執行失敗，改用頁面環境：{brief_error(last)}")
+        return self._page.evaluate(expression)
+
+    def _box_of(self, role: str, loc):
+        """元素在頁面上的位置 {x, y, width, height}；讀不到回 None。
+
+        以 _find 命中的選擇器在獨立 JS 環境讀 getBoundingClientRect——不用 Playwright 的
+        bounding_box()（會在頁面留下監聽器，見 _HEALTH_JS 註解）。選擇器不是標準 CSS
+        （使用者自訂的 Playwright 專用語法）或讀不到時才退回 bounding_box()。
+        """
+        sel = self._matched_sel.get(role)
+        if sel:
+            try:
+                r = self._iso_eval(
+                    "(() => { const el = document.querySelector(" + json.dumps(sel) + ");"
+                    " if (!el) return null; const r = el.getBoundingClientRect();"
+                    " return {x: r.x, y: r.y, width: r.width, height: r.height}; })()")
+                if r and r.get("width") and r.get("height"):
+                    return r
+            except Exception:  # noqa: BLE001
+                pass
+        self._dbg(f"獨立環境讀不到「{role}」的位置，改用 Playwright（頁面看得到痕跡）")
+        return loc.bounding_box()
+
+    def _client_to_screen(self, cx: float, cy: float) -> tuple[float, float, float]:
+        """頁面座標 → 螢幕座標的估算值（尚未套用 _os_click_adjust 修正量），回傳 (x, y, dpr)。"""
+        geo = self._iso_eval(
+            "({sx: screenX, sy: screenY, ow: outerWidth, oh: outerHeight,"
+            " iw: innerWidth, ih: innerHeight, dpr: devicePixelRatio})")
+        dpr = geo["dpr"] or 1
+        border = (geo["ow"] - geo["iw"]) / 2
+        return ((geo["sx"] + border + cx) * dpr,
+                (geo["sy"] + geo["oh"] - geo["ih"] - border + cy) * dpr, dpr)
+
+    # ── 擬人操作（send_method="human"，v3.00 實驗） ──
+
+    def _human_compose_and_send(self, editor, text: str) -> None:
+        """點輸入框 → 貼上 → 點送出，全程比照真人操作。
+
+        與「滑鼠點擊」的差別（都是針對 Debug Log 統計與「手動操作不會被擋」的推測）：
+        - 節奏：新對話載入完成後至少等 ``_HUMAN_WARMUP``、同對話上一則回覆後至少等
+          ``_HUMAN_GAP`` 才開始（背景等待，不佔用滑鼠）；各步之間隨機停頓。
+        - 焦點：瀏覽器叫到前景一次，整段做完才還原——原本點框、貼上、點送出各切一次，
+          頁面看到的是「取得焦點→失去焦點」反覆跳動。
+        - 滑鼠：沿曲線、由快而慢移動（頁面收到一連串 mousemove），停一下再按、按住約
+          0.1 秒；目標點在按鈕中央附近隨機。新對話第一則送出前先在對話區隨意移動兩三下。
+        - 鍵盤：Ctrl+V 按鍵間隔比照真人。
+        任一步失敗就改用一般做法補上（程式點擊／逐字填入／程式送出），並記入 Log。
+        """
+        import ctypes
+        from ctypes import wintypes
+        rnd = random.Random()
+        first = self._send_count == 1
+        lo, hi = _HUMAN_WARMUP if first else _HUMAN_GAP
+        base = self._page_ready_at if first else self._last_reply_at
+        wait = rnd.uniform(lo, hi) - (time.time() - base)
+        if wait > 0:
+            self._dbg(f"擬人操作：{'新對話載入後' if first else '上一則回覆後'}再等 {wait:.1f}s")
+            self._sleep_with_stop(wait)
+        hwnd = self._find_browser_hwnd() if os.name == "nt" else 0
+        if not hwnd:
+            self._log("  （擬人操作需要 Windows 並找得到瀏覽器視窗，這次改用一般方式送出）")
+            editor.click()
+            self._fill_input(editor, text)
+            time.sleep(_PRE_SEND_PAUSE)
+            self._send()
+            return
+        u32 = ctypes.windll.user32
+        prev_fg = u32.GetForegroundWindow()
+        orig = wintypes.POINT()
+        u32.GetCursorPos(ctypes.byref(orig))
+        t_hold = time.time()
+        try:
+            if not self._wait_page_focus(hwnd):
+                self._dbg("擬人操作：瀏覽器視窗沒有取得焦點，照樣嘗試")
+            self._iso_eval(_MOVE_LISTENER_JS)
+            if first:
+                self._human_wander(rnd)
+            if not self._human_click(editor, "輸入框", rnd, self._editor_focused,
+                                     lambda: True, role="input"):
+                self._log("  （擬人操作：點不到輸入框，改用程式點擊）")
+                editor.click()
+            time.sleep(rnd.uniform(*_HUMAN_PRE_PASTE))
+            if not self._os_paste_into(editor, text, human=True):
+                self._log("  （擬人操作：系統鍵盤貼上沒成功，改用逐字填入）")
+                self._clear_input(editor)
+                editor.fill(text)
+            time.sleep(rnd.uniform(*_HUMAN_PASTE_PAUSE))
+            btn = self._wait_send_enabled()
+            if btn is None or not self._human_click(
+                    btn, "送出鈕", rnd, self._sent_check,
+                    lambda: self._still_enabled(btn), role="send"):
+                self._log("  （擬人操作：點送出鈕沒成功，改用程式送出）")
+                self._click_send()
+        finally:
+            self._dbg(f"擬人操作：佔用滑鼠與前景 {time.time() - t_hold:.1f}s")
+            u32.SetCursorPos(orig.x, orig.y)
+            if prev_fg and prev_fg != hwnd:
+                self._activate_window(prev_fg)
+
+    def _human_move_to(self, x: float, y: float, rnd: random.Random,
+                       before_last=None) -> bool:
+        """系統滑鼠沿擬人軌跡移到螢幕座標 (x, y)；途中使用者動了滑鼠就停下、回 False。
+
+        before_last：最後一步之前呼叫（校正用：先清掉頁面回報，最後一步的回報才是終點）。
+        最後一步一定落在與前一步不同的位置——Chrome 對「位置沒變」的移動不發 mousemove，
+        游標本來就在終點上時先偏開 2 像素再移回。
+        """
+        import ctypes
+        from ctypes import wintypes
+        u32 = ctypes.windll.user32
+        cur = wintypes.POINT()
+        u32.GetCursorPos(ctypes.byref(cur))
+        pts, step = _human_path(cur.x, cur.y, int(x), int(y), rnd)
+        if len(pts) < 2:
+            pts = [(int(x) - 2, int(y) + 1), (int(x), int(y))]
+            step = step or 0.03
+        last = (cur.x, cur.y)
+        for i, (px, py) in enumerate(pts):
+            now = wintypes.POINT()
+            u32.GetCursorPos(ctypes.byref(now))
+            if (now.x, now.y) != last:
+                return False           # 游標不在上一步放的位置＝使用者動了滑鼠
+            if before_last is not None and i == len(pts) - 1:
+                before_last()
+            u32.SetCursorPos(px, py)
+            u32.GetCursorPos(ctypes.byref(now))
+            last = (now.x, now.y)      # 以實際位置為準（螢幕邊界會被夾住）
+            if step:
+                time.sleep(step)
+        return True
+
+    def _human_wander(self, rnd: random.Random) -> None:
+        """新對話第一則送出前：滑鼠在對話區隨意移動兩三下（不點擊），像人在看頁面。"""
+        try:
+            vw, vh = self._iso_eval("[innerWidth, innerHeight]")
+        except Exception:  # noqa: BLE001
+            return
+        for _ in range(rnd.randint(2, 3)):
+            x, y, _dpr = self._client_to_screen(vw * rnd.uniform(0.3, 0.7),
+                                                vh * rnd.uniform(0.2, 0.55))
+            self._human_move_to(x + self._os_click_adjust[0],
+                                y + self._os_click_adjust[1], rnd)
+            time.sleep(rnd.uniform(0.3, 0.9))
+
+    def _human_click(self, loc, label: str, rnd: random.Random, done, can_retry,
+                     role: str) -> bool:
+        """沿擬人軌跡移到 ``loc`` 上（中央附近隨機一點）、停一下再點；``done()`` 為生效判定。
+
+        對位同 ``_os_click_locator``：以頁面收到的 mousemove 座標校正，差太多就再小幅
+        移動修正（像人在微調），最多 5 次；對不準或點了沒生效回 False。
+        """
+        import ctypes
+        from ctypes import wintypes
+        u32 = ctypes.windll.user32
+        box = self._box_of(role, loc)
+        if not box:
+            return False
+        tx = box["x"] + box["width"] * rnd.uniform(0.38, 0.62)
+        ty = box["y"] + box["height"] * rnd.uniform(0.38, 0.62)
+        ex0, ey0, dpr = self._client_to_screen(tx, ty)
+        px, py = ex0 + self._os_click_adjust[0], ey0 + self._os_click_adjust[1]
+        hit = False
+        got = None
+        for _ in range(5):
+            # 最後一步前清掉回報：之後收到的就是游標停在終點時頁面看到的座標
+            if not self._human_move_to(px, py, rnd, before_last=lambda: self._iso_eval(
+                    "window.__aaMove = null")):
+                self._dbg(f"擬人操作：移向{label}途中滑鼠被移動，稍等後重來")
+                time.sleep(0.6)
+                continue
+            # 視窗剛叫到前景時頁面第一次回報可能要將近 1 秒（實測 0.75 秒）
+            wait_end = time.time() + 1.0
+            got = None
+            while got is None and time.time() < wait_end:
+                time.sleep(0.01)
+                got = self._iso_eval("window.__aaMove")
+            if not got:
+                continue
+            cur = wintypes.POINT()
+            u32.GetCursorPos(ctypes.byref(cur))
+            if (cur.x, cur.y) != (int(px), int(py)):
+                continue
+            ex, ey = tx - got[0], ty - got[1]
+            if abs(ex) <= box["width"] / 3 and abs(ey) <= box["height"] / 3:
+                hit = True
+                break
+            px += ex * dpr
+            py += ey * dpr
+        self._dbg(f"擬人操作：{'對準' if hit else '對不準'}{label}"
+                  f"（頁面座標 {got}，目標 {tx:.0f},{ty:.0f}）")
+        if not hit:
+            return False
+        self._os_click_adjust = (px - ex0, py - ey0)
+        for n in range(1, _OS_CLICK_TRIES + 1):
+            time.sleep(rnd.uniform(*_HUMAN_HOVER))
+            if not _send_mouse_click_at(int(px), int(py),
+                                        hold=rnd.uniform(*_HUMAN_CLICK_HOLD)):
+                self._dbg("擬人操作：SendInput 送不出去")
+                return False
+            end = time.time() + 1.5
+            while time.time() < end:
+                if done():
+                    if n > 1:
+                        self._dbg(f"擬人操作：第 {n} 次點{label}才生效")
+                    return True
+                time.sleep(0.05)
+            if not can_retry():
+                break
+            self._dbg(f"擬人操作：點{label}後沒有生效，再點一次")
+        return False
 
     def _click_send(self) -> None:
         deadline = time.time() + 15
@@ -1775,7 +2128,7 @@ class GeminiWebSession:
     def _poll_toasts(self) -> bool:
         """讀頁面左下角提示，新出現的寫進 Log。新提示含錯誤字樣時回 True。"""
         try:
-            texts = self._page.evaluate(_TOAST_JS, _TOAST_SEL)
+            texts = self._iso_eval(f"({_TOAST_JS})({json.dumps(_TOAST_SEL)})")
         except Exception:  # noqa: BLE001 — 頁面導向中等情況讀不到就算了
             return False
         err = False

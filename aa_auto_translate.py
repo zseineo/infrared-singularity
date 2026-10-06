@@ -338,7 +338,8 @@ def _fetch_and_parse(url: str, cfg: AutoConfig, *,
         回寫暫存）。對應主畫面「不讀暫存」開關。
     """
     page_html = None if skip_cache else _read_url_cache(url)
-    if page_html is None:
+    fresh = page_html is None
+    if fresh:
         try:
             page_html = url_fetcher.fetch_url(url)
         except Exception as e:
@@ -350,7 +351,6 @@ def _fetch_and_parse(url: str, cfg: AutoConfig, *,
             if detail:
                 msg += chr(10) + chr(10).join(detail)
             raise FetchFailed(msg) from e
-        _write_url_cache(url, page_html)
     try:
         text_content, nav_links, page_title = url_fetcher.parse_page_html(
             page_html, url,
@@ -359,6 +359,10 @@ def _fetch_and_parse(url: str, cfg: AutoConfig, *,
         raise ChapterError(f"解析頁面失敗：{e}") from e
     if not text_content or not text_content.strip():
         raise ChapterError("找不到內文（解析後內容為空）")
+    # 解析得出內文才存暫存：解析失敗的頁面（例如當時還不支援的網站）存了會一直吃到
+    # 同一份壞內容，之後支援了也讀不到
+    if fresh:
+        _write_url_cache(url, page_html)
     display_title = (text_extraction.extract_work_title(page_title)
                      if page_title else "")
     source = (display_title + "\n\n" + text_content
@@ -827,28 +831,39 @@ def _preview_fetch_source(
     if not url:
         return None
     cfg = load_config(base_dir)
+
+    def _parse(html_text: str):
+        try:
+            text, _nav, title = url_fetcher.parse_page_html(
+                html_text, url,
+                author_name=cfg.author_name, author_only=cfg.author_only)
+        except Exception:
+            return None
+        return (text, title) if text and text.strip() else None
+
     page_html = _read_url_cache(url)
-    if page_html is None:
+    if page_html is not None:
+        parsed = _parse(page_html)
+    else:
         if not allow_network:
             return None
         # 同一個網址同時只抓一次：面板的檔名預覽與標題過濾自動帶入會同時要
         # 同一個網址，後到的等前一個抓完直接讀暫存（少打一次站台）
         with _preview_lock(url):
             page_html = _read_url_cache(url)
-            if page_html is None:
+            if page_html is not None:
+                parsed = _parse(page_html)
+            else:
                 try:
                     page_html = url_fetcher.fetch_url(url)
                 except Exception:
                     return None
-                _write_url_cache(url, page_html)
-    try:
-        text_content, _nav, page_title = url_fetcher.parse_page_html(
-            page_html, url,
-            author_name=cfg.author_name, author_only=cfg.author_only)
-    except Exception:
+                parsed = _parse(page_html)
+                if parsed:   # 解析得出內文才存暫存（見 _fetch_and_parse）
+                    _write_url_cache(url, page_html)
+    if not parsed:
         return None
-    if not text_content or not text_content.strip():
-        return None
+    text_content, page_title = parsed
     display_title = (text_extraction.extract_work_title(page_title)
                      if page_title else "")
     source = (display_title + "\n\n" + text_content

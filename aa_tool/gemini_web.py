@@ -360,9 +360,8 @@ INPUT_METHODS: dict[str, str] = {
     "fill": "逐字填入（原本做法，最保險但長文較慢）",
     "quill": "直接寫入編輯器（快，不碰剪貼簿）",
     "clipboard": "剪貼簿貼上（快，會暫時佔用剪貼簿，貼完還原）",
-    # v2.99 實驗：程式的 Ctrl+V 是 Playwright 模擬的按鍵；改用 Windows 真實鍵盤事件，
-    # 與使用者手動 Ctrl+V 走同一條路（會把瀏覽器叫到前面一瞬間）
-    "os_paste": "系統鍵盤貼上（實驗；與手動 Ctrl+V 相同，會暫時佔用剪貼簿並切到瀏覽器）",
+    # v2.99 的 os_paste（系統鍵盤貼上）v3.02 移除：擬人操作一律自己用系統鍵盤貼上，
+    # 程式送出要全背景運作（不切前景），舊設定讀取時改成 clipboard
 }
 DEFAULT_INPUT_METHOD = "fill"
 
@@ -995,10 +994,6 @@ class GeminiWebSession:
             if self._paste_via_clipboard(editor, text):
                 return
             self._log("  （剪貼簿貼上沒成功，改用逐字填入）")
-        elif method == "os_paste":
-            if self._paste_via_os_keyboard(editor, text):
-                return
-            self._log("  （系統鍵盤貼上沒成功，改用逐字填入）")
         else:
             editor.fill(text)
             return
@@ -1056,33 +1051,8 @@ class GeminiWebSession:
         finally:
             _win_clipboard_set(backup or "")
 
-    def _paste_via_os_keyboard(self, editor, text: str) -> bool:
-        """暫借剪貼簿，把瀏覽器叫到前面後用 Windows 真實鍵盤按 Ctrl+V（v2.99 實驗）。
-
-        與 ``_paste_via_clipboard`` 的差別只在按鍵來源：那邊是 Playwright 模擬的按鍵，
-        這裡是 SendInput，與使用者手動 Ctrl+V 相同。實際貼上見 ``_os_paste_into``；
-        這裡只負責把瀏覽器叫到前面、貼完還原原本的前景視窗。
-        非 Windows 或找不到瀏覽器視窗回 False。
-        """
-        if os.name != "nt":
-            return False
-        import ctypes
-        u32 = ctypes.windll.user32
-        hwnd = self._find_browser_hwnd()
-        if not hwnd:
-            self._dbg("系統鍵盤貼上：找不到瀏覽器視窗")
-            return False
-        prev_fg = u32.GetForegroundWindow()
-        try:
-            if not self._wait_page_focus(hwnd):
-                self._dbg("系統鍵盤貼上：瀏覽器視窗沒有取得焦點，照樣嘗試")
-            return self._os_paste_into(editor, text)
-        finally:
-            if prev_fg and prev_fg != hwnd:
-                self._activate_window(prev_fg)
-
     def _os_paste_into(self, editor, text: str, human: bool = False) -> bool:
-        """（瀏覽器已在前景時）暫借剪貼簿、用系統鍵盤 Ctrl+V 貼上並核對內容，貼完還原剪貼簿。
+        """擬人操作用（瀏覽器已在前景時）暫借剪貼簿、用系統鍵盤 Ctrl+V 貼上並核對內容，貼完還原剪貼簿。
 
         輸入框沒有焦點先用程式點一下；裡面已經有字（上一則沒清乾淨、草稿被還原等）
         就先 Ctrl+A 全選，讓這次貼上直接取代掉。human=True 時按鍵節奏比照真人。

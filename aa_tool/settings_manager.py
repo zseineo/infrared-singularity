@@ -196,9 +196,9 @@ class AppCache:
     gemini_gem_url: str = ""
     gemini_profile_dir: str = ""
     gemini_max_per_session: int = 3
-    # gemini_input_method：填入輸入框的方式 fill／quill／clipboard／os_paste（見 gemini_web.INPUT_METHODS）。
+    # gemini_input_method：填入輸入框的方式 fill／quill／clipboard（見 gemini_web.INPUT_METHODS）。
     gemini_input_method: str = "fill"
-    # gemini_send_method：按送出的方式 program／os_click／human（見 gemini_web.SEND_METHODS）。
+    # gemini_send_method：按送出的方式 program／human（見 gemini_web.SEND_METHODS）。
     gemini_send_method: str = "program"
     gemini_selectors: dict = field(default_factory=dict)
     auto_translate_out_dir: str = ""
@@ -503,6 +503,8 @@ class SettingsManager:
                 pass
             cache.gemini_input_method = str(data.get(
                 'gemini_input_method', cache.gemini_input_method) or "fill")
+            if cache.gemini_input_method == "os_paste":   # v2.99 實驗，v3.02 移除（程式送出要全背景）
+                cache.gemini_input_method = "clipboard"
             cache.gemini_send_method = str(data.get(
                 'gemini_send_method', cache.gemini_send_method) or "program")
             if cache.gemini_send_method == "os_click_once":   # v2.92 實驗選項，v2.93 移除

@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.01"
+APP_VERSION = "3.02"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -2517,17 +2517,18 @@ class MainWindow(QMainWindow):
         except OSError:
             pass
 
-    def _fetch_page_html(self, url: str) -> str:
-        """抓取頁面 HTML：依「不讀暫存」決定是否先吃本機暫存，抓到就回寫暫存。
+    def _fetch_page_html(self, url: str) -> tuple[str, bool]:
+        """抓取頁面 HTML：依「不讀暫存」決定是否先吃本機暫存。回傳 (HTML, 是否剛上網抓的)。
 
         所有讀取網址的入口（網址讀取、上一話／下一話、重找原文）都走這裡，
-        避免只有其中一條路徑理會 `_skip_url_cache`。
+        避免只有其中一條路徑理會 `_skip_url_cache`。**剛抓的不在這裡存暫存**：
+        呼叫端解析出內文後才 `_write_url_cache`——解析失敗的頁面（例如當時還不支援的
+        網站）存了會一直吃到同一份壞內容，之後支援了也讀不到。
         """
         page_html = None if self._skip_url_cache else self._read_url_cache(url)
         if page_html is None:
-            page_html = _fetch_url(url)
-            self._write_url_cache(url, page_html)
-        return page_html
+            return _fetch_url(url), True
+        return page_html, False
 
     def _handle_url_fetch_request(self, raw_url: str, author_only: bool,
                                    skip_cache: bool = False) -> None:
@@ -2538,7 +2539,7 @@ class MainWindow(QMainWindow):
 
         def _bg() -> None:
             try:
-                page_html = self._fetch_page_html(raw_url)
+                page_html, fresh = self._fetch_page_html(raw_url)
                 text_content, nav_links, page_title = _parse_page_html(
                     page_html, raw_url, author_name=author,
                     author_only=author_only)
@@ -2569,6 +2570,8 @@ class MainWindow(QMainWindow):
                         msg = (f"⚠️ 未找到作者「{author}」的貼文，"
                                f"請檢查名稱或關閉「僅作者」選項")
                         c = '#f39c12'
+                        if fresh:   # 頁面本身解析得出內文，只是作者不符 → 照樣存暫存
+                            self._write_url_cache(raw_url, page_html)
                     else:
                         msg = "❌ 找不到 article 區塊！"
                         c = '#dc3545'
@@ -2580,6 +2583,8 @@ class MainWindow(QMainWindow):
                         success=False, status_message=m, status_color=cc,
                     ) if self._url_fetch_win_visible() else None)
                 return
+            if fresh:   # 解析得出內文才存暫存（見 _fetch_page_html）
+                self._write_url_cache(raw_url, page_html)
 
             def _apply() -> None:
                 display_title = _extract_work_title(page_title) if page_title else ""
@@ -2669,10 +2674,12 @@ class MainWindow(QMainWindow):
 
         def _bg() -> None:
             try:
-                page_html = self._fetch_page_html(next_url)
+                page_html, fresh = self._fetch_page_html(next_url)
                 text_content, nav_links, page_title = _parse_page_html(
                     page_html, next_url, author_name=author,
                     author_only=self._author_only)
+                if fresh and text_content is not None:
+                    self._write_url_cache(next_url, page_html)
                 if text_content is None:
                     ao = self._author_only
                     if ao and author:
@@ -3677,7 +3684,7 @@ class MainWindow(QMainWindow):
         # 4) 抓網頁＋解析（先吃 %TEMP%/aa_url_cache 的內容，沒命中才上網；
         #    勾「不讀暫存」時一律重新上網抓）
         try:
-            page_html = self._fetch_page_html(matching_url)
+            page_html, fresh = self._fetch_page_html(matching_url)
             text_content, _nav, page_title = _parse_page_html(
                 page_html, matching_url,
                 author_name=self._author_name,
@@ -3686,6 +3693,8 @@ class MainWindow(QMainWindow):
             return None
         if not text_content or not text_content.strip():
             return None
+        if fresh:   # 解析得出內文才存暫存（見 _fetch_page_html）
+            self._write_url_cache(matching_url, page_html)
         # 5) 重建 source（與自動翻譯一致：display_title + 空行 + 內文）並寫回暫存
         display_title = _extract_work_title(page_title) if page_title else ""
         source = (display_title + "\n\n" + text_content

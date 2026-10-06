@@ -370,9 +370,10 @@ DEFAULT_INPUT_METHOD = "fill"
 # 產生的點擊／按鍵」（Playwright 的 click、Enter，含先移動滑鼠、等待、視窗在前景）
 # 一律回「我是語言模型，幫不上忙」；同一個瀏覽器、同一份內容改由真實滑鼠點擊送出
 # （人手或 Windows 系統滑鼠）就正常。PostMessage 送按鍵／點擊也一樣被擋或送不出。
+# v3.01：只把點擊換成系統滑鼠的「滑鼠點擊」os_click 仍有一定比例被擋，擬人操作實測
+# 不會 → 移除 os_click，只留程式送出與擬人操作（舊設定讀取時改成 human）。
 SEND_METHODS: dict[str, str] = {
     "program": "程式送出（原本做法，不影響滑鼠）",
-    "os_click": "系統滑鼠點擊（可避開部分時段被擋；每次送出借用滑鼠一瞬間）",
     # v3.00 實驗（取代 v2.99 的 os_click_input「點框＋送出」）：整段「點輸入框→貼上→
     # 點送出」都用系統滑鼠／鍵盤、軌跡與節奏比照真人，期間瀏覽器維持在前景，見
     # GeminiWebSession._human_compose_and_send
@@ -1533,40 +1534,8 @@ class GeminiWebSession:
         editor.click()
 
     def _send(self) -> None:
-        """依 ``send_method`` 按送出；系統滑鼠點擊不成功就退回程式送出。
-
-        擬人操作找不到瀏覽器視窗而退回一般流程時，也走系統滑鼠點擊。
-        """
-        if self.send_method in ("os_click", "human"):
-            try:
-                if self._os_click_send():
-                    return
-            except Exception as e:  # noqa: BLE001 — 失敗一律退回程式送出
-                self._dbg(f"系統滑鼠點擊例外：{brief_error(e)}")
-            self._log("  （系統滑鼠點擊沒成功，改用程式送出）")
+        """程式送出（擬人操作另走 _human_compose_and_send，找不到瀏覽器視窗時也退回這裡）。"""
         self._click_send()
-
-    def _os_click_send(self) -> bool:
-        """用 Windows 系統滑鼠點送出鈕（與人手點擊相同的輸入事件）。
-
-        步驟：等送出鈕可按 → 暫時把分頁標題改成唯一字串找出瀏覽器視窗 → 叫到最前面
-        → 游標直接跳到估算位置（套用上次的修正量）→ 以頁面收到的 mousemove 座標校正
-        （DPI 縮放、視窗邊框都不必自己算準；使用者同時動了滑鼠的那次不採用）→ SendInput
-        在絕對座標按下放開（使用者的移動插不進去）→ 立刻還原游標位置與原本的前景視窗。
-        游標只在「跳過去～點完」這段離開原位（實測約 0.1 秒）。
-        瀏覽器原本不在前景時，點擊可能落在視窗還沒真正啟用的空檔而沒送出（v2.94 使用者回報）：
-        點擊前等到 ``document.hasFocus()``，點完確認輸入框已清空或出現停止鈕，沒送出就再點，
-        最多 ``_OS_CLICK_TRIES`` 次。**輸入框還有字才補點**——已送出時送出鈕會變成停止鈕，
-        多點一下會中斷生成。系統層級 Enter 已測過照樣被擋，不用它補送。
-        對不準送出鈕就不點、回 False（交給呼叫端退回程式送出）。非 Windows 回 False。
-        """
-        if os.name != "nt":
-            return False
-        btn = self._wait_send_enabled()
-        if btn is None:
-            return False
-        return self._os_click_locator(btn, "送出鈕", self._sent_check,
-                                      lambda: self._still_enabled(btn), role="send")
 
     def _wait_send_enabled(self, timeout: float = 15.0):
         """等送出鈕出現且可按（填入後要一點時間），回傳 locator；逾時回 None。"""
@@ -1605,100 +1574,6 @@ class GeminiWebSession:
             return bool(self._iso_eval(_EDITOR_FOCUSED_JS))
         except Exception:  # noqa: BLE001
             return False
-
-    def _os_click_locator(self, loc, label: str, done, can_retry, role: str = "send") -> bool:
-        """用 Windows 系統滑鼠點 ``loc``（對位、點擊、還原游標與前景視窗見 ``_os_click_send``）。
-
-        ``done()`` 為點擊生效的判定；沒生效且 ``can_retry()`` 為真就再點，最多
-        ``_OS_CLICK_TRIES`` 次。對不準或點了沒生效回 False。
-        """
-        import ctypes
-        from ctypes import wintypes
-        u32 = ctypes.windll.user32
-        btn = loc
-        hwnd = self._find_browser_hwnd()
-        if not hwnd:
-            self._dbg("系統滑鼠點擊：找不到瀏覽器視窗")
-            return False
-        prev_fg = u32.GetForegroundWindow()
-        orig = wintypes.POINT()
-        u32.GetCursorPos(ctypes.byref(orig))
-        _activate = self._activate_window
-
-        def _wait_focus() -> bool:
-            return self._wait_page_focus(hwnd)
-
-        try:
-            if not _wait_focus():
-                self._dbg("系統滑鼠點擊：瀏覽器視窗 2 秒內沒有取得焦點，照樣嘗試點擊")
-            self._iso_eval(_MOVE_LISTENER_JS)
-            box = self._box_of(role, btn)
-            if not box:
-                return False
-            tx, ty = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
-            ex0, ey0, dpr = self._client_to_screen(tx, ty)
-            px, py = ex0 + self._os_click_adjust[0], ey0 + self._os_click_adjust[1]
-            # 游標直接跳到目標（v2.92 起不再分段移動：對位只需要頁面收到一次 mousemove）。
-            # 先跳到旁邊 1 px 再跳回，確保游標本來就在目標上時頁面也收得到 mousemove。
-            hit = False
-            got = None
-            for _ in range(6):
-                self._iso_eval("window.__aaMove = null")
-                u32.SetCursorPos(int(px) + 1, int(py))
-                u32.SetCursorPos(int(px), int(py))
-                wait_end = time.time() + 0.3
-                got = None
-                while got is None and time.time() < wait_end:
-                    time.sleep(0.01)
-                    got = self._iso_eval("window.__aaMove")
-                if not got:
-                    continue
-                # 使用者這段時間動了滑鼠：頁面收到的是使用者的位置，不能拿來校正
-                cur = wintypes.POINT()
-                u32.GetCursorPos(ctypes.byref(cur))
-                if (cur.x, cur.y) != (int(px), int(py)):
-                    continue
-                ex, ey = tx - got[0], ty - got[1]
-                if abs(ex) <= box["width"] / 3 and abs(ey) <= box["height"] / 3:
-                    hit = True
-                    break
-                px += ex * dpr
-                py += ey * dpr
-            self._dbg(f"系統滑鼠點擊：{'對準' if hit else '對不準'}{label}"
-                      f"（頁面座標 {got}，目標 {tx:.0f},{ty:.0f}）")
-            if not hit:
-                return False
-            self._os_click_adjust = (px - ex0, py - ey0)
-            time.sleep(0.03)
-            for n in range(1, _OS_CLICK_TRIES + 1):
-                # 「移到絕對座標＋按下」「移到絕對座標＋放開」各用一次 SendInput 送進輸入佇列：
-                # 同一批事件中間插不進使用者的滑鼠移動，點擊一定落在送出鈕上。
-                if not _send_mouse_click_at(int(px), int(py)):
-                    self._dbg("系統滑鼠點擊：SendInput 送不出去")
-                    return False
-                u32.SetCursorPos(orig.x, orig.y)
-                end = time.time() + 1.5
-                while time.time() < end:
-                    if done():
-                        if n > 1:
-                            self._dbg(f"系統滑鼠點擊：第 {n} 次點擊才送出")
-                        return True
-                    time.sleep(0.05)
-                if n == _OS_CLICK_TRIES:
-                    break
-                self._dbg(f"系統滑鼠點擊：第 {n} 次點擊後沒有送出，再點一次")
-                if not _wait_focus():
-                    self._dbg("系統滑鼠點擊：瀏覽器視窗仍沒有取得焦點")
-                if not can_retry():
-                    break
-            # 點了沒生效，交給呼叫端改用程式點擊／送出
-            self._dbg(f"系統滑鼠點擊：點{label} {_OS_CLICK_TRIES} 次都沒有生效")
-            return False
-        finally:
-            # 還原：游標回原位、原本的前景視窗回到前面（使用者正在用的程式）
-            u32.SetCursorPos(orig.x, orig.y)
-            if prev_fg and prev_fg != hwnd:
-                _activate(prev_fg)
 
     @staticmethod
     def _activate_window(h) -> None:
@@ -1851,7 +1726,8 @@ class GeminiWebSession:
     def _human_compose_and_send(self, editor, text: str) -> None:
         """點輸入框 → 貼上 → 點送出，全程比照真人操作。
 
-        與「滑鼠點擊」的差別（都是針對 Debug Log 統計與「手動操作不會被擋」的推測）：
+        與 v3.00 前「滑鼠點擊」（只把點送出鈕換成系統滑鼠，v3.01 移除）的差別
+        （都是針對 Debug Log 統計與「手動操作不會被擋」的推測）：
         - 節奏：新對話載入完成後至少等 ``_HUMAN_WARMUP``、同對話上一則回覆後至少等
           ``_HUMAN_GAP`` 才開始（背景等待，不佔用滑鼠）；各步之間隨機停頓。
         - 焦點：瀏覽器叫到前景一次，整段做完才還原——原本點框、貼上、點送出各切一次，
@@ -1961,7 +1837,7 @@ class GeminiWebSession:
                      role: str) -> bool:
         """沿擬人軌跡移到 ``loc`` 上（中央附近隨機一點）、停一下再點；``done()`` 為生效判定。
 
-        對位同 ``_os_click_locator``：以頁面收到的 mousemove 座標校正，差太多就再小幅
+        對位：以頁面收到的 mousemove 座標校正（DPI 縮放、視窗邊框不必自己算準），差太多就再小幅
         移動修正（像人在微調），最多 5 次；對不準或點了沒生效回 False。
         """
         import ctypes

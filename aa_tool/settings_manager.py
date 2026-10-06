@@ -507,7 +507,8 @@ class SettingsManager:
                 'gemini_send_method', cache.gemini_send_method) or "program")
             if cache.gemini_send_method == "os_click_once":   # v2.92 實驗選項，v2.93 移除
                 cache.gemini_send_method = "os_click"
-            if cache.gemini_send_method == "os_click_input":  # v2.99 實驗，v3.00 併入擬人操作
+            if cache.gemini_send_method in ("os_click_input", "os_click"):
+                # v2.99「點框＋送出」v3.00 併入擬人操作；「滑鼠點擊」v3.01 移除（實測仍會被擋）
                 cache.gemini_send_method = "human"
             sel = data.get('gemini_selectors', cache.gemini_selectors)
             cache.gemini_selectors = sel if isinstance(sel, dict) else {}

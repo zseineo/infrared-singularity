@@ -98,10 +98,9 @@ ERROR_POLICY_DEFAULTS: dict[str, str] = {
 
 # 少數項目的「retry／stop」不是字面上的重試／中斷，UI 與 Log 改用這裡的說法。
 ERROR_POLICY_CHOICE_LABELS: dict[str, dict[str, str]] = {
-    # 這一項的 stop ＝跳過這一話續下一話（不是中斷整批），retry ＝開新對話重送、
-    # 再不行就把該段對半拆開送（見 aa_auto_translate._send_chunk）。
-    "web_censored": {"retry": "重送＋拆段", "stop": "跳過這一話"},
-    # 這兩項的 retry ＝排進待補翻列表、之後再補翻（不是當場重送）。
+    # 以下各項的 stop ＝跳過這一話續下一話（不是中斷整批），retry ＝排進待補翻列表、
+    # 之後再補翻（不是當場重送）。web_censored 的 retry v3.03 前是「當場重送＋拆段」。
+    "web_censored": {"retry": "稍後重試", "stop": "跳過這一話"},
     "reply_format": {"retry": "稍後重試", "stop": "跳過這一話"},
     "reply_lines": {"retry": "稍後重試", "stop": "跳過這一話"},
     "reply_japanese": {"retry": "稍後重試", "stop": "跳過這一話"},

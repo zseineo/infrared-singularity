@@ -70,12 +70,10 @@ _REFUSAL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# 罐頭拒絕／極短回覆的重送策略（v2.48）：伺服器端的輸出過濾多半有隨機性，
-# 換個對話重送常常就過了；連兩次不行才懷疑是「這段輸出太長」，對半拆開送。
-_CENSOR_RETRIES = 2            # 同一段最多再重送幾次（每次都先開新對話）
-_CENSOR_RETRY_WAIT = 20.0      # 重送前先等幾秒（連續送出容易再被攔）
-_CENSOR_HALF_RETRIES = 1       # 對半拆之後，每半段最多再重送幾次
-_CENSOR_SPLIT_MIN_LINES = 40   # 少於這個行數就不再拆（拆了也無濟於事）
+# 回覆被抽換成罐頭拒絕語時，進階設定「稍後重試」（v3.03；取代 v2.48 的「當場開新
+# 對話重送＋對半拆段」）：不存檔、開新對話、排進待補翻列表；同一話最多排幾次，
+# 超過就照「跳過這一話」處理（補翻階段只剩這一話時才不會無限重送）。
+_CENSOR_MAX_DEFERS = 3
 
 # 回覆格式檢查（v2.50）：AI 有時不理會 prompt，改回一篇內容摘要（「やる夫スレの
 # ログデータですね。登場人物…」）。這種回覆 apply_translation 一行也替換不到，會
@@ -111,6 +109,9 @@ _REPLY_CHECK_MIN_LINES = 5
 # 沒有這個上限的話，若某一話每次都被回摘要，補翻階段（新的話都跑完後）會在
 # 這一話上無限重試——伺服器忙碌那條路每次要等 35 分鐘，這條卻是馬上重送。
 _MALFORMED_MAX_RETRIES = 3
+# 譯文關鍵字動作「補翻」：同一話最多排進待補翻列表幾次，超過就照「跳過」處理
+# （理由同上：補翻階段只剩這一話時會原地無限重送）。
+_KEYWORD_MAX_RETRIES = 3
 
 # 未翻譯偵測：可比對的 ID 中，譯文與原文「完全相同」的比例 ≥ 此值 → 視為沒翻譯。
 _UNTRANSLATED_RATIO = 0.9
@@ -494,11 +495,12 @@ def mask_words(extracted: str, words: list[str]) -> tuple[str, int]:
 
 
 # 譯文關鍵字檢查的動作：pause＝先存檔、原地等使用者按繼續；stop＝不存檔、結束整批；
-# skip＝不存檔、記入失敗、續下一話。
-OUTPUT_KEYWORD_ACTIONS = {"pause": "暫停", "stop": "停止", "skip": "跳過"}
-# 同一話命中多個動作時的優先順序：停止 > 跳過 > 暫停（跳過＝「這話不要存」，
-# 必須優先於會先存檔的暫停）。
-_OUTPUT_KEYWORD_PRIORITY = ("stop", "skip", "pause")
+# skip＝不存檔、記入失敗、續下一話；retry＝不存檔、開新對話、排進待補翻列表之後重翻
+# （同一話最多 _KEYWORD_MAX_RETRIES 次，之後照 skip 處理）。
+OUTPUT_KEYWORD_ACTIONS = {"pause": "暫停", "stop": "停止", "skip": "跳過", "retry": "補翻"}
+# 同一話命中多個動作時的優先順序：停止 > 跳過 > 補翻 > 暫停（跳過＝「這話不要存」，
+# 重翻也不會要；跳過與補翻都不存檔，必須優先於會先存檔的暫停）。
+_OUTPUT_KEYWORD_PRIORITY = ("stop", "skip", "retry", "pause")
 
 
 def parse_output_keyword_rules(rules) -> list[tuple[str, str]]:
@@ -539,66 +541,25 @@ def _keyword_hits_text(hits: list[tuple[str, str, str]]) -> str:
 
 
 def _send_chunk(session: GeminiWebSession, chunk_lines: list[str], label: str,
-                log: Callable[[str], None], stop_event, stuck_retry: bool,
-                *, retries: int, allow_split: bool) -> str:
-    """送出一段並確認拿到的是譯文；被吞成罐頭拒絕就重送，再不行就對半拆。
+                log: Callable[[str], None], stop_event, stuck_retry: bool) -> str:
+    """送出一段並確認拿到的是譯文；被吞成罐頭拒絕／極短回覆就丟 `CensoredResponse`。
 
-    伺服器端的輸出過濾（回覆生成到一半被整段抽換成「大規模言語モデルとして…
-    対応できません」）**有隨機性**，而且被吞的那則回覆會留在對話脈絡裡影響後續，
-    所以每次重送前都 `start_new_session()` 開新對話並等 `_CENSOR_RETRY_WAIT` 秒。
-    重送 `retries` 次都不行，才改判「這段輸出太長容易被攔」，對半拆成兩段分別送
-    （合起來仍是同一段的完整譯文）。全部失敗才丟 `CensoredResponse`（跳過該話）。
-
-    最壞情況的送出次數：(1+_CENSOR_RETRIES) + 2×(1+_CENSOR_HALF_RETRIES)。
-
-    `retries=0, allow_split=False`（進階設定「回覆被換成拒絕語＝跳過這一話」，
-    **預設**）時完全不重送，命中就丟 `CensoredResponse`＝v2.47 以前的行為。
+    要不要稍後補翻由協調器依進階設定「回覆被換成拒絕語」決定（見 run_auto_translate）。
     """
     text = "\n".join(chunk_lines)
-    for attempt in range(1, retries + 2):
-        if stop_event is not None and stop_event.is_set():
-            raise StopRequested()
-        try:
-            reply = session.translate(text)
-        except GeminiStuck as e:
-            if not stuck_retry:
-                raise
-            raise GeminiBusyRetriesExhausted(f"{e}（進階設定：重試）") from e
-        if not _looks_censored(text, reply):
-            if attempt > 1:
-                log(f"  ✅ {label} 重送後取得正常譯文。")
-            return reply.strip()
-        first = (reply.strip().splitlines() or [""])[0][:60]
-        log(f"  🚫 {label} 的回覆被抽換成拒絕語／極短回覆"
-            f"（第 {attempt} 次）：{first}")
-        if attempt > retries:
-            break
-        log(f"  🔁 開新對話後等 {int(_CENSOR_RETRY_WAIT)} 秒再重送一次"
-            "（被吞的回覆會留在對話脈絡裡，同一個對話重送多半一樣）…")
-        session.start_new_session()
-        if stop_event is not None:
-            if stop_event.wait(_CENSOR_RETRY_WAIT):
-                raise StopRequested()
-        else:
-            time.sleep(_CENSOR_RETRY_WAIT)
-
-    if allow_split and len(chunk_lines) >= _CENSOR_SPLIT_MIN_LINES:
-        mid = len(chunk_lines) // 2
-        log(f"  ✂️ 重送都被擋 → 改成對半拆（{mid} + {len(chunk_lines) - mid} 行）"
-            "分開送：回覆愈長愈容易在快完成時被攔掉。")
-        session.start_new_session()
-        first_half = _send_chunk(
-            session, chunk_lines[:mid], f"{label} 前半", log, stop_event,
-            stuck_retry, retries=_CENSOR_HALF_RETRIES, allow_split=False)
-        second_half = _send_chunk(
-            session, chunk_lines[mid:], f"{label} 後半", log, stop_event,
-            stuck_retry, retries=_CENSOR_HALF_RETRIES, allow_split=False)
-        return (first_half + "\n" + second_half).strip()
-
-    tried = (f"；已開新對話重送 {retries} 次"
-             + ("＋對半拆開送" if allow_split else "") + "仍相同") if retries else ""
-    raise CensoredResponse(
-        f"{label} 回覆極短且非翻譯格式（疑似被審查）{tried}")
+    if stop_event is not None and stop_event.is_set():
+        raise StopRequested()
+    try:
+        reply = session.translate(text)
+    except GeminiStuck as e:
+        if not stuck_retry:
+            raise
+        raise GeminiBusyRetriesExhausted(f"{e}（進階設定：重試）") from e
+    if not _looks_censored(text, reply):
+        return reply.strip()
+    first = (reply.strip().splitlines() or [""])[0][:60]
+    log(f"  🚫 {label} 的回覆被抽換成拒絕語／極短回覆：{first}")
+    raise CensoredResponse(f"{label} 回覆極短且非翻譯格式（疑似被審查）")
 
 
 def _check_reply_usable(sent: str, reply: str, policy: dict,
@@ -684,7 +645,7 @@ def _japanese_ratio(reply: str) -> tuple[float, int]:
 
 def _translate(session: GeminiWebSession, extracted: str,
                log: Callable[[str], None], stop_event=None,
-               stuck_retry: bool = False, censor_retry: bool = False) -> str:
+               stuck_retry: bool = False) -> str:
     """送 Gemini 翻譯；行數過多時分段送出後合併。
 
     GeminiQuotaExceeded 直接往外拋（呼叫端暫停整批）。
@@ -704,9 +665,7 @@ def _translate(session: GeminiWebSession, extracted: str,
             log(f"  翻譯分段 {idx}/{len(chunks)}（{len(chunk)} 行）")
         parts.append(_send_chunk(
             session, chunk, f"分段 {idx}/{len(chunks)}", log, stop_event,
-            stuck_retry,
-            retries=_CENSOR_RETRIES if censor_retry else 0,
-            allow_split=censor_retry))
+            stuck_retry))
     return "\n".join(parts)
 
 
@@ -1417,8 +1376,28 @@ def run_auto_translate(
 
     stuck_retry = policy["web_stuck"] == "retry"
     censor_retry = policy["web_censored"] == "retry"
+    # {網址: 因回覆被換成拒絕語而排進待補翻列表的次數}，上限 _CENSOR_MAX_DEFERS
+    censor_tries: dict[str, int] = {}
+
+    def _translate_or_defer(ch_url: str, text: str) -> str:
+        """翻譯；被換成拒絕語且進階設定為「稍後重試」時，開新對話後改丟「伺服器忙碌」
+        讓這一話排進待補翻列表（同一話最多 _CENSOR_MAX_DEFERS 次，之後照跳過處理）。"""
+        try:
+            return _translate(session, text, log, stop_event, stuck_retry=stuck_retry)
+        except CensoredResponse as e:
+            if not censor_retry:
+                raise
+            n = censor_tries.get(ch_url, 0)
+            if n >= _CENSOR_MAX_DEFERS:
+                raise CensoredResponse(f"{e}；補翻 {n} 次仍被擋") from e
+            censor_tries[ch_url] = n + 1
+            session.start_new_session()   # 被吞的回覆留在對話脈絡裡，補翻從新對話開始
+            raise GeminiBusyRetriesExhausted(
+                f"{e}（第 {n + 1} 次，不存檔、加入補翻）") from e
     # {網址: 因「回覆無法使用」而排進待補翻列表的次數}，上限 _MALFORMED_MAX_RETRIES
     malformed_tries: dict[str, int] = {}
+    # {網址: 因譯文關鍵字「補翻」而排進待補翻列表的次數}，上限 _KEYWORD_MAX_RETRIES
+    kw_tries: dict[str, int] = {}
 
     def _fetch_with_retry(ch_url: str) -> tuple[str, list, str, str]:
         """抓取＋解析；進階設定「抓取網頁失敗＝重試」時等待後重抓（解析失敗不重試）。
@@ -1604,9 +1583,7 @@ def run_auto_translate(
                 to_send, n_masked = mask_words(extracted, words_to_mask)
                 if n_masked:
                     log(f"  🔒 已把 {n_masked} 處過濾詞換成 ○")
-                translated = _translate(session, to_send, log, stop_event,
-                                        stuck_retry=stuck_retry,
-                                        censor_retry=censor_retry)
+                translated = _translate_or_defer(ch_url, to_send)
                 warnings = text_extraction.validate_ai_text(translated)
                 untranslated = _looks_untranslated(to_send, translated)
                 if warnings or untranslated:
@@ -1617,9 +1594,7 @@ def run_auto_translate(
                     if untranslated:
                         log("  （未翻譯：先開新對話再重試，避免重複相同結果）")
                         session.start_new_session()
-                    translated = _translate(session, to_send, log, stop_event,
-                                            stuck_retry=stuck_retry,
-                                            censor_retry=censor_retry)
+                    translated = _translate_or_defer(ch_url, to_send)
                     if _looks_untranslated(to_send, translated):
                         raise UntranslatedResponse("重試（已換新對話）後仍與原文幾乎一致")
                 try:
@@ -1639,6 +1614,17 @@ def run_auto_translate(
                 if kw_action in ("stop", "skip"):
                     words = "、".join(f"「{w}」" for w, a, _ in kw_hits if a == kw_action)
                     raise OutputKeywordHit(kw_action, f"譯文出現關鍵字{words}")
+                if kw_action == "retry":
+                    words = "、".join(f"「{w}」" for w, a, _ in kw_hits if a == "retry")
+                    n_kw = kw_tries.get(ch_url, 0)
+                    if n_kw >= _KEYWORD_MAX_RETRIES:
+                        raise OutputKeywordHit(
+                            "skip", f"譯文出現關鍵字{words}，補翻 {n_kw} 次仍出現")
+                    kw_tries[ch_url] = n_kw + 1
+                    # 帶著這次回覆的對話別再用，補翻時從新對話開始
+                    session.start_new_session()
+                    raise GeminiBusyRetriesExhausted(
+                        f"譯文出現關鍵字{words}（第 {n_kw + 1} 次，不存檔、加入補翻）")
                 if discard_event is not None and discard_event.is_set():
                     raise StopRequested()   # 強制停止：這一話捨棄，不存檔
                 # 修正流水號寫錯的 ID。放在所有回覆檢查之後：那些檢查要看 AI 的
@@ -1781,10 +1767,10 @@ def run_auto_translate(
                     # 清空列表階段：排到列表最後、先補下一話，避免某一話（例如
                     # 太長而每次都逾時）卡住其他話。只有一話時就是原地再試。
                     deferred.append(deferred.pop(0))
-                    log(f"  ⏳ {e} → 伺服器仍未恢復，這話排到待補翻列表最後"
+                    log(f"  ⏳ {e} → 補翻仍未成功，這話排到待補翻列表最後"
                         f"（共 {len(deferred)} 話），稍後再試。")
                 elif retrying:
-                    log(f"  ⏳ {e} → 伺服器仍未恢復，這話留在待補翻列表"
+                    log(f"  ⏳ {e} → 補翻仍未成功，這話留在待補翻列表"
                         f"（共 {len(deferred)} 話），下一次翻譯成功後再試。")
                 else:
                     deferred.append(

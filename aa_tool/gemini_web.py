@@ -218,7 +218,7 @@ DEFAULT_SELECTORS: dict[str, list[str]] = {
     ],
 }
 
-# 「延伸思考」（v3.04）：模型選單裡和模型並列的開關項目（gem-menu-item；開啟時帶
+# 「延伸思考」（v3.05）：模型選單裡和模型並列的開關項目（gem-menu-item；開啟時帶
 # selected class，模型按鈕變成兩行「Flash／延伸」，點了選單就關）。用這些字樣認選單
 # 項目與模型按鈕的第二行（繁中「延伸思考」；其他語言介面的寫法是推測）。
 _THINKING_RE = re.compile(r"思考|延伸|think|扩展|拡張", re.I)
@@ -1261,7 +1261,7 @@ class GeminiWebSession:
         return None
 
     def _ensure_thinking(self) -> None:
-        """依設定開／關「延伸思考」（v3.04）。狀態相符就不動；切換失敗只記 Log、不阻擋翻譯。"""
+        """依設定開／關「延伸思考」（v3.05）。狀態相符就不動；切換失敗只記 Log、不阻擋翻譯。"""
         want = self.extended_thinking
         if want is None:
             return

@@ -198,6 +198,8 @@ class AppCache:
     gemini_max_per_session: int = 3
     # gemini_input_method：填入輸入框的方式 fill／quill／clipboard（見 gemini_web.INPUT_METHODS）。
     gemini_input_method: str = "fill"
+    # gemini_extended_thinking：瀏覽器模式每個新對話把「延伸思考」調成開（True）或關（False）。
+    gemini_extended_thinking: bool = False
     # gemini_send_method：按送出的方式 program／human（見 gemini_web.SEND_METHODS）。
     gemini_send_method: str = "program"
     gemini_selectors: dict = field(default_factory=dict)
@@ -503,6 +505,8 @@ class SettingsManager:
                 pass
             cache.gemini_input_method = str(data.get(
                 'gemini_input_method', cache.gemini_input_method) or "fill")
+            cache.gemini_extended_thinking = bool(data.get(
+                'gemini_extended_thinking', cache.gemini_extended_thinking))
             if cache.gemini_input_method == "os_paste":   # v2.99 實驗，v3.02 移除（程式送出要全背景）
                 cache.gemini_input_method = "clipboard"
             cache.gemini_send_method = str(data.get(
@@ -696,6 +700,7 @@ class SettingsManager:
                 'gemini_profile_dir': cache.gemini_profile_dir,
                 'gemini_max_per_session': cache.gemini_max_per_session,
                 'gemini_input_method': cache.gemini_input_method,
+                'gemini_extended_thinking': cache.gemini_extended_thinking,
                 'gemini_send_method': cache.gemini_send_method,
                 'gemini_selectors': cache.gemini_selectors,
                 'auto_translate_out_dir': cache.auto_translate_out_dir,

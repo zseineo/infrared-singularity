@@ -1283,6 +1283,7 @@ def run_auto_translate(
             stop_event=stop_event, abort_event=discard_event,
             headless=headless, log=log, debug=dlog,
             input_method=getattr(cache, "gemini_input_method", "fill"),
+            extended_thinking=bool(getattr(cache, "gemini_extended_thinking", False)),
             send_method=getattr(cache, "gemini_send_method", "program"))
         open_log = "開啟瀏覽器並登入 Gemini…"
 

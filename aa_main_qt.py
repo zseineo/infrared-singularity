@@ -783,6 +783,7 @@ class MainWindow(QMainWindow):
         self._gemini_profile_dir: str = ""
         self._gemini_max_per_session: int = 3
         self._gemini_input_method: str = "fill"   # 瀏覽器模式填入方式（gemini_web.INPUT_METHODS）
+        self._gemini_extended_thinking: bool = False   # 瀏覽器模式「延伸思考」開／關
         self._gemini_send_method: str = "program"  # 瀏覽器模式送出方式（gemini_web.SEND_METHODS）
         self._gemini_required_model: str = "pro"
         self._gemini_selectors: dict = {}
@@ -2002,6 +2003,8 @@ class MainWindow(QMainWindow):
                 1, int(params.get("max_per_session") or 3))
         if "input_method" in params:
             self._gemini_input_method = params.get("input_method") or "fill"
+        if "extended_thinking" in params:
+            self._gemini_extended_thinking = bool(params.get("extended_thinking"))
         if "error_policy" in params:
             ep = params.get("error_policy") or {}
             self._auto_translate_error_policy = (
@@ -2820,6 +2823,7 @@ class MainWindow(QMainWindow):
             gemini_profile_dir=self._gemini_profile_dir,
             gemini_max_per_session=self._gemini_max_per_session,
             gemini_input_method=self._gemini_input_method,
+            gemini_extended_thinking=self._gemini_extended_thinking,
             gemini_send_method=self._gemini_send_method,
             gemini_required_model=self._gemini_required_model,
             gemini_selectors=self._gemini_selectors,
@@ -2952,6 +2956,8 @@ class MainWindow(QMainWindow):
             cache.gemini_max_per_session or 3))
         self._gemini_input_method = str(
             getattr(cache, "gemini_input_method", "fill") or "fill")
+        self._gemini_extended_thinking = bool(
+            getattr(cache, "gemini_extended_thinking", False))
         self._gemini_send_method = str(
             getattr(cache, "gemini_send_method", "program") or "program")
         self._gemini_required_model = (

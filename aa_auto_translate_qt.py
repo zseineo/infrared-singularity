@@ -713,6 +713,15 @@ class AutoTranslatePanel(QWidget):
             "讀不到模型字串時不會阻擋（會在 Log 顯示警告，請自行於瀏覽器確認）。")
         form.addRow("要求模型：", self.model_combo)
 
+        # 延伸思考（模型選單裡的開關）：每個新對話依勾選與否開／關
+        self.thinking_cb = QCheckBox("延伸思考")
+        self.thinking_cb.setToolTip(
+            "瀏覽器模式：每次開新對話時，把 Gemini 模型選單裡的「延伸思考」\n"
+            "調成勾選的狀態（勾＝開啟、不勾＝關閉）。\n"
+            "開啟後回覆前會先思考，比較慢、也比較耗額度。\n"
+            "目前模型沒有這個選項或切換失敗時，只在 Log 提醒、不中斷翻譯。")
+        form.addRow("", self.thinking_cb)
+
         self.max_session_spin = QSpinBox()
         self.max_session_spin.setRange(1, 99)
         self.max_session_spin.setSuffix(" 次")
@@ -1175,6 +1184,7 @@ class AutoTranslatePanel(QWidget):
         self.model_combo.setCurrentIndex(idx)
         self.max_session_spin.setValue(int(
             getattr(m, "_gemini_max_per_session", 3) or 3))
+        self.thinking_cb.setChecked(bool(getattr(m, "_gemini_extended_thinking", False)))
         idx = self.input_method_combo.findData(
             getattr(m, "_gemini_input_method", "fill") or "fill")
         self.input_method_combo.setCurrentIndex(max(0, idx))
@@ -1300,6 +1310,7 @@ class AutoTranslatePanel(QWidget):
             "required_model": self.model_combo.currentData(),
             "max_per_session": self.max_session_spin.value(),
             "input_method": self.input_method_combo.currentData(),
+            "extended_thinking": self.thinking_cb.isChecked(),
             # 進階設定：只記與預設不同的項目（預設日後調整時，未改過的項目跟著走）
             "error_policy": self._collect_error_policy(),
         }
@@ -2135,7 +2146,7 @@ class AutoTranslatePanel(QWidget):
         for w in (self.url_edit, self.count_spin, self.until_last,
                   self.title_filter_edit, self.btn_title_from_series,
                   self.title_auto_cb, self.debug_log_cb,
-                  self.gem_edit, self.model_combo, self.max_session_spin,
+                  self.gem_edit, self.model_combo, self.thinking_cb, self.max_session_spin,
                   self.input_method_combo, *self._send_btns.values(),
                   self.doc_title_edit, self.out_edit, self.skip_existing_cb,
                   self.btn_url_list, self.group_by_series_cb, self.auto_number_cb,

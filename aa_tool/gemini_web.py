@@ -218,6 +218,11 @@ DEFAULT_SELECTORS: dict[str, list[str]] = {
     ],
 }
 
+# 「延伸思考」（v3.04）：模型選單裡和模型並列的開關項目（gem-menu-item；開啟時帶
+# selected class，模型按鈕變成兩行「Flash／延伸」，點了選單就關）。用這些字樣認選單
+# 項目與模型按鈕的第二行（繁中「延伸思考」；其他語言介面的寫法是推測）。
+_THINKING_RE = re.compile(r"思考|延伸|think|扩展|拡張", re.I)
+
 # 額度上限訊息關鍵字（命中即視為撞額度，全小寫比對）。
 # 刻意只收「具體片語」，不收「額度」「升級」等單詞 —— 那些會出現在 Gemini 常駐
 # UI 或正常譯文中，會造成誤判。Gemini 改版若改了上限訊息文案，請在此補上新片語。
@@ -686,6 +691,7 @@ class GeminiWebSession:
         debug=None,
         input_method: str = DEFAULT_INPUT_METHOD,
         send_method: str = DEFAULT_SEND_METHOD,
+        extended_thinking: bool | None = None,
     ) -> None:
         """``debug``：`aa_tool.debug_log.DebugLog`（勾「Debug Log」時由協調器傳入），
         記錄每一步耗時、頁面健康度、瀏覽器事件與錯誤截圖；None＝不記。
@@ -716,6 +722,8 @@ class GeminiWebSession:
                              else DEFAULT_INPUT_METHOD)
         self.send_method = (send_method if send_method in SEND_METHODS
                             else DEFAULT_SEND_METHOD)
+        # 延伸思考：True＝每個新對話確認開啟、False＝確認關閉、None＝不動
+        self.extended_thinking = extended_thinking
         self._channel_used = ""   # 實際啟動的瀏覽器（Debug Log 用）
         self._pw = None
         self._context = None
@@ -1216,6 +1224,76 @@ class GeminiWebSession:
             self._sleep_with_stop(0.3)
 
     def _ensure_model(self) -> None:
+        """確認模型（`_check_model`）後，再把「延伸思考」調成設定的狀態。"""
+        self._check_model()
+        self._ensure_thinking()
+
+    def _thinking_on(self) -> bool | None:
+        """「延伸思考」是否開著：開著時模型按鈕第二行會出現「延伸」。讀不到按鈕回 None。"""
+        picker = self._find("model_indicator")
+        if picker is None:
+            return None
+        try:
+            lines = [ln.strip() for ln in (picker.inner_text() or "").splitlines()
+                     if ln.strip()]
+        except Exception:  # noqa: BLE001
+            return None
+        return any(_THINKING_RE.search(ln) for ln in lines[1:])
+
+    def _thinking_menu_item(self):
+        """模型選單（已點開）裡的「延伸思考」項目；找不到回 None。"""
+        for sel in self.selectors.get("model_menu_item", []):
+            try:
+                loc = self._page.locator(sel)
+                count = loc.count()
+            except Exception:
+                continue
+            for i in range(count):
+                try:
+                    item = loc.nth(i)
+                    if not item.is_visible():
+                        continue
+                    first = ((item.inner_text() or "").strip().splitlines() or [""])[0]
+                except Exception:
+                    continue
+                if _THINKING_RE.search(first):
+                    return item
+        return None
+
+    def _ensure_thinking(self) -> None:
+        """依設定開／關「延伸思考」（v3.04）。狀態相符就不動；切換失敗只記 Log、不阻擋翻譯。"""
+        want = self.extended_thinking
+        if want is None:
+            return
+        cur = self._thinking_on()
+        if cur is None:
+            self._log("⚠️ 讀不到「延伸思考」狀態（找不到模型按鈕），略過")
+            return
+        if cur == want:
+            self._dbg(f"延伸思考：已是{'開啟' if want else '關閉'}")
+            return
+        label = "開啟" if want else "關閉"
+        picker = self._find("model_indicator")
+        try:
+            picker.click()
+            self._page.wait_for_timeout(700)
+            item = self._thinking_menu_item()
+            if item is None:
+                self._dismiss_menu()
+                self._log(f"⚠️ 模型選單裡找不到「延伸思考」，無法{label}（目前模型可能不支援）")
+                return
+            item.click(timeout=_MODEL_CLICK_TIMEOUT_MS)
+            self._page.wait_for_timeout(800)
+        except Exception as e:  # noqa: BLE001 — 切不了只提醒，不中斷翻譯
+            self._dismiss_menu()
+            self._log(f"⚠️ {label}「延伸思考」失敗：{brief_error(e)}")
+            return
+        if self._thinking_on() == want:
+            self._log(f"✅ 已{label}「延伸思考」")
+        else:
+            self._log(f"⚠️ 點了「延伸思考」但狀態沒有變成{label}，請在瀏覽器確認")
+
+    def _check_model(self) -> None:
         """確認目前模型符合 ``required_model``；不符時嘗試自動從選單切換。
 
         - 符合 / 不檢查 / 讀不到模型 → 只 log，不阻擋。
@@ -1440,7 +1518,10 @@ class GeminiWebSession:
         return "ok", ""
 
     def _read_current_model(self) -> str:
-        """讀取頁面上顯示的目前模型名稱（例如 '2.5 Pro'）。讀不到回空字串。"""
+        """讀取頁面上顯示的目前模型名稱（例如 '2.5 Pro'）。讀不到回空字串。
+
+        開著「延伸思考」時按鈕是兩行（「Flash」「延伸」），合併成一行回傳（「Flash 延伸」）。
+        """
         for sel in self.selectors.get("model_indicator", []):
             try:
                 loc = self._page.locator(sel)
@@ -1454,7 +1535,7 @@ class GeminiWebSession:
                 kw in text.lower() for kw in
                 ("pro", "flash", "ultra", "gemini", "2.5", "3.0", "3.1", "3.5", "3.6")
             ):
-                return text
+                return " ".join(text.split())
         return ""
 
     def _ensure_logged_in(self, timeout: int) -> None:

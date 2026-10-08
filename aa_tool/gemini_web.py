@@ -395,9 +395,22 @@ _QUILL_SET_JS = """(el, text) => {
 }"""
 
 
+# 貼上時 Gemini 輸入框會把 markdown 轉成格式（實測：行首「- 」變清單、`…` 變程式碼），
+# 讀回的文字少了這些符號——比對時兩邊都去掉，否則提示詞裡有 markdown 就一定判定不符、
+# 退回很慢的逐字填入（v3.06 使用者回報）。
+_MD_LEAD_RE = re.compile(r"^(?:(?:[-*+>]|\d+[.)]|#{1,6})\s+)+")
+_MD_MARK_RE = re.compile(r"[`*_~]")
+
+
 def _clip_lines(text: str) -> list[str]:
-    """比對輸入框內容用：去掉空行與行首尾空白（編輯器會吃掉／補上空白行）。"""
-    return [ln.strip() for ln in (text or "").replace("\r", "").split("\n") if ln.strip()]
+    """比對輸入框內容用：去掉空行、行首尾空白（編輯器會吃掉／補上空白行），
+    以及貼上時會被轉成格式的 markdown 符號（見 _MD_LEAD_RE／_MD_MARK_RE）。"""
+    out = []
+    for ln in (text or "").replace("\r", "").split("\n"):
+        ln = _MD_MARK_RE.sub("", _MD_LEAD_RE.sub("", ln.strip())).strip()
+        if ln:
+            out.append(ln)
+    return out
 
 
 def _win_clipboard_get() -> str | None:

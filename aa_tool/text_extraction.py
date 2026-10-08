@@ -523,16 +523,22 @@ def _line_block_signal(line: str, symbol_regex: re.Pattern) -> str:
     - '-'：字太少或訊號不明，交由 `_classify_blocks` 的鄰行填補決定。
 
     「左 AA 圖＋右對話」混合行：若行有右端對話區（`_dialogue_region`，有寬
-    間隔），且間隔左側有實體內容、噪聲比 ≥0.3，則**只以左側**判定本行訊號。
-    右側對話夠長時會把整行噪聲比稀釋到 <0.3 而被標成 'T'，左側 AA 跟著享有
-    文字區塊特權（半形片假名錨點、+2）→ 誤抓「ｸﾞｯ」「ｰzゃく」這類 AA 內的
-    狀聲字／碎片。右側對話不需要文字區塊特權 — 由對話區的行尾加分保護。
+    間隔），且間隔左側有實體內容、「像 AA 的字元」佔比 ≥0.3，則**只以左側**
+    判定本行訊號。右側對話夠長時會把整行噪聲比稀釋到 <0.3 而被標成 'T'，左側
+    AA 跟著享有文字區塊特權（半形片假名錨點、+2）→ 誤抓「ｸﾞｯ」「ｰzゃく」這類
+    AA 內的狀聲字／碎片。右側對話不需要文字區塊特權 — 由對話區的行尾加分保護。
+    「像 AA 的字元」＝ AA 噪聲（`aa_noise_ratio` 的定義）**或**非合法內文字元：
+    `= / _ { } ^` 等常見筆畫不在 symbol_regex 裡，只算噪聲會把
+    「《==|ぃぃ　＿_ぃぃ《==》ノ/」這種左側 AA 低估成 0.19。
     """
     reg = _dialogue_region(line)
     if reg is not None and reg[2]:
         left = line[:reg[0]]
-        if (sum(1 for ch in left if not ch.isspace()) >= 3
-                and aa_noise_ratio(left, symbol_regex) >= 0.3):
+        body = [ch for ch in left if not ch.isspace()]
+        aa_like = sum(1 for ch in body
+                      if (ch in _HALFWIDTH_KANA_CHARS or ch in _AA_PUNCT_CHARS
+                          or symbol_regex.match(ch) or not _is_valid_char(ch)))
+        if len(body) >= 3 and aa_like / len(body) >= 0.3:
             line = left
     non_space = 0
     hira = 0
@@ -1238,6 +1244,15 @@ _KANA_LETTER_RE = re.compile(r'[ぁ-ゖァ-ヺ]')
 # （あああ／ぉぉぉ）用的是別的字。含此組合的候選整個否決，不看分數、
 # 不受行尾／文字區塊豁免（47 篇實測：含此組合的 28 筆提取全是 AA 碎片）。
 _AA_WALL_RUN_RE = re.compile(r'([ニ二三ミ彡爻从乂工ﾆﾐ])\1\1')
+# AA 眼睛／睫毛的「うぅ」筆畫：前接漢字／片假名／⌒／橫線（「灯示うぅ」「芥うぅx」
+# 「⌒うぅミ」「ニニ-うぅ」），或後接 ミ／彡／x／㍉；以及鏡像的「ぅう」（「ｨぅう笊」
+# 「xぅう笊」）。真實台詞的「うぅ」前面是平假名或句首（「ううぅ・・・」「ちゃうぅっ」
+# 「うぅ、もういやー」）。57 篇原文實測：符合此形狀的 46 處全是 AA。
+_AA_EYE_MOTIF_RE = re.compile(
+    r'[一-鿿々ァ-ヺｦ-ﾟ⌒\-‐]うぅ|うぅ[ミﾐ彡xｘ㍉]|ぅう[一-鿿々]|[xｘ]ぅう')
+# やる夫系 AA 的手（「と＿＿つ」「とエェェエエつ」）：と…つ 包住一段不含平假名／漢字
+# 的字串。正常日文不會這樣開頭結尾。
+_AA_HAND_RE = re.compile(r'[と⊂][^ぁ-ゖ一-鿿々]+[つ⊃]')
 # 只由 1~2 個英文字母（可帶標點）構成的段：AA 右緣的筆畫字母
 _LONE_LATIN_SEG_RE = re.compile(
     r'[、,，.．\-]*[A-Za-zＡ-Ｚａ-ｚ]{1,2}[、,，.．\-]*')
@@ -1293,6 +1308,37 @@ def _dialogue_region(line: str) -> 'tuple[int, int, bool] | None':
     if not _LETTER_RE.search(line[start:end]):
         return None
     return start, end, has_gap
+
+
+def _in_clean_cluster(line: str, start: int, end: int) -> bool:
+    """候選 [start, end) 所在的「空白團」是否全是合法內文字元。
+
+    空白團＝向兩側延伸、直到遇到 ≥3 個連續空白字元（或行界）為止的區間 —
+    與 `_dialogue_region` 的寬間隔同一標準。團內非空白字元全為合法內文字元
+    （`_is_valid_char`）或行尾標誌才算乾淨，代表這是一段文字而非 AA 圖的一部分。
+    """
+    cs, run = start, 0
+    while cs > 0:
+        if line[cs - 1].isspace():
+            run += 1
+            if run >= 3:
+                cs += run - 1
+                break
+        else:
+            run = 0
+        cs -= 1
+    ce, run = end, 0
+    while ce < len(line):
+        if line[ce].isspace():
+            run += 1
+            if run >= 3:
+                ce -= run - 1
+                break
+        else:
+            run = 0
+        ce += 1
+    return all(ch.isspace() or _is_valid_char(ch) or ch in _RIGHT_EDGE_CLOSERS
+               for ch in line[cs:ce])
 
 
 def _in_dialogue_region(line: str, start: int, end: int,
@@ -1454,8 +1500,9 @@ def _extract_experimental_line(
         min_len = 2 if _allows_len2(text, line, s, e) else 3
         if len(text) < min_len:
             continue
-        # AA 牆硬否決（不進落選收集 — 名牌救援不該把牆救回來）
-        if _AA_WALL_RUN_RE.search(text):
+        # AA 牆／眼睛筆畫／手的硬否決（不進落選收集 — 名牌救援不該把它們救回來）
+        if (_AA_WALL_RUN_RE.search(text) or _AA_EYE_MOTIF_RE.search(text)
+                or _AA_HAND_RE.fullmatch(text)):
             continue
         if invalid_regex.match(text):
             continue
@@ -1483,11 +1530,24 @@ def _extract_experimental_line(
     # 只有一句「困るな」「翌朝」）或帶句末標點（旁白「朝。」「はい。」）同樣保留
     # — 該行沒有任何 AA 噪聲字元，「AA 混雜脈絡」的前提不成立。需要這層佐證：
     # 整行只有「して」「へへ」「ーへ、」的仍是 AA 碎片行。
-    has_long_companion = any(len(t) >= 5 for t, _, _ in out)
-    if not has_long_companion and block not in ('text', 'struct'):
+    # 伴隨候選原則上要在**同一側**：行有右端對話區（有寬間隔）時，間隔左側
+    # （AA 圖）與右側（對話）各自算 — 右側的長台詞不能替左側 AA 裡的「ぅて」
+    # 「たぅ」「へへ」「しし」作保。例外：候選所在的「空白團」（以 ≥3 空白為界）
+    # 全是合法內文字元時，它是夾在行中的另一段台詞（「１ほど　へたくそ」），
+    # 仍可由另一側的長台詞作保。沒有對話區的行全行同一側，行為與舊版相同。
+    reg = _dialogue_region(line)
+    split_at = reg[0] if reg is not None and reg[2] else None
+
+    def side(pos: int) -> bool:
+        return split_at is not None and pos >= split_at
+
+    companion_sides = {side(s) for t, s, _ in out if len(t) >= 5}
+    if block not in ('text', 'struct'):
         kept = []
         for t, s, e in out:
-            if (len(t) >= 4
+            if (side(s) in companion_sides
+                    or (companion_sides and _in_clean_cluster(line, s, e))
+                    or len(t) >= 4
                     or _is_strong_short_candidate(t)
                     or _is_right_edge_dialogue(line, s, e)
                     or (_in_dialogue_region(line, s, e, require_gap=False)
@@ -2030,6 +2090,14 @@ def analyze_extraction(
                     report.append(
                         "    -> ❌ 剔除：含 AA 牆（牆面用字同字連續 ≥3），硬否決。")
                     continue
+                if _AA_EYE_MOTIF_RE.search(t):
+                    report.append(
+                        "    -> ❌ 剔除：含 AA 眼睛筆畫「うぅ」（前接漢字／片假名或"
+                        "後接 ミ／x 等），硬否決。")
+                    continue
+                if _AA_HAND_RE.fullmatch(t):
+                    report.append("    -> ❌ 剔除：AA 的手（と…つ），硬否決。")
+                    continue
                 if invalid_regex.match(t):
                     report.append("    -> ❌ 剔除：全句符合 invalid_regex。")
                     continue
@@ -2073,7 +2141,8 @@ def analyze_extraction(
                             t, proc_line, s, e, symbol_regex) >= 2:
                         report.append(
                             f"  - '{proc_line[s:e]}' 通過候選階段但被孤立過濾剔除"
-                            "（短候選且無強短信號／無長伴隨／非行尾／非對話框）。")
+                            "（短候選且無強短信號／同一側無長伴隨（右端對話區的"
+                            "台詞不替左側 AA 作保）／非行尾／非對話框）。")
 
             report.append(
                 "\n[步驟 4] 對倖存候選做後處理／allow_short 重檢／括號補完／自訂濾網：")

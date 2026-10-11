@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.06"
+APP_VERSION = "3.07"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -783,7 +783,7 @@ class MainWindow(QMainWindow):
         self._gemini_profile_dir: str = ""
         self._gemini_max_per_session: int = 3
         self._gemini_input_method: str = "fill"   # 瀏覽器模式填入方式（gemini_web.INPUT_METHODS）
-        self._gemini_extended_thinking: bool = False   # 瀏覽器模式「延伸思考」開／關
+        self._gemini_thinking_level: str = ""   # 瀏覽器模式思考程度 low／medium／high；空＝不調整
         self._gemini_send_method: str = "program"  # 瀏覽器模式送出方式（gemini_web.SEND_METHODS）
         self._gemini_required_model: str = "pro"
         self._gemini_selectors: dict = {}
@@ -821,7 +821,7 @@ class MainWindow(QMainWindow):
         # 翻譯後端與 API 設定（金鑰另存於加密檔，不在 cache）
         self._translate_backend: str = "browser"
         self._api_provider: str = "gemini"  # API 供應商（gemini/openai/claude/deepseek/custom）
-        self._gemini_api_model: str = "gemini-2.5-pro"
+        self._gemini_api_model: str = "gemini-3.8-flash"
         self._api_models: dict = {}  # 非 gemini 供應商各自的模型 id：{供應商: model}
         self._api_custom_base_url: str = ""  # 自定義供應商的 OpenAI 相容端點
         self._api_timeout: int = 600  # 單次 API 請求逾時（秒），連線設定可調
@@ -1978,7 +1978,7 @@ class MainWindow(QMainWindow):
         self._translate_backend = params.get("backend", "browser") or "browser"
         self._api_provider = params.get("api_provider", "gemini") or "gemini"
         self._gemini_api_model = (
-            params.get("api_model") or "gemini-2.5-pro")
+            params.get("api_model") or "gemini-3.8-flash")
         if "api_models" in params:
             am = params.get("api_models") or {}
             self._api_models = {str(k): str(v) for k, v in am.items()} \
@@ -2003,8 +2003,8 @@ class MainWindow(QMainWindow):
                 1, int(params.get("max_per_session") or 3))
         if "input_method" in params:
             self._gemini_input_method = params.get("input_method") or "fill"
-        if "extended_thinking" in params:
-            self._gemini_extended_thinking = bool(params.get("extended_thinking"))
+        if "thinking_level" in params:
+            self._gemini_thinking_level = str(params.get("thinking_level") or "")
         if "error_policy" in params:
             ep = params.get("error_policy") or {}
             self._auto_translate_error_policy = (
@@ -2586,6 +2586,15 @@ class MainWindow(QMainWindow):
                         success=False, status_message=m, status_color=cc,
                     ) if self._url_fetch_win_visible() else None)
                 return
+            n_lines = _url_fetcher.content_line_count(text_content)
+            if n_lines < _url_fetcher.MIN_CONTENT_LINES:
+                # 防呆：太短多半是網站不支援或作者貼文被篩光 → 不存暫存、不當成功
+                m = "⚠️ " + _url_fetcher.too_short_message(n_lines)
+                self._invoke_on_main.emit(
+                    lambda mm=m: self._url_fetch_win.on_fetch_done(
+                        success=False, status_message=mm, status_color='#f39c12',
+                    ) if self._url_fetch_win_visible() else None)
+                return
             if fresh:   # 解析得出內文才存暫存（見 _fetch_page_html）
                 self._write_url_cache(raw_url, page_html)
 
@@ -2681,6 +2690,12 @@ class MainWindow(QMainWindow):
                 text_content, nav_links, page_title = _parse_page_html(
                     page_html, next_url, author_name=author,
                     author_only=self._author_only)
+                n_lines = _url_fetcher.content_line_count(text_content)
+                if text_content is not None and n_lines < _url_fetcher.MIN_CONTENT_LINES:
+                    m = "⚠️ " + _url_fetcher.too_short_message(n_lines)
+                    self._invoke_on_main.emit(
+                        lambda mm=m: self.show_status(mm, "#f39c12"))
+                    return
                 if fresh and text_content is not None:
                     self._write_url_cache(next_url, page_html)
                 if text_content is None:
@@ -2823,7 +2838,7 @@ class MainWindow(QMainWindow):
             gemini_profile_dir=self._gemini_profile_dir,
             gemini_max_per_session=self._gemini_max_per_session,
             gemini_input_method=self._gemini_input_method,
-            gemini_extended_thinking=self._gemini_extended_thinking,
+            gemini_thinking_level=self._gemini_thinking_level,
             gemini_send_method=self._gemini_send_method,
             gemini_required_model=self._gemini_required_model,
             gemini_selectors=self._gemini_selectors,
@@ -2956,8 +2971,8 @@ class MainWindow(QMainWindow):
             cache.gemini_max_per_session or 3))
         self._gemini_input_method = str(
             getattr(cache, "gemini_input_method", "fill") or "fill")
-        self._gemini_extended_thinking = bool(
-            getattr(cache, "gemini_extended_thinking", False))
+        self._gemini_thinking_level = str(
+            getattr(cache, "gemini_thinking_level", "") or "")
         self._gemini_send_method = str(
             getattr(cache, "gemini_send_method", "program") or "program")
         self._gemini_required_model = (
@@ -3010,7 +3025,7 @@ class MainWindow(QMainWindow):
         self._translate_backend = str(cache.translate_backend or "browser")
         self._api_provider = str(getattr(cache, "api_provider", "gemini") or "gemini")
         self._gemini_api_model = str(
-            cache.gemini_api_model or "gemini-2.5-pro")
+            cache.gemini_api_model or "gemini-3.8-flash")
         am = getattr(cache, "api_models", {})
         self._api_models = {str(k): str(v) for k, v in am.items()} \
             if isinstance(am, dict) else {}
@@ -3699,6 +3714,8 @@ class MainWindow(QMainWindow):
             return None
         if not text_content or not text_content.strip():
             return None
+        if _url_fetcher.content_line_count(text_content) < _url_fetcher.MIN_CONTENT_LINES:
+            return None   # 太短（網站不支援／作者貼文被篩光）：不當成找到原文
         if fresh:   # 解析得出內文才存暫存（見 _fetch_page_html）
             self._write_url_cache(matching_url, page_html)
         # 5) 重建 source（與自動翻譯一致：display_title + 空行 + 內文）並寫回暫存

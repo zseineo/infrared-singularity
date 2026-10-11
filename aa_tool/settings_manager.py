@@ -198,8 +198,9 @@ class AppCache:
     gemini_max_per_session: int = 3
     # gemini_input_method：填入輸入框的方式 fill／quill／clipboard（見 gemini_web.INPUT_METHODS）。
     gemini_input_method: str = "fill"
-    # gemini_extended_thinking：瀏覽器模式每個新對話把「延伸思考」調成開（True）或關（False）。
-    gemini_extended_thinking: bool = False
+    # gemini_thinking_level：瀏覽器模式每個新對話把思考程度調成 low／medium／high；
+    # 空字串＝不調整（v3.07；取代 v3.05 的 gemini_extended_thinking 開關）。
+    gemini_thinking_level: str = ""
     # gemini_send_method：按送出的方式 program／human（見 gemini_web.SEND_METHODS）。
     gemini_send_method: str = "program"
     gemini_selectors: dict = field(default_factory=dict)
@@ -262,7 +263,7 @@ class AppCache:
     api_timeout: int = 600
     # API 模式用的 Gemini 模型 id（見 aa_tool.gemini_api.API_MODELS）。
     # 保留原欄位：gemini 供應商仍讀此欄，維持既有配額邏輯不變。
-    gemini_api_model: str = "gemini-2.5-pro"
+    gemini_api_model: str = "gemini-3.8-flash"
     # 非 Gemini 供應商各自選定的模型 id：{供應商: model_id}。
     api_models: dict = field(default_factory=dict)
     # 自定義（custom）供應商的 OpenAI 相容端點 base_url（含 /v1）。
@@ -280,6 +281,12 @@ class AppCache:
     # 要求的 Gemini 模型：pro / flash / flash-lite / any。
     # 翻譯中若偵測到模型與此不符，整批自動中止（讀不到模型字串時不阻擋，會在 Log 警告）。
     gemini_required_model: str = "pro"
+
+
+# 已廢除的 Gemini API 型號（v3.07：3.5／3.7 系列）。設定檔存著它們時讀取改成預設型號，
+# 免得一送出就回「模型不存在」。
+RETIRED_API_MODELS = {"gemini-3.5-flash", "gemini-3.7-flash", "gemini-3.5-flash-lite"}
+DEFAULT_GEMINI_API_MODEL = "gemini-3.8-flash"
 
 
 class SettingsManager:
@@ -505,8 +512,12 @@ class SettingsManager:
                 pass
             cache.gemini_input_method = str(data.get(
                 'gemini_input_method', cache.gemini_input_method) or "fill")
-            cache.gemini_extended_thinking = bool(data.get(
-                'gemini_extended_thinking', cache.gemini_extended_thinking))
+            if 'gemini_thinking_level' in data:
+                cache.gemini_thinking_level = str(data.get('gemini_thinking_level') or "")
+            elif data.get('gemini_extended_thinking'):
+                cache.gemini_thinking_level = "high"   # 舊「延伸思考」開＝最接近「高點」
+            if cache.gemini_thinking_level not in ("", "low", "medium", "high"):
+                cache.gemini_thinking_level = ""
             if cache.gemini_input_method == "os_paste":   # v2.99 實驗，v3.02 移除（程式送出要全背景）
                 cache.gemini_input_method = "clipboard"
             cache.gemini_send_method = str(data.get(
@@ -590,10 +601,14 @@ class SettingsManager:
                 'api_provider', cache.api_provider) or "gemini")
             cache.gemini_api_model = str(data.get(
                 'gemini_api_model', cache.gemini_api_model)
-                or "gemini-2.5-pro")
+                or DEFAULT_GEMINI_API_MODEL)
+            if cache.gemini_api_model in RETIRED_API_MODELS:
+                cache.gemini_api_model = DEFAULT_GEMINI_API_MODEL
             am = data.get('api_models', cache.api_models)
             cache.api_models = {str(k): str(v) for k, v in am.items()} \
                 if isinstance(am, dict) else {}
+            if cache.api_models.get("gemini") in RETIRED_API_MODELS:
+                cache.api_models["gemini"] = DEFAULT_GEMINI_API_MODEL
             cache.api_custom_base_url = str(data.get(
                 'api_custom_base_url', cache.api_custom_base_url) or "")
             cache.gemini_api_only_prompt = str(data.get(
@@ -700,7 +715,7 @@ class SettingsManager:
                 'gemini_profile_dir': cache.gemini_profile_dir,
                 'gemini_max_per_session': cache.gemini_max_per_session,
                 'gemini_input_method': cache.gemini_input_method,
-                'gemini_extended_thinking': cache.gemini_extended_thinking,
+                'gemini_thinking_level': cache.gemini_thinking_level,
                 'gemini_send_method': cache.gemini_send_method,
                 'gemini_selectors': cache.gemini_selectors,
                 'auto_translate_out_dir': cache.auto_translate_out_dir,

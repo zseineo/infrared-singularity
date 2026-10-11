@@ -361,8 +361,10 @@ def _fetch_and_parse(url: str, cfg: AutoConfig, *,
     if not text_content or not text_content.strip():
         raise ChapterError("找不到內文（解析後內容為空）")
     # 解析得出內文才存暫存：解析失敗的頁面（例如當時還不支援的網站）存了會一直吃到
-    # 同一份壞內容，之後支援了也讀不到
-    if fresh:
+    # 同一份壞內容，之後支援了也讀不到。內文太短（MIN_CONTENT_LINES）也不存，
+    # 由主迴圈跳過該話。
+    if fresh and (url_fetcher.content_line_count(text_content)
+                  >= url_fetcher.MIN_CONTENT_LINES):
         _write_url_cache(url, page_html)
     display_title = (text_extraction.extract_work_title(page_title)
                      if page_title else "")
@@ -818,8 +820,9 @@ def _preview_fetch_source(
                 except Exception:
                     return None
                 parsed = _parse(page_html)
-                if parsed:   # 解析得出內文才存暫存（見 _fetch_and_parse）
-                    _write_url_cache(url, page_html)
+                if parsed and (url_fetcher.content_line_count(parsed[0])
+                               >= url_fetcher.MIN_CONTENT_LINES):
+                    _write_url_cache(url, page_html)   # 規則同 _fetch_and_parse
     if not parsed:
         return None
     text_content, page_title = parsed
@@ -1283,7 +1286,7 @@ def run_auto_translate(
             stop_event=stop_event, abort_event=discard_event,
             headless=headless, log=log, debug=dlog,
             input_method=getattr(cache, "gemini_input_method", "fill"),
-            extended_thinking=bool(getattr(cache, "gemini_extended_thinking", False)),
+            thinking_level=str(getattr(cache, "gemini_thinking_level", "") or ""),
             send_method=getattr(cache, "gemini_send_method", "program"))
         open_log = "開啟瀏覽器並登入 Gemini…"
 
@@ -1530,6 +1533,17 @@ def run_auto_translate(
                     next_url, next_title = _next_chapter_url(nav_links)
                     if next_url and next_title:
                         result.titles.setdefault(next_url, next_title)
+
+                # 1.2) 防呆：內文太短（網站不支援／作者貼文被篩光）→ 不翻、跳過續下一話
+                n_lines = url_fetcher.content_line_count(
+                    source[len(display_title):] if display_title else source)
+                if n_lines < url_fetcher.MIN_CONTENT_LINES:
+                    reason = url_fetcher.too_short_message(n_lines)
+                    result.failed.append((url, reason))
+                    _event("skipped", url, page_title, reason)
+                    log(f"  ⏭️ {reason} → 跳過此話，繼續下一話。")
+                    url = next_url
+                    continue
 
                 # 1.3) 標題過濾：標題不含過濾文字 → 跳過、讀下一話，不計話數。
                 #      放在決定作品資料夾之前，別的作品的標題才不會被拿去當資料夾名。

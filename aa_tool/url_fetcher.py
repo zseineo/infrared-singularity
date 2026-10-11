@@ -24,6 +24,9 @@
   - touhouyaruosure.com（東方やる夫スレ纏め；HonoX SSR，內文由前端 JS 另從
     /api/chapters/N/content 載入 → `fetch_url` 抓頁面後順手抓 API 並嵌進 #c-chapter-content，
     暫存的就是完整頁面；內文為 dl.thread 的 dt/dd；關聯記事取頁面「目次」ul（已是舊→新））
+  - yaruocheck.jp（FC2 獨立網域；內文走 _parse_fc2blog。頁面上的「カテゴリ[…] 内一覧」由
+    前端 JS 讀分類 RSS（/?xml&category=N）產生，HTML 裡是空的 → 從頁面腳本取 catno 與
+    yrmcategoryGroup（同一作品的多個分類），逐一抓 RSS 組成關聯記事，跨分類接續）
   - naitomeazirou.fc2.net（走預設 article div 解析；模板無 relate_dl，關聯記事改由全記事一覽
     archives.html サイトマップ 依分類編號篩出同系列，見 `_fetch_fc2_sitemap_nav`）
 
@@ -586,7 +589,12 @@ _COLOR_SPAN_RE = re.compile(r'<span\s+style="color:[^"]*">|</span>')
 # `自分`：YomuAA（yomuaa.r401.net）這類「自己まとめ」站台把**作者本人**的貼文
 # 標成「N 自分：NAME [] 投稿日：…」，留言則仍是「名前：」；不認得 `自分` 會讓
 # 作者自動偵測抓到留言者（名無しさん）、「忽略留言」模式反而把作者整批濾掉。
-_POSTER_NAME_RE = re.compile(r'(?:名前|Name|自分)\s*[：:]\s*(.+?)(?:\[|投稿日|$)')
+# 名稱結束於：mail 欄「[…]」、「投稿日」、「E-mail:」欄（yaruocheck.jp「名前： NAME  E-mail:sage ：日期」），
+# 或「：日期」——後兩種 v3.07 補上：原本一路吃到行尾，日期與 ID 被併進名稱，
+# 每篇都成了不同作者，「忽略留言」只剩第一篇。
+_POSTER_NAME_RE = re.compile(
+    r'(?:名前|Name|自分)\s*[：:]\s*(.+?)'
+    r'(?:\[|投稿日|\s+E-?mail\s*[：:]|\s*[：:]\s*\d{4}[/年]|$)')
 
 # 替代格式 → NAME。名稱與日期之間的分隔符為 `：` / `[...]`（mail 欄，如
 # `[sage]`）/ 空白的**任意連續組合**（zero 個以上）：
@@ -2091,6 +2099,85 @@ def _parse_touhouyaruosure(page_html: str, base_url: str, *,
     return text_content, nav_links, page_title
 
 
+# 讀到的內文少於這麼多行（不算空行）就當作沒讀成功：不寫網頁暫存、不顯示讀取成功、
+# 自動翻譯跳過該話（v3.07）。一話 AA 正常都有數百行；只剩幾十行多半是網站不支援
+# （只抓到片段）或「忽略留言」把作者貼文篩光了。
+MIN_CONTENT_LINES = 50
+
+
+def content_line_count(text: str | None) -> int:
+    """內文的非空行數（`MIN_CONTENT_LINES` 防呆用）。"""
+    return sum(1 for ln in (text or "").split("\n") if ln.strip())
+
+
+def too_short_message(n_lines: int) -> str:
+    """內文太短時給使用者的提示（網址讀取與自動翻譯共用）。"""
+    return (f"只讀到 {n_lines} 行（少於 {MIN_CONTENT_LINES} 行），這個網站可能目前不支援；"
+            "若有勾「忽略留言」，請取消後再試")
+
+
+_YC_CATNO_RE = re.compile(r"var\s+catno\s*=\s*'(\d+)'")
+_YC_GROUP_RE = re.compile(r"yrmcategoryGroup\[\d+\]\s*=\s*new\s+Array\(([^)]*)\)")
+_YC_ITEM_RE = re.compile(
+    r'<item\s+rdf:about="([^"]+)"[^>]*>.*?<title>(.*?)</title>', re.DOTALL)
+
+
+def _fetch_yaruocheck_nav(page_html: str, base_url: str) -> list[dict]:
+    """yaruocheck.jp 的「カテゴリ[…] 内一覧」：分類 RSS 組成的關聯記事（舊 → 新）。
+
+    頁面腳本有 `var catno= '118';` 與 `yrmcategoryGroup[i] = new Array('118','125',…);`
+    （同一作品拆成多個分類時，依作者排的順序列在同一組）。依組內順序逐一抓
+    `/?xml&category=N`（RSS 1.0，每個分類的全部記事、新的在前），各自反轉成舊→新後
+    串接，所以一個分類的最後一話之後接得上下一個分類。抓不到的分類略過。
+    """
+    m = _YC_CATNO_RE.search(page_html)
+    if not m:
+        return []
+    catno = m.group(1)
+    cats = [catno]
+    for g in _YC_GROUP_RE.finditer(page_html):
+        ids = re.findall(r"'(\d+)'", g.group(1))
+        if catno in ids:
+            cats = ids
+            break
+    root = urljoin(base_url, '/')
+    cur = _norm_episode_url(base_url).split('://', 1)[-1]
+    nav_links: list[dict] = []
+    seen: set[str] = set()
+    for cat in cats:
+        try:
+            rss = fetch_url(f"{root}?xml&category={cat}")
+        except Exception:
+            continue
+        # RSS 的標題有時被跳脫兩次（「&amp;amp;」），解兩次才是頁面上看到的字
+        items = [(href, html.unescape(html.unescape(title)).strip())
+                 for href, title in _YC_ITEM_RE.findall(rss)]
+        for href, title in reversed(items):
+            key = _norm_episode_url(href).split('://', 1)[-1]
+            if key in seen:
+                continue
+            seen.add(key)
+            is_current = key == cur
+            nav_links.append({'title': title, 'url': None if is_current else href,
+                              'is_current': is_current})
+    return nav_links
+
+
+def _parse_yaruocheck(page_html: str, base_url: str, *,
+                      author_name: str = "",
+                      author_only: bool = False) -> tuple[str | None, list[dict], str]:
+    """yaruocheck.jp：內文同 FC2（`_parse_fc2blog`），關聯記事改由分類 RSS 取得
+    （見 `_fetch_yaruocheck_nav`；頁面上的一覽是 JS 產生的，HTML 裡是空的）。"""
+    text, nav, title = _parse_fc2blog(page_html, base_url, author_name=author_name,
+                                      author_only=author_only)
+    if text and not nav:
+        try:
+            nav = _fetch_yaruocheck_nav(page_html, base_url)
+        except Exception:
+            nav = []
+    return text, nav, title
+
+
 # ════════════════════════════════════════════════════════════════
 #  公開入口
 # ════════════════════════════════════════════════════════════════
@@ -2111,6 +2198,7 @@ _DOMAIN_PARSERS: dict[str, callable] = {
     'asitayaruo.com': _parse_asitayaruo,
     'yomuaa.r401.net': _parse_yomuaa,
     'touhouyaruosure.com': _parse_touhouyaruosure,
+    'yaruocheck.jp': _parse_yaruocheck,
 }
 
 

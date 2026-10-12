@@ -2100,9 +2100,9 @@ def _parse_touhouyaruosure(page_html: str, base_url: str, *,
 
 
 # 讀到的內文少於這麼多行（不算空行）就當作沒讀成功：不寫網頁暫存、不顯示讀取成功、
-# 自動翻譯跳過該話（v3.07）。一話 AA 正常都有數百行；只剩幾十行多半是網站不支援
-# （只抓到片段）或「忽略留言」把作者貼文篩光了。
-MIN_CONTENT_LINES = 50
+# 自動翻譯跳過該話（v3.07；v3.08 起由 50 行提高到 200 行）。一話 AA 正常都有數百行；
+# 只剩這麼少多半是網站不支援（只抓到片段）或「忽略留言」把作者貼文篩光了。
+MIN_CONTENT_LINES = 200
 
 
 def content_line_count(text: str | None) -> int:

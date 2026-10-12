@@ -523,14 +523,19 @@ def parse_output_keyword_rules(rules) -> list[tuple[str, str]]:
 
 
 def find_output_keywords(translated: str,
-                         rules: list[tuple[str, str]]) -> list[tuple[str, str, str]]:
+                         rules: list[tuple[str, str]],
+                         original: str = "") -> list[tuple[str, str, str]]:
     """找出譯文中出現的關鍵字，回傳 [(詞, 動作, 第一個命中的那一行), ...]。
 
     直接比對文字（非正則），整份回覆逐行找（含 AI 回的拒絕語等非 ID 行）。
+    original：這一話的原文；**原文裡本來就有的詞不算**（v3.08）——那是作品內容
+    （例如原文就寫著某個詞、或 AA 裡的字被原樣保留），不是翻譯出了問題。
     """
     lines = translated.split("\n")
     hits: list[tuple[str, str, str]] = []
     for word, action in rules:
+        if original and word in original:
+            continue
         line = next((ln for ln in lines if word in ln), None)
         if line is not None:
             hits.append((word, action, line.strip()))
@@ -1619,7 +1624,8 @@ def run_auto_translate(
                     malformed_tries[ch_url] = malformed_tries.get(ch_url, 0) + 1
                     raise
                 # 譯文關鍵字檢查：停止／跳過在存檔前處理（不存檔），暫停等存檔後再等
-                kw_hits = find_output_keywords(translated, kw_rules) if kw_rules else []
+                kw_hits = (find_output_keywords(translated, kw_rules, source)
+                           if kw_rules else [])
                 kw_action = next((a for a in _OUTPUT_KEYWORD_PRIORITY
                                   if any(h[1] == a for h in kw_hits)), None)
                 if kw_hits:

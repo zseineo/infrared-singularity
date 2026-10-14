@@ -627,42 +627,80 @@ def _extract_poster_name(header_text: str) -> str:
     return re.sub(r'\s+', ' ', m.group(1).strip())
 
 
-def _detect_main_author_from_dt(container_html: str) -> str:
-    """掃描 dt 區塊的投稿標頭，回傳第一個非「名無」的作者名稱。
+_POST_ID_RE = re.compile(r'ID[：:]\s*([A-Za-z0-9+/.]{4,})')
 
-    多數網站的留言者 ID 都含「名無」（名無しさん），自動偵測作者時應略過
-    這類匿名名稱、往下一樓尋找真正的作者；若整串貼文皆為匿名，退回第一個
-    出現的名稱。此略過僅在自動偵測（未指定 author_name）時生效。
+
+def _pick_main_author(headers: list[str]) -> str:
+    """從依序的投稿標頭判斷主要作者（「忽略留言」未填作者名稱時的自動偵測）。
+
+    1. 基本規則：第一個不含「名無」的名稱（多數站的留言者預設名含「名無」）；
+       全是匿名就用第一個名稱。含「名無」的名稱一律不當作者候選。
+    2. 防呆（v3.09）：用投稿 ID 分辨「一個人」與「一群人」——作者在一頁裡的貼文
+       只橫跨幾天（ID ≤ 5 個、平均每個 ID ≥ 2 篇），留言者預設名是很多人共用（ID
+       幾十上百個）。出現下列情況就改用「最像一個人、貼文最多」的其他名稱：
+       - 開頭那個名稱只貼了少數幾篇，另一個像同一人的名稱貼文 ≥ 它的 3 倍
+         （作者第一篇用錯名稱／打錯 trip，例：「携帯女衒」→「ゆで女衒 ◆E8kwFGHptY」）；
+       - 開頭那個名稱本身像一群人（ID ≥ 5 個、幾乎每篇都換 ID），也就是站方的
+         留言預設名不含「名無」（例：「yournet.ne.jpで規制だお」）。
+       大部分貼文讀不到 ID 的網站維持基本規則。
+    快取 3010 頁實測：18 頁改變（全為上述兩種），其餘不變。
     """
-    first = ""
+    posts = []
+    for h in headers:
+        name = _extract_poster_name(h)
+        if name:
+            m = _POST_ID_RE.search(h)
+            posts.append((re.sub(r'\s+', ' ', name), m.group(1) if m else None))
+    if not posts:
+        return ""
+    cur = next((n for n, _ in posts if '名無' not in n), posts[0][0])
+    if '名無' in cur or sum(1 for _, i in posts if i) < len(posts) * 0.8:
+        return cur
+    ids: dict[str, list] = {}
+    for n, i in posts:
+        ids.setdefault(n, []).append(i)
+
+    def _stat(n: str) -> tuple[int, int, float]:
+        v = ids[n]
+        k = len(set(v))
+        return len(v), k, len(v) / k
+
+    cur_n, cur_ids, cur_ratio = _stat(cur)
+    crowd = cur_ids >= 5 and cur_ratio < 1.5
+    cands = []
+    for n in ids:
+        if n == cur or '名無' in n:
+            continue
+        c, k, r = _stat(n)
+        if c >= 3 and k <= 5 and r >= 2:
+            cands.append((r, c, n))
+    if cands:
+        _r, c, n = max(cands)
+        if c >= 3 * cur_n or crowd:
+            return n
+    return cur
+
+
+def _detect_main_author_from_dt(container_html: str) -> str:
+    """掃描 dt 區塊的投稿標頭判斷主要作者（規則見 `_pick_main_author`）。
+
+    此偵測僅在自動偵測（未指定 author_name）時使用。
+    """
+    headers = []
     for post in re.finditer(r'<dt(?:\s[^>]*)?>(.+?)</dt>', container_html, re.DOTALL):
         dt_text = re.sub(r'<[^>]+>', '', post.group(1))
-        dt_text = html.unescape(dt_text).strip()
-        name = _extract_poster_name(dt_text)
-        if name:
-            if '名無' not in name:
-                return name
-            if not first:
-                first = name
-    return first
+        headers.append(html.unescape(dt_text).strip())
+    return _pick_main_author(headers)
 
 
 def _detect_main_author_from_lines(text_content: str) -> str:
-    """掃描以「N 名前：…」行分段的內文，回傳第一個非「名無」的作者名稱。
-
-    略過含「名無」的匿名留言者，往下一樓尋找；皆為匿名時退回第一個名稱。
-    """
-    first = ""
+    """掃描以「N 名前：…」行分段的內文判斷主要作者（規則見 `_pick_main_author`）。"""
+    headers = []
     for line in text_content.split('\n'):
         clean_line = _COLOR_SPAN_RE.sub('', line)
         if _POST_HEADER_RE.search(clean_line):
-            name = _extract_poster_name(clean_line)
-            if name:
-                if '名無' not in name:
-                    return name
-                if not first:
-                    first = name
-    return first
+            headers.append(clean_line)
+    return _pick_main_author(headers)
 
 
 _NAME_TRAIL_RE = re.compile(r'[\s.．。・,，、]+$')

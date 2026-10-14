@@ -19,7 +19,7 @@ from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QScrollArea,
+    QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
     QVBoxLayout, QWidget,
 )
 
@@ -54,6 +54,7 @@ class BatchSearchWindow(QMainWindow):
                  on_folder_change=None,   # (folder) -> None
                  on_add_to_glossary=None, # (a, b) -> None
                  on_back=None,            # () -> None，ESC 返回首頁
+                 on_files_renamed=None,   # ({舊路徑: 新路徑}) -> None，附註檔名後通知主程式
                  glossary_auto_search: bool = True):
         super().__init__()
         self.setWindowTitle("AA 批次搜尋")
@@ -63,6 +64,7 @@ class BatchSearchWindow(QMainWindow):
         self._on_folder_change = on_folder_change
         self._on_add_to_glossary = on_add_to_glossary
         self._on_back = on_back
+        self._on_files_renamed = on_files_renamed
         self._cmd_file = cmd_file
         self._reverse_cmd_file = reverse_cmd_file
         self.glossary_auto_search: bool = glossary_auto_search
@@ -172,6 +174,15 @@ class BatchSearchWindow(QMainWindow):
                                       font=self.ui_font, width=100)
         btn_replace_all.clicked.connect(self._replace_all)
         search_row.addWidget(btn_replace_all)
+
+        btn_suffix = make_button("附註檔名", color="#6f42c1", hover="#5a32a3",
+                                 font=self.ui_font, width=100)
+        btn_suffix.setToolTip(
+            "把這次搜尋到的所有檔案，檔名（副檔名前）後面加上「替換」欄的文字。\n"
+            "例：替換欄填 [測試] → 「作品 第1話.html」變成「作品 第1話[測試].html」。\n"
+            "檔名已經以這段文字結尾的不重複加；新檔名已有同名檔的跳過。")
+        btn_suffix.clicked.connect(self._append_filename_suffix)
+        search_row.addWidget(btn_suffix)
 
         self.btn_undo_all = make_button("全部復原", color="#f39c12", hover="#d68910",
                                         font=self.ui_font, width=100)
@@ -925,6 +936,93 @@ class BatchSearchWindow(QMainWindow):
         self.status_label.setText(f"已替換 {replaced_count} 筆，涉及 {file_count} 個檔案")
         self.status_label.setStyleSheet("color: #28a745;")
         self._toast(f"全部替換完成！共 {replaced_count} 筆")
+
+    # ────────────────────────────────────────────────────────
+    #  附註檔名
+    # ────────────────────────────────────────────────────────
+
+    _INVALID_FN_CHARS = set('\\/:*?"<>|')
+
+    def _append_filename_suffix(self):
+        """「附註檔名」：搜尋到的所有檔案，檔名（副檔名前）後面加上替換欄的文字。"""
+        if self._busy:
+            return
+        suffix = self.replace_entry.text()
+        if not suffix.strip():
+            self._toast("請在「替換」欄填入要加在檔名後面的文字", color="#f39c12")
+            return
+        bad = sorted(set(suffix) & self._INVALID_FN_CHARS)
+        if bad:
+            self._toast(f"檔名不能含有：{' '.join(bad)}", color="#dc3545")
+            return
+        paths = list(dict.fromkeys(mi['file_path'] for mi in self.batch_matches))
+        if not paths:
+            self._toast("沒有搜尋結果，請先搜尋", color="#f39c12")
+            return
+        plan, already, clash = [], 0, 0
+        for old in paths:
+            stem, ext = os.path.splitext(os.path.basename(old))
+            if stem.endswith(suffix):
+                already += 1
+                continue
+            new = os.path.join(os.path.dirname(old), stem + suffix + ext)
+            if os.path.exists(new):
+                clash += 1
+                continue
+            plan.append((old, new))
+        if not plan:
+            self._toast("沒有需要改名的檔案（都已附註過，或新檔名已存在）", color="#f39c12")
+            return
+        sample = os.path.basename(plan[0][1])
+        msg = (f"要把 {len(plan)} 個檔案的檔名後面加上「{suffix}」嗎？\n"
+               f"例：{sample}")
+        if already or clash:
+            msg += f"\n（{already} 個已附註過、{clash} 個新檔名已存在，這些會略過）"
+        if QMessageBox.question(self, "附註檔名", msg) != QMessageBox.StandardButton.Yes:
+            return
+        self._busy = True
+        renamed: dict[str, str] = {}
+        failed = 0
+        try:
+            for old, new in plan:
+                try:
+                    os.rename(old, new)
+                    renamed[old] = new
+                except OSError:
+                    failed += 1
+            self._remap_paths(renamed)
+        finally:
+            self._busy = False
+        if renamed and self._on_files_renamed:
+            try:
+                self._on_files_renamed(renamed)
+            except Exception:
+                pass
+        text = f"已附註 {len(renamed)} 個檔名"
+        if failed:
+            text += f"，{failed} 個改名失敗（檔案可能正被其他程式開著）"
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet("color: #28a745;" if not failed else "color: #f39c12;")
+        self._toast(text, color="#28a745" if not failed else "#f39c12")
+        # 重新搜尋，讓結果列顯示新檔名、開啟時指向新路徑
+        if renamed and self.search_entry.text():
+            self._do_search()
+
+    def _remap_paths(self, renamed: dict[str, str]) -> None:
+        """改名後把搜尋結果與復原備份裡的舊路徑換成新路徑（復原才寫得回正確的檔案）。"""
+        if not renamed:
+            return
+        for mi in list(self.batch_matches) + list(self._undo_items):
+            new = renamed.get(mi.get('file_path'))
+            if new:
+                mi['file_path'] = new
+                mi['file_name'] = os.path.basename(new)
+                mi['stem'] = os.path.splitext(mi['file_name'])[0]
+        self._undo_backups = {renamed.get(k, k): v for k, v in self._undo_backups.items()}
+        if self._batch_undo:
+            b = self._batch_undo
+            b['backups'] = {renamed.get(k, k): v for k, v in b['backups'].items()}
+            b['new_backup_files'] = {renamed.get(k, k) for k in b['new_backup_files']}
 
     # ────────────────────────────────────────────────────────
     #  復原

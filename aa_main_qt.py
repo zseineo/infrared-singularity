@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.08"
+APP_VERSION = "3.09"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -1323,6 +1323,7 @@ class MainWindow(QMainWindow):
                 on_folder_change=self._on_batch_folder_change,
                 on_add_to_glossary=self._save_glossary_entry,
                 on_back=self.show_translate_panel,
+                on_files_renamed=self._remap_renamed_paths,
                 glossary_auto_search=self._glossary_auto_search,
             )
             self.stack.removeWidget(self._batch_placeholder)

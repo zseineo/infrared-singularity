@@ -228,6 +228,9 @@ _THINKING_LEVEL_RE = {
     "medium": re.compile(r"^(?:中|medium)", re.I),
     "high": re.compile(r"^(?:高|high)", re.I),
 }
+# v3.10 再改版：三個程度收進模型選單裡的「思考程度 ▸」子選單（點／滑過才展開）。
+# 先在主選單找程度項目，找不到就找首行含這些字的子選單項目點開再找。
+_THINKING_SUBMENU_RE = re.compile(r"思考|thinking|推理", re.I)
 
 # 額度上限訊息關鍵字（命中即視為撞額度，全小寫比對）。
 # 刻意只收「具體片語」，不收「額度」「升級」等單詞 —— 那些會出現在 Gemini 常駐
@@ -1266,8 +1269,22 @@ class GeminiWebSession:
 
     def _thinking_menu_item(self, level: str):
         """模型選單（已點開）裡該思考程度的項目；找不到回 None。
-        模型項目的首行以版本數字開頭（「3.6 Flash」），不會被誤認。"""
-        rx = _THINKING_LEVEL_RE[level]
+        模型項目的首行以版本數字開頭（「3.6 Flash」），不會被誤認。
+
+        v3.10：程度收在「思考程度 ▸」子選單裡時，先點開子選單再找。
+        """
+        item = self._menu_item_matching(_THINKING_LEVEL_RE[level])
+        if item is not None:
+            return item
+        trigger = self._menu_item_matching(_THINKING_SUBMENU_RE)
+        if trigger is None:
+            return None
+        trigger.click(timeout=_MODEL_CLICK_TIMEOUT_MS)
+        self._page.wait_for_timeout(600)
+        return self._menu_item_matching(_THINKING_LEVEL_RE[level])
+
+    def _menu_item_matching(self, rx):
+        """目前看得到的選單項目中，首行符合 rx 的第一個；找不到回 None。"""
         for sel in self.selectors.get("model_menu_item", []):
             try:
                 loc = self._page.locator(sel)

@@ -220,13 +220,16 @@ DEFAULT_SELECTORS: dict[str, list[str]] = {
 
 # 思考程度（v3.07；取代 v3.05 的「延伸思考」開關）：Gemini 改版後模型選單下半部是
 # 「低點／中等／高點」三選一（gem-menu-item，選中的帶 selected class，點了選單就關），
-# 模型按鈕第二行顯示目前程度（「Flash／高點」）。依各項目首行開頭的字認程度
+# 模型按鈕第二行顯示目前程度（「Flash／高點」）。依各項目首行認程度
 # （繁中「低點／中等／高點」；簡中、英文介面的寫法是推測）。
-THINKING_LEVELS = {"low": "低點", "medium": "中等", "high": "高點"}
+# v3.12 再改名：選單項目改成兩行「低／高效」「中等／適中」「高／詳盡」。說明字「高效」
+# 以「高」開頭，所以改為**整行比對**，並把說明字也對應回正確的程度（模型按鈕第二行
+# 不確定顯示的是名稱還是說明字）；舊名「低點／高點」保留相容。
+THINKING_LEVELS = {"low": "低", "medium": "中等", "high": "高"}
 _THINKING_LEVEL_RE = {
-    "low": re.compile(r"^(?:低|low)", re.I),
-    "medium": re.compile(r"^(?:中|medium)", re.I),
-    "high": re.compile(r"^(?:高|high)", re.I),
+    "low": re.compile(r"^(?:低點?|高效|low|efficient)$", re.I),
+    "medium": re.compile(r"^(?:中等?|適中|适中|medium|balanced)$", re.I),
+    "high": re.compile(r"^(?:高點?|詳盡|详尽|high|thorough)$", re.I),
 }
 # v3.10 再改版：三個程度收進模型選單裡的「思考程度 ▸」子選單（點／滑過才展開）。
 # 先在主選單找程度項目，找不到就找首行含這些字的子選單項目點開再找。
@@ -1263,7 +1266,7 @@ class GeminiWebSession:
             return None
         for ln in lines[1:]:
             for level, rx in _THINKING_LEVEL_RE.items():
-                if rx.search(ln):
+                if rx.search(ln.strip()):
                     return level
         return ""
 

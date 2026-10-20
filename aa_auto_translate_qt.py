@@ -721,7 +721,7 @@ class AutoTranslatePanel(QWidget):
             self.thinking_combo.addItem(label, value)
         self.thinking_combo.setToolTip(
             "瀏覽器模式：每次開新對話時，把 Gemini 模型選單裡的思考程度\n"
-            "（低點／中等／高點）調成這裡選的值。程度越高回覆越慢、也越耗額度。\n"
+            "（低／中等／高）調成這裡選的值。程度越高回覆越慢、也越耗額度。\n"
             "目前模型沒有這個選項或切換失敗時，只在 Log 提醒、不中斷翻譯。")
         form.addRow("思考程度：", self.thinking_combo)
 

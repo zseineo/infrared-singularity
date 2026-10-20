@@ -58,15 +58,8 @@ API_MODELS = [
 ]
 DEFAULT_API_MODEL = API_MODELS[0]
 
-# 特定模型的預設 thinking level。對應官方 SDK 的
-# ThinkingConfig(thinking_level=...)；REST 對映 generationConfig.thinkingConfig.thinkingLevel。
-# 3.6 / 3.8 Flash 預設 high（key 一律小寫比對）。
-# 官方文件（2026-09 查證）：3.8 Flash 為 LOW / MEDIUM（預設）/ HIGH，**不支援 minimal**
-# （送了會回錯誤）。
-_DEFAULT_THINKING_LEVEL = {
-    "gemini-3.6-flash": "high",
-    "gemini-3.8-flash": "high",
-}
+# thinking level：v3.11 起**不送** generationConfig.thinkingConfig，一律用模型自己的預設
+# （3.8 Flash 為 MEDIUM）。v1.57～v3.10 曾對特定 flash 強制送 high。
 
 _ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/"
              "models/{model}:generateContent")
@@ -310,10 +303,6 @@ class GeminiApiSession:
         if self._system_prompt.strip():
             body["systemInstruction"] = {
                 "parts": [{"text": self._system_prompt}]}
-        # 特定模型套用預設 thinking level（如 3.5 Flash → high）
-        level = _DEFAULT_THINKING_LEVEL.get(self._model.lower())
-        if level:
-            body["generationConfig"] = {"thinkingConfig": {"thinkingLevel": level}}
         url = _ENDPOINT.format(model=self._model) + f"?key={key}"
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(
@@ -475,7 +464,7 @@ class GeminiApiSession:
         return os.path.join(self._base_dir, _QUOTA_STATE_FILENAME)
 
     def _model_key(self) -> str:
-        """持久化用的模型索引（小寫，與 _DEFAULT_THINKING_LEVEL 的比對方式一致）。"""
+        """持久化用的模型索引（小寫）。"""
         return self._model.strip().lower()
 
     def _read_quota_raw(self):

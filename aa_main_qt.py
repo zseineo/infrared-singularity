@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.10"
+APP_VERSION = "3.11"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -864,6 +864,7 @@ class MainWindow(QMainWindow):
         self._embed_font_name: str = "monapo"
         self._editor_default_wysiwyg: bool = False
         self._editor_copy_to_replace: bool = False
+        self._editor_auto_refind_original: bool = False
         self._debug_mode: bool = False
         self._glossary_sync_to_batch_quick: bool = False
         # 編輯器右側「局部重套用」面板（Alt+4）的持久化狀態
@@ -1265,16 +1266,18 @@ class MainWindow(QMainWindow):
             self._edit_window._on_back = on_back
             self._edit_window._on_open = self.import_html
             self._edit_window._on_save = self._on_edit_saved
-            # 更新比對原文
-            if original_text is not None:
-                self._edit_window._original_text = original_text
-                if original_text:
-                    self._edit_window.orig_view.setPlainText(original_text)
-                    self._edit_window._apply_line_height_to(
-                        self._edit_window.orig_view)
-            # 若還在比對模式，切回編輯
+            # 若還在比對模式，切回編輯（要在清空原文之前：_toggle_compare 沒有原文時
+            # 會直接 return，離不開比對模式）
             if self._edit_window._compare_active:
                 self._edit_window._toggle_compare()
+            # 更新比對原文：新檔在暫存裡沒有原文時要清空，否則會殘留上一個檔案的原文
+            # （之後由「自動重找原文」或手動「🔎 重找原文」補上）
+            self._edit_window._original_text = original_text or None
+            self._edit_window.orig_view.setPlainText(original_text or "")
+            self._edit_window.orig_view.document().clearUndoRedoStacks()
+            if original_text:
+                self._edit_window._apply_line_height_to(
+                    self._edit_window.orig_view)
             # 若目前在 WYSIWYG 模式，先重新渲染預覽以反映新檔內容
             # （否則 preview_view 仍顯示前一份檔的內容，需手動切編輯模式再回來）。
             # 必須在 _scroll_to_line 之前執行，這樣後續捲動才能套用到全新的 preview。
@@ -1304,6 +1307,14 @@ class MainWindow(QMainWindow):
         self._edit_window._reload_translate_side()
         self._nav_bar.hide()
         self._action_bar.hide()
+        # 「自動重找原文」：開啟既有檔案、原文暫存沒有這一話 → 自動按一次「🔎 重找原文」。
+        # 所有開檔入口（開啟檔案、檔案列表／下一話、批次搜尋）都經過這裡；暫存檔是剛套用
+        # 翻譯產生的、一定帶原文，不必找。延到下一輪事件迴圈，讓編輯器先顯示出來
+        # （查不到暫存時可能要上網抓幾秒）。
+        if (self._editor_auto_refind_original and file_path
+                and not is_temp_file and not original_text):
+            QTimer.singleShot(
+                0, self._edit_window._reload_original_by_fingerprint)
 
     def resume_edit_panel(self) -> None:
         """回到目前開啟中的編輯畫面（若有）。"""
@@ -2816,6 +2827,7 @@ class MainWindow(QMainWindow):
             embed_font_name=self._embed_font_name,
             editor_default_wysiwyg=self._editor_default_wysiwyg,
             editor_copy_to_replace=self._editor_copy_to_replace,
+            editor_auto_refind_original=self._editor_auto_refind_original,
             debug_mode=self._debug_mode,
             glossary_sync_to_batch_quick=self._glossary_sync_to_batch_quick,
             side_panel_width=self._side_panel_width,
@@ -2933,6 +2945,8 @@ class MainWindow(QMainWindow):
         self._embed_font_name = str(cache.embed_font_name or "monapo")
         self._editor_default_wysiwyg = bool(cache.editor_default_wysiwyg)
         self._editor_copy_to_replace = bool(cache.editor_copy_to_replace)
+        self._editor_auto_refind_original = bool(
+            getattr(cache, 'editor_auto_refind_original', False))
         self._debug_mode = bool(getattr(cache, 'debug_mode', False))
         self._glossary_sync_to_batch_quick = bool(
             cache.glossary_sync_to_batch_quick)
@@ -3134,6 +3148,7 @@ class MainWindow(QMainWindow):
             embed_font_name=self._embed_font_name,
             editor_default_wysiwyg=self._editor_default_wysiwyg,
             editor_copy_to_replace=self._editor_copy_to_replace,
+            editor_auto_refind_original=self._editor_auto_refind_original,
             debug_mode=self._debug_mode,
             glossary_sync_to_batch_quick=self._glossary_sync_to_batch_quick,
             korean_mode=self._korean_mode,
@@ -3459,6 +3474,8 @@ class MainWindow(QMainWindow):
             'editor_default_wysiwyg', self._editor_default_wysiwyg))
         self._editor_copy_to_replace = bool(values.get(
             'editor_copy_to_replace', self._editor_copy_to_replace))
+        self._editor_auto_refind_original = bool(values.get(
+            'editor_auto_refind_original', self._editor_auto_refind_original))
         self._debug_mode = bool(values.get(
             'debug_mode', self._debug_mode))
         self._glossary_sync_to_batch_quick = bool(values.get(

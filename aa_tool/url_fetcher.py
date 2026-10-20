@@ -17,7 +17,8 @@
   - yaruo-matome.com（entry-content div + nexe-prev-post ul；dd 內以 <p> 分段，
     `<p> &nbsp;</p>` 是作者排版用的空行，</p> 須當換行處理）
   - blog.livedoor.jp（textar-aa / span.aa，無關聯記事、尾端嵌入下一話連結）
-  - asitayaruo.com（entry-content + dt/dd，dd 內 <p> 分段＝空一行；關聯記事取頁面上的 ym-nav／ym-nx，
+  - asitayaruo.com（entry-content + dt/dd，dd 內 <p> 分段＝空一行；無 dt/dd 的文章改以
+    「標頭行開頭的 <p>」分貼文（標頭無樓層號）；關聯記事取頁面上的 ym-nav／ym-nx，
     最多 10 話、不另發 HTTP；頁面上沒有時才退回分類頁 ?cat=N&paged=K）
   - yomuaa.r401.net（Nuxt SSR；article.aa > dl.aa-article 的 dt=コマ編號 + dd=內文，
     dd 內無 <br>、換行為字面換行字元；本身無關聯記事，改由作品頁 /series/N?page=K 取得）
@@ -1747,6 +1748,53 @@ def _parse_livedoor(page_html: str, base_url: str, *,
 # 關聯記事最多顯示幾話（見 _parse_asitayaruo docstring「關聯」）
 _ASITAYARUO_NAV_MAX = 10
 
+# 無 dt/dd 的平面變體（例 ?p=2030）標頭：「NAME ◆trip YYYY/MM/DD(曜) HH:MM:SS ID:XXX」，
+# **沒有樓層號**。行首必須是非空白字元（AA 行以全形空格開頭，不會誤中）。
+_ASITAYARUO_FLAT_HEADER_RE = re.compile(
+    r'^\S[^\n]*?\s+\d{2,4}/\d{1,2}/\d{1,2}(?:\([^)]*\))?\s+'
+    r'\d{1,2}:\d{2}:\d{2}(?:\.\d+)?\s+ID[：:]')
+
+
+def _asitayaruo_flat_posts(content_html: str, author_name: str,
+                           author_only: bool) -> list[str]:
+    """asitayaruo.com 無 dt/dd 的平面變體：一則貼文＝標頭行開頭的 `<p>`，
+    之後不以標頭開頭的 `<p>` 是同一則的續段（段落之間＝空一行）。
+
+    只取純 `<p>` 段落，內文後的廣告區塊（`<div id="asita-…" aria-label="広告">`）
+    自然排除。分組後組成 dt/dd 交給 `_extract_dt_dd_posts`，作者判斷、顏色、
+    忽略留言與 dt/dd 版一致；標頭沒有樓層號，共用的名稱抽取 regex 認不得，
+    故 dt 前面暫時補「0 」（符合第 4 種標頭格式），輸出前再去掉。
+    找不到任何標頭時回傳空列表（安全閥）。
+    """
+    posts: list[list[str]] = []  # [標頭 HTML, 內文 HTML…]
+    preface: list[str] = []
+    for para in re.findall(r'<p>(.*?)</p>', content_html, re.DOTALL):
+        # 換行比照瀏覽器：緊貼 <br> 的字面換行丟掉，其餘字面換行折成空白
+        para = re.sub(r'[\r\n]*<br\s*/?>[\r\n]*', '<br />', para)
+        para = re.sub(r'[\r\n]+', ' ', para)
+        first, _sep, rest = para.partition('<br />')
+        first_text = html.unescape(re.sub(r'<[^>]+>', '', first)).strip()
+        if _ASITAYARUO_FLAT_HEADER_RE.match(first_text):
+            posts.append([first, rest])
+        elif posts:
+            posts[-1].append(para)
+        else:
+            preface.append(para)
+    if not posts:
+        return []
+    dl = ''.join(f'<dt>0 {p[0]}</dt><dd>{"<br /><br />".join(p[1:])}</dd>'
+                 for p in posts)
+    out = [p[2:] if p.startswith('0 ') else p
+           for p in _extract_dt_dd_posts('<dl>' + dl + '</dl>',
+                                         author_name=author_name,
+                                         author_only=author_only)]
+    if preface and not author_only:
+        text = html.unescape(_strip_all_tags(
+            '<br /><br />'.join(preface).replace('<br />', '\n'))).strip('\n')
+        if text.strip():
+            out.insert(0, text)
+    return out
+
 
 def _fetch_asitayaruo_category(cat_url: str, current_url: str) -> list[dict]:
     """逐頁抓取 asitayaruo.com 分類頁的所有貼文清單，回傳「舊 → 新」時間順序的 nav。
@@ -1828,6 +1876,9 @@ def _parse_asitayaruo(page_html: str, base_url: str, *,
           空行轉成段落），`.article p` 有 `margin-bottom:1.8em`，瀏覽器上段落間呈現為
           一個空行 → 抽取前把 `</p><p>` 換成兩個 `<br />`；段內換行仍是 `<br />`。
           容器 class 也改為 `entry-content cf`，故容器 regex 容許附加 class。
+    平面變體：部分文章（例 ?p=2030）沒有 dt/dd，貼文直接是 `<p>標頭<br />內文…</p>`，
+          標頭「NAME ◆trip 日期 時間 ID:」無樓層號；一則貼文中間的空行同樣切成多個
+          `<p>`。dt/dd 抽不到時改走 `_asitayaruo_flat_posts`。
     關聯：最多 `_ASITAYARUO_NAV_MAX`（10）話，**不讀整部作品**（長篇動輒數百話、
           分類頁要讀好幾頁，每話都讀會很慢）。優先用頁面本身的 `a.ym-nav-prev`
           （前の話）＋ 當前 ＋ `a.ym-nav-next`（次の話），不另發 HTTP；`ol.ym-nx-list`
@@ -1854,13 +1905,17 @@ def _parse_asitayaruo(page_html: str, base_url: str, *,
     # entry-content 之後到分類列（舊版 `<p class="tagst">`／現行 `<footer>`）為止為純內文範圍
     end_m = re.search(r'<p\s+class="tagst"|<footer\b', page_html[start_m.end():])
     content_end = start_m.end() + end_m.start() if end_m else len(page_html)
-    content_html = page_html[start_m.end():content_end]
+    raw_content_html = page_html[start_m.end():content_end]
     # 段落分隔 → 空一行（見 docstring「內文換行」）
     content_html = re.sub(
-        r'</p>\s*<p(?:\s[^>]*)?>', '<br /><br />', content_html)
+        r'</p>\s*<p(?:\s[^>]*)?>', '<br /><br />', raw_content_html)
 
     lines_out = _extract_dt_dd_posts(
         content_html, author_name=author_name, author_only=author_only)
+    if not lines_out:
+        # 無 dt/dd 的平面變體（見 docstring「平面變體」）
+        lines_out = _asitayaruo_flat_posts(
+            raw_content_html, author_name, author_only)
     text_content = '\n\n'.join(lines_out) if lines_out else None
 
     # ── 關聯記事：優先用頁面本身的前後話（不另發 HTTP） ──

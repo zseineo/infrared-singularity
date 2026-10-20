@@ -66,6 +66,7 @@ class SettingsDialog(QWidget):
         embed_font_name: str,
         editor_default_wysiwyg: bool,
         editor_copy_to_replace: bool,
+        editor_auto_refind_original: bool,
         debug_mode: bool,
         glossary_sync_to_batch_quick: bool,
         korean_mode: bool,
@@ -98,7 +99,8 @@ class SettingsDialog(QWidget):
                        fetch_history_count, original_cache_limit,
                        glossary_auto_search, diff_save_mode, embed_font_in_html,
                        embed_font_name, editor_default_wysiwyg,
-                       editor_copy_to_replace, debug_mode,
+                       editor_copy_to_replace, editor_auto_refind_original,
+                       debug_mode,
                        glossary_sync_to_batch_quick, korean_mode,
                        experimental_extraction, pad_right_aa,
                        glossary_avoid_aa, glossary_kana_fold,
@@ -113,7 +115,8 @@ class SettingsDialog(QWidget):
                   fh_count: int, oc_limit: int, glossary_auto_search: bool,
                   diff_save_mode: bool, embed_font_in_html: bool,
                   embed_font_name: str, editor_default_wysiwyg: bool,
-                  editor_copy_to_replace: bool, debug_mode: bool,
+                  editor_copy_to_replace: bool,
+                  editor_auto_refind_original: bool, debug_mode: bool,
                   glossary_sync_to_batch_quick: bool,
                   korean_mode: bool, experimental_extraction: bool,
                   pad_right_aa: bool, glossary_avoid_aa: bool,
@@ -291,6 +294,16 @@ class SettingsDialog(QWidget):
             "或右鍵選單「複製」）時，會把複製的內容自動填入工具列「全文替換」的\n"
             "原文框；若原文框已有內容會先清空再填入。")
         root.addWidget(self.editor_copy_to_replace_cb)
+
+        self.editor_auto_refind_original_cb = QCheckBox("自動重找原文")
+        self.editor_auto_refind_original_cb.setFont(_ui_font(12))
+        self.editor_auto_refind_original_cb.setChecked(editor_auto_refind_original)
+        self.editor_auto_refind_original_cb.setToolTip(
+            "開啟後，開啟 HTML 檔進編輯器時（開啟檔案、檔案列表、下一話、批次搜尋開檔），\n"
+            "若原文暫存裡沒有這一話的原文，會自動執行一次編輯器的「🔎 重找原文」：\n"
+            "依投稿指紋查網址讀取紀錄，有對應網址就重新抓網頁重建原文並寫回暫存\n"
+            "（需要上網時會花幾秒）。")
+        root.addWidget(self.editor_auto_refind_original_cb)
 
         self.glossary_sync_to_batch_quick_cb = QCheckBox(
             "編輯器全文替換存入術語時：同步加入批次搜尋「快速替換」")
@@ -596,6 +609,8 @@ class SettingsDialog(QWidget):
                 self.editor_default_wysiwyg_cb.isChecked(),
             'editor_copy_to_replace':
                 self.editor_copy_to_replace_cb.isChecked(),
+            'editor_auto_refind_original':
+                self.editor_auto_refind_original_cb.isChecked(),
             'debug_mode': self.debug_mode_cb.isChecked(),
             'glossary_sync_to_batch_quick':
                 self.glossary_sync_to_batch_quick_cb.isChecked(),

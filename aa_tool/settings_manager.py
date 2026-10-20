@@ -135,6 +135,8 @@ class AppCache:
     editor_default_wysiwyg: bool = False
     # 編輯器內按複製（Ctrl+C／右鍵）時，是否自動把複製內容填入全文替換的原文框
     editor_copy_to_replace: bool = False
+    # 開啟檔案時原文暫存沒有這一話 → 自動執行一次編輯器「🔎 重找原文」
+    editor_auto_refind_original: bool = False
     # Debug 模式（開發用）：編輯器 F1 與右鍵選單「加入漏抓／誤抓／誤嵌」才作用，
     # 把失敗案例寫入 testcase/failcase.txt。預設關閉。
     debug_mode: bool = False
@@ -453,6 +455,8 @@ class SettingsManager:
                 'editor_default_wysiwyg', cache.editor_default_wysiwyg))
             cache.editor_copy_to_replace = bool(data.get(
                 'editor_copy_to_replace', cache.editor_copy_to_replace))
+            cache.editor_auto_refind_original = bool(data.get(
+                'editor_auto_refind_original', cache.editor_auto_refind_original))
             cache.debug_mode = bool(data.get(
                 'debug_mode', cache.debug_mode))
             cache.glossary_sync_to_batch_quick = bool(data.get(
@@ -690,6 +694,7 @@ class SettingsManager:
                 'embed_font_in_html': cache.embed_font_in_html,
                 'editor_default_wysiwyg': cache.editor_default_wysiwyg,
                 'editor_copy_to_replace': cache.editor_copy_to_replace,
+                'editor_auto_refind_original': cache.editor_auto_refind_original,
                 'debug_mode': cache.debug_mode,
                 'glossary_sync_to_batch_quick':
                     cache.glossary_sync_to_batch_quick,

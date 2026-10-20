@@ -960,6 +960,11 @@ class GeminiWebSession:
             self._log("  （已在對話開頭附加翻譯 prompt）")
         self._dbg(f"── session #{self._session_index} 第 {self._send_count} 次送出："
                   f"{text.count(chr(10)) + 1} 行／{len(text)} 字｜{self._page.url}")
+        # v3.13：Gemini 會把思考程度彈回「低」（2026-10-20 起每個新對話都要重切；
+        # 使用者回報同一對話送出後也會），每次送出前都檢查。已相符只讀按鈕文字、不點選單。
+        # 新對話的第一則剛由 _ensure_model 檢查過（open／開新對話／start_new_session），不重複。
+        if not first_in_chat:
+            self._ensure_thinking()
         self._health("送出前")
         try:
             with self._timed("找輸入框"):
@@ -998,6 +1003,10 @@ class GeminiWebSession:
                 self._debug_screenshot("error")
             raise
         self._dbg(f"回覆：{reply.count(chr(10)) + 1 if reply else 0} 行／{len(reply)} 字")
+        if self.thinking_level and self._debug is not None:
+            # 診斷用：送出後思考程度有沒有被 Gemini 彈回
+            cur = self._current_thinking_level()
+            self._dbg(f"回覆後思考程度：{THINKING_LEVELS.get(cur or '', cur or '讀不到')}")
         self._health("回覆後")
         return reply
 
@@ -1335,7 +1344,8 @@ class GeminiWebSession:
             self._log(f"⚠️ 切換思考程度「{label}」失敗：{brief_error(e)}")
             return
         if self._current_thinking_level() == want:
-            self._log(f"✅ 思考程度已切換為「{label}」")
+            was = THINKING_LEVELS.get(cur, "未知")
+            self._log(f"✅ 思考程度已從「{was}」切換為「{label}」")
         else:
             self._log(f"⚠️ 點了思考程度「{label}」但沒有切換過去，請在瀏覽器確認")
 

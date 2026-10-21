@@ -1494,6 +1494,12 @@ def _extract_experimental_line(
                and not (0x30A0 <= ord(text[-2]) <= 0x30FF)):
             text = text[:-1]
             e -= 1
+        # 開頭的疊字記號 ゝゞ 必是 AA 筆畫：疊字記號重複「前一個」假名，不可能
+        # 出現在詞首。邊界擴展會把它從 AA 一起吃進來（「ゝYこぅ」），剝除後候選
+        # 回到真實邊界，再由既有規則判定（「Yこぅ」由 AA latin 前綴懲罰擋下）。
+        while text and text[0] in 'ゝゞ':
+            text = text[1:]
+            s += 1
         # 一般候選需 ≥ 3 char；長度 2 的特殊放行見 `_allows_len2`。
         # 注意：通過 min_len 不等於最終保留，後續的 score 過濾與孤立過濾還會
         # 進一步把可疑短候選擋下。
@@ -2078,6 +2084,13 @@ def analyze_extraction(
                     report.append("    -> ❌ 剔除：已被拉長念法／片假名整句覆蓋。")
                     continue
                 t = raw.strip()
+                # 與 _extract_experimental_line 一致：剝除開頭的疊字記號 ゝゞ
+                if t[:1] in ('ゝ', 'ゞ'):
+                    t0 = t
+                    while t and t[0] in 'ゝゞ':
+                        t = t[1:]
+                        s += 1
+                    report.append(f"    [剝除開頭疊字記號] '{t0}' => '{t}'")
                 # 與 _extract_experimental_line 一致的「長度 2 特殊放行」
                 allow_short = _allows_len2(t, proc_line, s, e)
                 min_len = 2 if allow_short else 3

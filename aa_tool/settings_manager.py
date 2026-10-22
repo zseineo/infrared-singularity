@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from dataclasses import dataclass, field
 
 from .constants import (
@@ -7,6 +8,10 @@ from .constants import (
     DEFAULT_BG_COLOR, DEFAULT_FG_COLOR,
 )
 from .file_lock import locked_file
+
+# _atomic_write_json：os.replace 遇到「存取被拒」的重試次數與間隔（秒）
+_REPLACE_RETRIES = 10
+_REPLACE_RETRY_WAIT = 0.15
 
 
 def merge_glossary_diff(existing: str, current: str) -> str:
@@ -383,8 +388,11 @@ class SettingsManager:
         if not os.path.exists(cache_file):
             return cache
         try:
-            with open(cache_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            # 讀檔也拿同一把鎖：Windows 上檔案開著時另一個執行緒的 os.replace
+            # 會被拒（自動翻譯背景執行緒讀設定時，主程式剛好在存檔）
+            with locked_file(cache_file + '.lock'):
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
             cache.source_text = data.get('source_text', '').rstrip('\n')
             cache.filter_text = data.get('filter_text', '').rstrip('\n')
             cache.glossary_text = data.get('glossary_text', '').rstrip('\n')
@@ -780,7 +788,16 @@ class SettingsManager:
         try:
             with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False)
-            os.replace(tmp, path)
+            # Windows：目標檔正被別人開著（防毒掃描、索引、其他執行緒讀檔）時
+            # os.replace 會丟 WinError 5「存取被拒」→ 短暫重試（最多約 1.5 秒）
+            for attempt in range(_REPLACE_RETRIES):
+                try:
+                    os.replace(tmp, path)
+                    break
+                except PermissionError:
+                    if attempt == _REPLACE_RETRIES - 1:
+                        raise
+                    time.sleep(_REPLACE_RETRY_WAIT)
         except OSError as e:
             print("Cache atomic write failed:", e)
             try:

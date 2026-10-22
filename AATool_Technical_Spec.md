@@ -438,7 +438,7 @@
     *   `schedule_save()`: 防抖動延遲 500ms 後呼叫 `save_cache()`，綁定至所有 TextBox 的 `KeyRelease` 事件。
 *   **多程序共享保護**（`aa_tool/settings_manager.py` + `aa_tool/file_lock.py`）：
     *   **Sidecar 檔案鎖**：對 `aa_settings_cache.json.lock` 加鎖（Windows `msvcrt.locking` / POSIX `fcntl.flock`），保護整個讀-合-寫序列，避免同時開兩個 `aa_main_qt.py` 或與子程序交替寫入時發生 TOCTOU race。
-    *   **原子寫入**：`_atomic_write_json` 先寫 `<file>.tmp` 再 `os.replace()`，避免半截檔。
+    *   **原子寫入**：`_atomic_write_json` 先寫 `<file>.tmp` 再 `os.replace()`，避免半截檔。**v3.15**：Windows 上目標檔被別人開著時 `os.replace` 會丟 WinError 5「存取被拒」（控制台印「Cache atomic write failed」，該次存檔遺失；`append_url_history` 等細粒度 helper 的那筆新增也會丟掉）——主因是 `load_cache()` 讀檔沒拿鎖，自動翻譯背景執行緒（`preview_first_filename`／`preview_series_folder` 每話讀 `fetch_auto_fill_title`）讀檔時主程式剛好存檔（實測讀寫並行 200 次存檔失敗 38 次）。修法：`load_cache()` 讀檔也包在同一把 sidecar 鎖裡；`os.replace` 遇 `PermissionError` 重試 `_REPLACE_RETRIES`＝10 次、間隔 `_REPLACE_RETRY_WAIT`＝0.15 秒（防毒、索引程式短暫開檔），仍失敗才印錯並刪 tmp。修正後同測試 0 次失敗。
     *   **細粒度 helpers**（不經過 `AppCache`，只動目標欄位）：
         *   `append_url_history(entry)` — 以 `url` 去重、newest-last append；**無上限**（不再裁切）；寫入當下觸發（`_handle_url_fetch_request` 內），不透過 `schedule_save`。**保留戳印 meta**：若舊條目已有 `work_title` / `author` / `fingerprint` 戳印且新 entry 未提供，會自動沿用，避免重抓同一 URL 把戳印洗掉。`fingerprint` 欄位：抓取成功後由 `_handle_url_fetch_request._apply` 與 `_fetch_adjacent_chapter._apply` 以 `_compute_author_fingerprint(text_content)` 計算後寫入，作為「原文 → 來源網址」的反向查詢索引（與 `aa_original_cache.json` 共用同一指紋規則）。
         *   `stamp_url_history_meta(url, work_title, author)` — 就地更新 `url_history` 中對應 `url` 條目的 `work_title` / `author` 欄位（不改順序、找不到則略過、覆寫策略為直接覆蓋）。觸發點：EditWindow 另存新檔成功（`_save_as`，**Ctrl+S 覆寫不觸發**）、`apply_translation_and_save` 成功儲存後。

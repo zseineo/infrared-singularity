@@ -273,6 +273,8 @@ class AppCache:
     gemini_api_model: str = "gemini-3.8-flash"
     # 非 Gemini 供應商各自選定的模型 id：{供應商: model_id}。
     api_models: dict = field(default_factory=dict)
+    # API 思考程度（v3.16）：{供應商: 值}，空白／沒有＝不送、用模型預設
+    api_thinking_levels: dict = field(default_factory=dict)
     # 自定義（custom）供應商的 OpenAI 相容端點 base_url（含 /v1）。
     api_custom_base_url: str = ""
     # API 模式的系統指令（翻譯人設／要求）；金鑰另存於加密檔 aa_api_keys.dat。
@@ -623,6 +625,10 @@ class SettingsManager:
                 cache.api_models["gemini"] = DEFAULT_GEMINI_API_MODEL
             cache.api_custom_base_url = str(data.get(
                 'api_custom_base_url', cache.api_custom_base_url) or "")
+            tl = data.get('api_thinking_levels', cache.api_thinking_levels)
+            cache.api_thinking_levels = {
+                str(k): str(v).strip() for k, v in tl.items() if str(v).strip()} \
+                if isinstance(tl, dict) else {}
             cache.gemini_api_only_prompt = str(data.get(
                 'gemini_api_only_prompt', cache.gemini_api_only_prompt))
             cache.gemini_api_system_prompt = str(data.get(
@@ -762,6 +768,7 @@ class SettingsManager:
                 'api_provider': cache.api_provider,
                 'gemini_api_model': cache.gemini_api_model,
                 'api_models': cache.api_models,
+                'api_thinking_levels': cache.api_thinking_levels,
                 'api_custom_base_url': cache.api_custom_base_url,
                 'gemini_api_only_prompt': cache.gemini_api_only_prompt,
                 'gemini_api_system_prompt': cache.gemini_api_system_prompt,

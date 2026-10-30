@@ -58,8 +58,9 @@ API_MODELS = [
 ]
 DEFAULT_API_MODEL = API_MODELS[0]
 
-# thinking level：v3.11 起**不送** generationConfig.thinkingConfig，一律用模型自己的預設
-# （3.8 Flash 為 MEDIUM）。v1.57～v3.10 曾對特定 flash 強制送 high。
+# thinking level：預設**不送** generationConfig.thinkingConfig，用模型自己的預設（3.8 Flash
+# 為 MEDIUM）。v1.57～v3.10 曾對特定 flash 強制送 high；v3.16 起使用者可在連線設定
+# 「思考程度」自行填寫（minimal／low／medium／high，各模型接受的值不同）。
 
 _ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/"
              "models/{model}:generateContent")
@@ -167,9 +168,11 @@ class GeminiApiSession:
         timeout: int = 0,
         proxy: str = "",
         error_policy: dict | None = None,
+        thinking_level: str = "",
     ) -> None:
         self._keys = [k.strip() for k in (api_keys or []) if k.strip()]
         self._model = (model or DEFAULT_API_MODEL).strip()
+        self._thinking_level = (thinking_level or "").strip()  # 空白＝不送
         # 進階設定：各種錯誤要中斷或重試（見 gemini_web.ERROR_POLICY_DEFAULTS）
         self._policy = resolve_error_policy(error_policy)
         self._timeout = int(timeout) if timeout and int(timeout) > 0 else _TIMEOUT
@@ -303,6 +306,9 @@ class GeminiApiSession:
         if self._system_prompt.strip():
             body["systemInstruction"] = {
                 "parts": [{"text": self._system_prompt}]}
+        if self._thinking_level:
+            body["generationConfig"] = {
+                "thinkingConfig": {"thinkingLevel": self._thinking_level}}
         url = _ENDPOINT.format(model=self._model) + f"?key={key}"
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(

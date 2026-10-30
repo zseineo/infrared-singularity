@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
 )
 
 from aa_tool.gemini_api import API_MODELS
-from aa_tool.openai_api import API_PROVIDERS
+from aa_tool.openai_api import API_PROVIDERS, provider_thinking_levels
 from aa_tool import app_paths, secure_store
 
 # 翻譯後端選項：(顯示文字, 內部值)
@@ -761,6 +761,7 @@ class AutoTranslatePanel(QWidget):
         # 每供應商在本次面板開啟期間的暫存（切供應商即互換，儲存時一併寫入）
         self._provider_keys: dict[str, list[str]] = {}
         self._provider_models: dict[str, str] = {}
+        self._provider_thinking: dict[str, str] = {}
         self._cur_provider = "gemini"
 
         self.api_provider_combo = QComboBox()
@@ -777,6 +778,21 @@ class AutoTranslatePanel(QWidget):
         self.api_model_combo.setToolTip(
             "下拉為常見建議值，亦可直接輸入其他 model id（如新推出的型號）。")
         form.addRow("API 模型：", self.api_model_combo)
+
+        # 思考程度（v3.16）：可自行輸入；空白＝不送、用模型預設。各供應商分開記住。
+        self.api_thinking_combo = QComboBox()
+        self.api_thinking_combo.setEditable(True)
+        self.api_thinking_combo.lineEdit().setPlaceholderText("留空＝模型預設")
+        self.api_thinking_combo.setToolTip(
+            "API 的思考程度，留空＝不送、用模型自己的預設。下拉為該供應商常見的值，\n"
+            "也可直接輸入其他值（原樣送出）。各供應商分開記住。\n"
+            "  • Gemini：thinkingLevel（minimal／low／medium／high；\n"
+            "    各型號不同，例：gemini-3.8-flash 不收 minimal）\n"
+            "  • OpenAI：reasoning_effort（none＝不推理／low／medium／high／xhigh）\n"
+            "  • Claude：effort（low／medium／high／xhigh／max；Haiku 4.5 不支援）\n"
+            "  • DeepSeek：reasoning_effort（low／high／max）\n"
+            "填了該模型不支援的值，API 會回錯誤，Log 會顯示錯誤訊息。")
+        form.addRow("思考程度：", self.api_thinking_combo)
 
         self.api_base_url_edit = QLineEdit()
         self.api_base_url_edit.setPlaceholderText(
@@ -1004,7 +1020,7 @@ class AutoTranslatePanel(QWidget):
         金鑰／Prompt（之後再切換使用）。自定義端點列的顯示由 `_set_base_url_visible` 依
         供應商決定，此處不干涉。"""
         for w in (self.api_provider_combo, self.api_model_combo,
-                  self.api_keys_edit, self.api_prompt_edit):
+                  self.api_thinking_combo, self.api_keys_edit, self.api_prompt_edit):
             w.setEnabled(True)
 
     # ── API 供應商切換 ──
@@ -1030,6 +1046,11 @@ class AutoTranslatePanel(QWidget):
         self.api_model_combo.addItems(suggestions)
         self.api_model_combo.setEditText(model)
         self.api_model_combo.blockSignals(False)
+        self.api_thinking_combo.blockSignals(True)
+        self.api_thinking_combo.clear()
+        self.api_thinking_combo.addItems([""] + provider_thinking_levels(provider))
+        self.api_thinking_combo.setEditText(self._provider_thinking.get(provider, ""))
+        self.api_thinking_combo.blockSignals(False)
         keys = self._provider_keys.get(provider, [])
         self.api_keys_edit.blockSignals(True)
         self.api_keys_edit.setPlainText("\n".join(keys))
@@ -1040,6 +1061,7 @@ class AutoTranslatePanel(QWidget):
         """把目前欄位的模型／金鑰暫存回目前供應商（切換或儲存前呼叫）。"""
         p = self._cur_provider
         self._provider_models[p] = self.api_model_combo.currentText().strip()
+        self._provider_thinking[p] = self.api_thinking_combo.currentText().strip()
         self._provider_keys[p] = [
             l.strip() for l in self.api_keys_edit.toPlainText().splitlines()
             if l.strip()]
@@ -1279,6 +1301,7 @@ class AutoTranslatePanel(QWidget):
         models.setdefault("gemini",
                           getattr(m, "_gemini_api_model", "") or API_MODELS[0])
         self._provider_models = models
+        self._provider_thinking = dict(getattr(m, "_api_thinking_levels", {}) or {})
         provider = (getattr(m, "_api_provider", "gemini") or "gemini")
         self._cur_provider = provider
         self.api_provider_combo.blockSignals(True)
@@ -1304,6 +1327,7 @@ class AutoTranslatePanel(QWidget):
             "api_provider": provider,
             "api_model": gemini_model,
             "api_models": api_models,
+            "api_thinking_levels": {p: v for p, v in self._provider_thinking.items() if v},
             "api_custom_base_url": self.api_base_url_edit.text().strip(),
             "api_timeout": self.api_timeout_spin.value(),
             "api_only_prompt": self.api_only_prompt_edit.toPlainText(),

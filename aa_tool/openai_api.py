@@ -50,6 +50,8 @@ API_PROVIDERS: dict[str, dict] = {
         "scheme": "gemini",
         "base_url": "",
         "models": [],  # 見 aa_tool.gemini_api.API_MODELS
+        # 思考程度建議值（v3.16，見下方「思考程度」註解）；空白＝不送、用模型預設
+        "thinking": ["minimal", "low", "medium", "high"],
     },
     "openai": {
         "label": "OpenAI (GPT)",
@@ -57,26 +59,45 @@ API_PROVIDERS: dict[str, dict] = {
         "base_url": "https://api.openai.com/v1",
         # GPT-5.6 家族：terra（智慧/成本平衡，翻譯量大預設）、sol（旗艦）、luna（省成本）
         "models": ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna"],
+        "thinking": ["none", "low", "medium", "high", "xhigh"],
     },
     "claude": {
         "label": "Claude (Anthropic)",
         "scheme": "anthropic",
         "base_url": "https://api.anthropic.com/v1",
         "models": ["claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5-20251001"],
+        "thinking": ["low", "medium", "high", "xhigh", "max"],
     },
     "deepseek": {
         "label": "DeepSeek",
         "scheme": "openai",
         "base_url": "https://api.deepseek.com/v1",
         "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+        "thinking": ["low", "high", "max"],
     },
     "custom": {
         "label": "自定義 (OpenAI 相容)",
         "scheme": "openai",
         "base_url": "",
         "models": [],
+        "thinking": ["low", "medium", "high"],
     },
 }
+
+# 思考程度（v3.16，連線設定「思考程度」欄，各供應商分開記住；空白＝不送、用模型預設）
+# 依 scheme 送到不同欄位（2026-10 查官方文件）：
+#   gemini    → generationConfig.thinkingConfig.thinkingLevel（gemini_api）
+#   openai    → reasoning_effort（OpenAI；DeepSeek 也收這個欄位，low／high／max）
+#   anthropic → output_config.effort（Claude 4.5 Opus 以後；Haiku 4.5 不支援 effort）
+# 值原樣送出、不檢查：各模型接受的值不同（例：gemini-3.8-flash 不收 minimal），
+# 送了不支援的值 API 會回 400，Log 會顯示錯誤訊息。
+# 註：有些供應商的「開關」是另一個欄位（DeepSeek thinking.type、Claude thinking.type），
+# 這裡不送；OpenAI 的 none、Gemini 的 minimal 是用同一個程度欄位降到最低。
+
+
+def provider_thinking_levels(provider: str) -> list[str]:
+    """回傳供應商的思考程度建議值（下拉用，可自行輸入其他值）。"""
+    return list(API_PROVIDERS.get(provider, {}).get("thinking", []))
 
 # 單次 API 請求的讀取逾時（秒）。此為未設定時的預設值；使用者可在「連線設定」
 # 調整（cache.api_timeout），慢速／長輸出的模型（如 LongCat 這類大型模型跑
@@ -132,9 +153,12 @@ class ChatApiSession:
         timeout: int = 0,
         proxy: str = "",
         error_policy: dict | None = None,
+        thinking_level: str = "",
     ) -> None:
         self._keys = [k.strip() for k in (api_keys or []) if k.strip()]
         self._model = (model or "").strip()
+        # 思考程度（空白＝不送，見模組上方「思考程度」註解）
+        self._thinking_level = (thinking_level or "").strip()
         # 進階設定：各種錯誤要中斷或重試（見 gemini_web.ERROR_POLICY_DEFAULTS）
         self._policy = resolve_error_policy(error_policy)
         self._timeout = int(timeout) if timeout and int(timeout) > 0 else _TIMEOUT
@@ -334,6 +358,8 @@ class ChatApiSession:
             }
             if self._system_prompt.strip():
                 body["system"] = self._system_prompt
+            if self._thinking_level:
+                body["output_config"] = {"effort": self._thinking_level}
             return url, headers, body
         # openai（含 DeepSeek／自定義）
         url = f"{self._base_url}/chat/completions"
@@ -346,7 +372,10 @@ class ChatApiSession:
         if self._system_prompt.strip():
             messages.append({"role": "system", "content": self._system_prompt})
         messages.append({"role": "user", "content": prompt_text})
-        return url, headers, {"model": self._model, "messages": messages}
+        body = {"model": self._model, "messages": messages}
+        if self._thinking_level:
+            body["reasoning_effort"] = self._thinking_level
+        return url, headers, body
 
     def _extract_text(self, payload: dict) -> str:
         """依 scheme 從回應取出譯文；取不到／被拒則丟 GeminiWebError。"""

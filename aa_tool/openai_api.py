@@ -65,7 +65,8 @@ API_PROVIDERS: dict[str, dict] = {
         "label": "Claude (Anthropic)",
         "scheme": "anthropic",
         "base_url": "https://api.anthropic.com/v1",
-        "models": ["claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5-20251001"],
+        # 2026-10 現行型號：sonnet（速度／品質平衡，預設）、opus、haiku（最便宜）、fable（最強最貴）
+        "models": ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5", "claude-fable-5-1"],
         "thinking": ["low", "medium", "high", "xhigh", "max"],
         "switch": True,
     },
@@ -108,7 +109,7 @@ API_PROVIDERS: dict[str, dict] = {
 # 思考開關（v3.17，"switch": True 的供應商才有；空白＝不送、用模型預設）：
 #   openai scheme（DeepSeek／GLM／自定義）→ thinking: {type: enabled|disabled}
 #   anthropic → thinking: {type: adaptive|disabled}
-# 有些模型不能關（GLM-5.3、Claude Sonnet 5.5／Opus 5.5），送「關」會回 400 或被忽略。
+# 有些模型不能關（GLM-5.3、Claude Sonnet 5.5／Opus 5.5／Fable 5.1），送「關」會回 400 或被忽略。
 # OpenAI、Gemini 沒有獨立開關：OpenAI 用程度 none 關閉，Gemini 3 系列最低 minimal／low。
 #
 # 自定義額外參數（v3.17，僅 custom）：JSON 物件，最後合併進請求 body（同名覆蓋），

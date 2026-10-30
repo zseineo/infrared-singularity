@@ -808,8 +808,8 @@ class AutoTranslatePanel(QWidget):
             "思考的開關，跟「思考程度」是分開送的欄位。不指定＝不送、用模型預設（多半是開）。\n"
             "  • DeepSeek／GLM／自定義：thinking.type＝enabled／disabled\n"
             "  • Claude：thinking.type＝adaptive／disabled\n"
-            "有些模型不能關（glm-5.3、Claude Sonnet 5.5／Opus 5.5），選「關」會回錯誤；\n"
-            "Claude Opus 5 在 effort 為 xhigh／max 時也不能關。\n"
+            "有些模型不能關（glm-5.3、Claude Sonnet 5.5／Opus 5.5／Fable 5.1），選「關」會回錯誤；\n"
+            "Claude Haiku 5.5、Opus 5 在 effort 為 xhigh／max 時也不能關。\n"
             "OpenAI、Gemini 沒有獨立開關：OpenAI 在思考程度填 none 即關閉，\n"
             "Gemini 3 系列不能完全關閉（最低 minimal／low）。")
         form.addRow("思考開關：", self.api_thinking_switch_combo)

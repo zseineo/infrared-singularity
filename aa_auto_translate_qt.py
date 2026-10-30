@@ -30,7 +30,9 @@ from PyQt6.QtWidgets import (
 )
 
 from aa_tool.gemini_api import API_MODELS
-from aa_tool.openai_api import API_PROVIDERS, provider_thinking_levels
+from aa_tool.openai_api import (
+    API_PROVIDERS, parse_extra_body, provider_has_thinking_switch,
+    provider_thinking_levels)
 from aa_tool import app_paths, secure_store
 
 # 翻譯後端選項：(顯示文字, 內部值)
@@ -762,6 +764,7 @@ class AutoTranslatePanel(QWidget):
         self._provider_keys: dict[str, list[str]] = {}
         self._provider_models: dict[str, str] = {}
         self._provider_thinking: dict[str, str] = {}
+        self._provider_switch: dict[str, str] = {}
         self._cur_provider = "gemini"
 
         self.api_provider_combo = QComboBox()
@@ -769,7 +772,7 @@ class AutoTranslatePanel(QWidget):
             self.api_provider_combo.addItem(label, value)
         self.api_provider_combo.setToolTip(
             "選擇 API 供應商。各供應商的金鑰、模型分開記住，切換不互相覆蓋。\n"
-            "OpenAI／DeepSeek／自定義走 OpenAI 相容端點；Claude 走 Anthropic 端點。")
+            "OpenAI／DeepSeek／GLM／自定義走 OpenAI 相容端點；Claude 走 Anthropic 端點。")
         self.api_provider_combo.currentIndexChanged.connect(self._on_provider_changed)
         form.addRow("API 供應商：", self.api_provider_combo)
 
@@ -791,8 +794,25 @@ class AutoTranslatePanel(QWidget):
             "  • OpenAI：reasoning_effort（none＝不推理／low／medium／high／xhigh）\n"
             "  • Claude：effort（low／medium／high／xhigh／max；Haiku 4.5 不支援）\n"
             "  • DeepSeek：reasoning_effort（low／high／max）\n"
+            "  • GLM：reasoning_effort（glm-5.3 只收 low／high／max，預設 max）\n"
+            "  • 自定義：reasoning_effort\n"
             "填了該模型不支援的值，API 會回錯誤，Log 會顯示錯誤訊息。")
         form.addRow("思考程度：", self.api_thinking_combo)
+
+        # 思考開關（v3.17）：只有開關是獨立欄位的供應商可用，各供應商分開記住
+        self.api_thinking_switch_combo = QComboBox()
+        self.api_thinking_switch_combo.addItem("不指定（模型預設）", "")
+        self.api_thinking_switch_combo.addItem("開", "on")
+        self.api_thinking_switch_combo.addItem("關", "off")
+        self.api_thinking_switch_combo.setToolTip(
+            "思考的開關，跟「思考程度」是分開送的欄位。不指定＝不送、用模型預設（多半是開）。\n"
+            "  • DeepSeek／GLM／自定義：thinking.type＝enabled／disabled\n"
+            "  • Claude：thinking.type＝adaptive／disabled\n"
+            "有些模型不能關（glm-5.3、Claude Sonnet 5.5／Opus 5.5），選「關」會回錯誤；\n"
+            "Claude Opus 5 在 effort 為 xhigh／max 時也不能關。\n"
+            "OpenAI、Gemini 沒有獨立開關：OpenAI 在思考程度填 none 即關閉，\n"
+            "Gemini 3 系列不能完全關閉（最低 minimal／low）。")
+        form.addRow("思考開關：", self.api_thinking_switch_combo)
 
         self.api_base_url_edit = QLineEdit()
         self.api_base_url_edit.setPlaceholderText(
@@ -800,6 +820,18 @@ class AutoTranslatePanel(QWidget):
         self.api_base_url_edit.setToolTip(
             "僅「自定義」供應商需填；需為 OpenAI 相容端點（會呼叫 {base_url}/chat/completions）。")
         form.addRow("自定義端點：", self.api_base_url_edit)
+
+        # 自定義額外參數（v3.17）：給欄位名稱和 OpenAI／DeepSeek 不同的相容端點
+        self.api_extra_body_edit = QLineEdit()
+        self.api_extra_body_edit.setPlaceholderText(
+            '選填，JSON 物件，例：{"enable_thinking": false}')
+        self.api_extra_body_edit.setToolTip(
+            "僅「自定義」供應商使用：JSON 物件，會合併進每次請求的 body（同名欄位以這裡為準）。\n"
+            "端點的思考參數名稱不是 reasoning_effort／thinking.type 時填在這裡，例如：\n"
+            '  {"enable_thinking": false}\n'
+            '  {"chat_template_kwargs": {"enable_thinking": false}}\n'
+            "格式錯誤時開始翻譯會直接中斷並顯示原因。")
+        form.addRow("額外參數：", self.api_extra_body_edit)
 
         self.api_keys_edit = QPlainTextEdit()
         self.api_keys_edit.setPlaceholderText(
@@ -1022,19 +1054,22 @@ class AutoTranslatePanel(QWidget):
         for w in (self.api_provider_combo, self.api_model_combo,
                   self.api_thinking_combo, self.api_keys_edit, self.api_prompt_edit):
             w.setEnabled(True)
+        self.api_thinking_switch_combo.setEnabled(
+            provider_has_thinking_switch(self._cur_provider))
 
     # ── API 供應商切換 ──
 
     def _set_base_url_visible(self, visible: bool) -> None:
-        """自定義端點列僅在「自定義」供應商顯示（不支援 setRowVisible 時退回啟用切換）。"""
+        """自定義端點／額外參數列僅在「自定義」供應商顯示（不支援 setRowVisible 時退回啟用切換）。"""
         form = self._conn_form
-        if hasattr(form, "setRowVisible"):
-            try:
-                form.setRowVisible(self.api_base_url_edit, visible)
-                return
-            except Exception:
-                pass
-        self.api_base_url_edit.setEnabled(visible)
+        for w in (self.api_base_url_edit, self.api_extra_body_edit):
+            if hasattr(form, "setRowVisible"):
+                try:
+                    form.setRowVisible(w, visible)
+                    continue
+                except Exception:
+                    pass
+            w.setEnabled(visible)
 
     def _apply_provider_to_fields(self, provider: str) -> None:
         """把指定供應商的暫存模型／金鑰填入欄位，並依供應商切換模型建議與端點列。"""
@@ -1051,6 +1086,10 @@ class AutoTranslatePanel(QWidget):
         self.api_thinking_combo.addItems([""] + provider_thinking_levels(provider))
         self.api_thinking_combo.setEditText(self._provider_thinking.get(provider, ""))
         self.api_thinking_combo.blockSignals(False)
+        has_switch = provider_has_thinking_switch(provider)
+        self.api_thinking_switch_combo.setCurrentIndex(max(0, self.api_thinking_switch_combo.findData(
+            self._provider_switch.get(provider, "") if has_switch else "")))
+        self.api_thinking_switch_combo.setEnabled(has_switch)
         keys = self._provider_keys.get(provider, [])
         self.api_keys_edit.blockSignals(True)
         self.api_keys_edit.setPlainText("\n".join(keys))
@@ -1062,6 +1101,8 @@ class AutoTranslatePanel(QWidget):
         p = self._cur_provider
         self._provider_models[p] = self.api_model_combo.currentText().strip()
         self._provider_thinking[p] = self.api_thinking_combo.currentText().strip()
+        if provider_has_thinking_switch(p):
+            self._provider_switch[p] = self.api_thinking_switch_combo.currentData() or ""
         self._provider_keys[p] = [
             l.strip() for l in self.api_keys_edit.toPlainText().splitlines()
             if l.strip()]
@@ -1289,6 +1330,7 @@ class AutoTranslatePanel(QWidget):
         self.api_prompt_edit.setPlainText(
             getattr(m, "_gemini_api_system_prompt", "") or "")
         self.api_base_url_edit.setText(getattr(m, "_api_custom_base_url", "") or "")
+        self.api_extra_body_edit.setText(getattr(m, "_api_custom_extra_body", "") or "")
         self.api_timeout_spin.setValue(
             max(30, int(getattr(m, "_api_timeout", 600) or 600)))
         # 各供應商金鑰／模型載入暫存 dict（切換供應商時互換，儲存時一併寫入）。
@@ -1302,6 +1344,7 @@ class AutoTranslatePanel(QWidget):
                           getattr(m, "_gemini_api_model", "") or API_MODELS[0])
         self._provider_models = models
         self._provider_thinking = dict(getattr(m, "_api_thinking_levels", {}) or {})
+        self._provider_switch = dict(getattr(m, "_api_thinking_switches", {}) or {})
         provider = (getattr(m, "_api_provider", "gemini") or "gemini")
         self._cur_provider = provider
         self.api_provider_combo.blockSignals(True)
@@ -1328,7 +1371,9 @@ class AutoTranslatePanel(QWidget):
             "api_model": gemini_model,
             "api_models": api_models,
             "api_thinking_levels": {p: v for p, v in self._provider_thinking.items() if v},
+            "api_thinking_switches": {p: v for p, v in self._provider_switch.items() if v},
             "api_custom_base_url": self.api_base_url_edit.text().strip(),
+            "api_custom_extra_body": self.api_extra_body_edit.text().strip(),
             "api_timeout": self.api_timeout_spin.value(),
             "api_only_prompt": self.api_only_prompt_edit.toPlainText(),
             "api_system_prompt": self.api_prompt_edit.toPlainText(),

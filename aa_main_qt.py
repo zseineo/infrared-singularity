@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.16"
+APP_VERSION = "3.17"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -820,10 +820,12 @@ class MainWindow(QMainWindow):
         self._auto_translate_error_policy: dict = {}
         # 翻譯後端與 API 設定（金鑰另存於加密檔，不在 cache）
         self._translate_backend: str = "browser"
-        self._api_provider: str = "gemini"  # API 供應商（gemini/openai/claude/deepseek/custom）
+        self._api_provider: str = "gemini"  # API 供應商（gemini/openai/claude/deepseek/glm/custom）
         self._gemini_api_model: str = "gemini-3.8-flash"
         self._api_models: dict = {}  # 非 gemini 供應商各自的模型 id：{供應商: model}
         self._api_thinking_levels: dict = {}  # API 思考程度：{供應商: 值}，空白＝不送
+        self._api_thinking_switches: dict = {}  # API 思考開關：{供應商: on/off}，沒有＝不送
+        self._api_custom_extra_body: str = ""  # 自定義供應商額外參數（JSON 物件字串）
         self._api_custom_base_url: str = ""  # 自定義供應商的 OpenAI 相容端點
         self._api_timeout: int = 600  # 單次 API 請求逾時（秒），連線設定可調
         self._gemini_api_only_prompt: str = ""  # 僅 API 送出（瀏覽器模式不送）
@@ -2003,6 +2005,12 @@ class MainWindow(QMainWindow):
             self._api_thinking_levels = {
                 str(k): str(v).strip() for k, v in tl.items() if str(v).strip()} \
                 if isinstance(tl, dict) else {}
+        if "api_thinking_switches" in params:
+            ts = params.get("api_thinking_switches") or {}
+            self._api_thinking_switches = {
+                str(k): v for k, v in ts.items() if v in ("on", "off")}                 if isinstance(ts, dict) else {}
+        if "api_custom_extra_body" in params:
+            self._api_custom_extra_body = params.get("api_custom_extra_body", "") or ""
         if "api_timeout" in params:
             try:
                 self._api_timeout = max(30, int(params.get("api_timeout") or 600))
@@ -2887,7 +2895,9 @@ class MainWindow(QMainWindow):
             gemini_api_model=self._gemini_api_model,
             api_models=self._api_models,
             api_thinking_levels=self._api_thinking_levels,
+            api_thinking_switches=self._api_thinking_switches,
             api_custom_base_url=self._api_custom_base_url,
+            api_custom_extra_body=self._api_custom_extra_body,
             api_timeout=self._api_timeout,
             gemini_api_only_prompt=self._gemini_api_only_prompt,
             gemini_api_system_prompt=self._gemini_api_system_prompt,
@@ -3055,6 +3065,10 @@ class MainWindow(QMainWindow):
             getattr(cache, "api_custom_base_url", "") or "")
         tl = getattr(cache, "api_thinking_levels", {})
         self._api_thinking_levels = dict(tl) if isinstance(tl, dict) else {}
+        ts = getattr(cache, "api_thinking_switches", {})
+        self._api_thinking_switches = dict(ts) if isinstance(ts, dict) else {}
+        self._api_custom_extra_body = str(
+            getattr(cache, "api_custom_extra_body", "") or "")
         try:
             self._api_timeout = max(30, int(getattr(cache, "api_timeout", 600) or 600))
         except (TypeError, ValueError):

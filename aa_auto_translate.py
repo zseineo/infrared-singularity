@@ -1254,6 +1254,9 @@ def run_auto_translate(
         api_proxy = getattr(cache, "api_proxy_url", "") or ""  # 與抓網頁分開設定
         api_thinking = str((getattr(cache, "api_thinking_levels", {}) or {})
                            .get(provider, "") or "").strip()
+        api_switch = (getattr(cache, "api_thinking_switches", {}) or {}).get(provider, "")
+        if not openai_api.provider_has_thinking_switch(provider):
+            api_switch = ""
         if provider == "gemini":
             session = gemini_api.GeminiApiSession(
                 keys, cache.gemini_api_model,
@@ -1273,10 +1276,14 @@ def run_auto_translate(
                 scheme=meta.get("scheme", "openai"), base_url=base_url,
                 system_prompt=api_system_prompt, log=log, stop_event=stop_event,
                 timeout=api_timeout, proxy=api_proxy, error_policy=policy,
-                thinking_level=api_thinking)
+                thinking_level=api_thinking, thinking_switch=api_switch,
+                extra_body=(getattr(cache, "api_custom_extra_body", "")
+                            if provider == "custom" else ""))
             open_log = f"使用 {meta.get('label', provider)} API（模型 {model}）…"
         if api_thinking:
             open_log = open_log[:-2] + f"，思考程度 {api_thinking}）…"
+        if api_switch:
+            open_log = open_log[:-2] + f"，思考{'開' if api_switch == 'on' else '關'}）…"
     else:
         gem_url = gem_url or cache.gemini_gem_url
         if not gem_url:

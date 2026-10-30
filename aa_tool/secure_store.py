@@ -17,7 +17,7 @@
 金鑰實際存於 ``aa_api_keys.dat``（已列入 .gitignore），不會進 git。
 
 **多供應商格式**：檔內以 ``{"providers": {供應商: [金鑰...]}}`` 分別記住各家
-（gemini／openai／claude／deepseek／custom）的金鑰，切換供應商時彼此不覆蓋。
+（gemini／openai／claude／deepseek／glm／custom）的金鑰，切換供應商時彼此不覆蓋。
 舊版單一池格式 ``{"keys": [...]}`` 於載入時自動視為屬於 ``gemini``（API 模式先前僅
 支援 Gemini），下次寫入即升級為新格式。``load_keys``／``save_keys`` 的 ``provider``
 預設 ``gemini``，維持既有呼叫端相容。

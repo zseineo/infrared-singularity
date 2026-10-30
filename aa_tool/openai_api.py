@@ -9,7 +9,7 @@
 
 * ``"openai"``    → ``POST {base_url}/chat/completions``，``Authorization: Bearer``，
   body ``{model, messages}``，回應取 ``choices[0].message.content``。
-  涵蓋 **OpenAI(GPT)／DeepSeek／自定義（OpenAI 相容端點）**——三者只差
+  涵蓋 **OpenAI(GPT)／DeepSeek／GLM／自定義（OpenAI 相容端點）**——四者只差
   ``base_url`` 與 ``model``。
 * ``"anthropic"`` → ``POST {base_url}/messages``，``x-api-key`` + ``anthropic-version``，
   body ``{model, max_tokens, system?, messages}``，回應取 ``content[].text``。
@@ -67,6 +67,7 @@ API_PROVIDERS: dict[str, dict] = {
         "base_url": "https://api.anthropic.com/v1",
         "models": ["claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5-20251001"],
         "thinking": ["low", "medium", "high", "xhigh", "max"],
+        "switch": True,
     },
     "deepseek": {
         "label": "DeepSeek",
@@ -74,6 +75,17 @@ API_PROVIDERS: dict[str, dict] = {
         "base_url": "https://api.deepseek.com/v1",
         "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
         "thinking": ["low", "high", "max"],
+        "switch": True,
+    },
+    "glm": {
+        "label": "GLM (智譜 Z.ai)",
+        "scheme": "openai",
+        # 國際版 Z.ai；中國大陸 open.bigmodel.cn 的金鑰不通用，請改用「自定義」填
+        # https://open.bigmodel.cn/api/paas/v4
+        "base_url": "https://api.z.ai/api/paas/v4",
+        "models": ["glm-5.3", "glm-5.2", "glm-5.1"],
+        "thinking": ["low", "high", "max"],
+        "switch": True,
     },
     "custom": {
         "label": "自定義 (OpenAI 相容)",
@@ -81,18 +93,49 @@ API_PROVIDERS: dict[str, dict] = {
         "base_url": "",
         "models": [],
         "thinking": ["low", "medium", "high"],
+        "switch": True,
     },
 }
 
 # 思考程度（v3.16，連線設定「思考程度」欄，各供應商分開記住；空白＝不送、用模型預設）
 # 依 scheme 送到不同欄位（2026-10 查官方文件）：
 #   gemini    → generationConfig.thinkingConfig.thinkingLevel（gemini_api）
-#   openai    → reasoning_effort（OpenAI；DeepSeek 也收這個欄位，low／high／max）
+#   openai    → reasoning_effort（OpenAI；DeepSeek low／high／max；GLM 5.3 low／high／max）
 #   anthropic → output_config.effort（Claude 4.5 Opus 以後；Haiku 4.5 不支援 effort）
 # 值原樣送出、不檢查：各模型接受的值不同（例：gemini-3.8-flash 不收 minimal），
 # 送了不支援的值 API 會回 400，Log 會顯示錯誤訊息。
-# 註：有些供應商的「開關」是另一個欄位（DeepSeek thinking.type、Claude thinking.type），
-# 這裡不送；OpenAI 的 none、Gemini 的 minimal 是用同一個程度欄位降到最低。
+#
+# 思考開關（v3.17，"switch": True 的供應商才有；空白＝不送、用模型預設）：
+#   openai scheme（DeepSeek／GLM／自定義）→ thinking: {type: enabled|disabled}
+#   anthropic → thinking: {type: adaptive|disabled}
+# 有些模型不能關（GLM-5.3、Claude Sonnet 5.5／Opus 5.5），送「關」會回 400 或被忽略。
+# OpenAI、Gemini 沒有獨立開關：OpenAI 用程度 none 關閉，Gemini 3 系列最低 minimal／low。
+#
+# 自定義額外參數（v3.17，僅 custom）：JSON 物件，最後合併進請求 body（同名覆蓋），
+# 給用其他欄位名稱的 OpenAI 相容端點（例：{"enable_thinking": false}）。
+THINKING_SWITCH_VALUES = {
+    "openai": {"on": "enabled", "off": "disabled"},
+    "anthropic": {"on": "adaptive", "off": "disabled"},
+}
+
+
+def provider_has_thinking_switch(provider: str) -> bool:
+    """供應商是否有獨立的思考開關欄位。"""
+    return bool(API_PROVIDERS.get(provider, {}).get("switch"))
+
+
+def parse_extra_body(text: str) -> dict:
+    """解析自定義額外參數；空白回 {}，不是 JSON 物件丟 ValueError。"""
+    text = (text or "").strip()
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"額外參數不是有效的 JSON：{e}") from None
+    if not isinstance(data, dict):
+        raise ValueError("額外參數必須是 JSON 物件（用 { } 包起來）")
+    return data
 
 
 def provider_thinking_levels(provider: str) -> list[str]:
@@ -154,11 +197,16 @@ class ChatApiSession:
         proxy: str = "",
         error_policy: dict | None = None,
         thinking_level: str = "",
+        thinking_switch: str = "",
+        extra_body: str = "",
     ) -> None:
         self._keys = [k.strip() for k in (api_keys or []) if k.strip()]
         self._model = (model or "").strip()
-        # 思考程度（空白＝不送，見模組上方「思考程度」註解）
+        # 思考程度／開關（空白＝不送，見模組上方「思考程度」註解）
         self._thinking_level = (thinking_level or "").strip()
+        self._thinking_switch = thinking_switch if thinking_switch in ("on", "off") else ""
+        self._extra_body_text = extra_body or ""
+        self._extra_body: dict = {}
         # 進階設定：各種錯誤要中斷或重試（見 gemini_web.ERROR_POLICY_DEFAULTS）
         self._policy = resolve_error_policy(error_policy)
         self._timeout = int(timeout) if timeout and int(timeout) > 0 else _TIMEOUT
@@ -183,6 +231,10 @@ class ChatApiSession:
             raise GeminiWebError("未設定 API 端點（base_url）")
         if not self._model:
             raise GeminiWebError("未設定 API 模型")
+        try:
+            self._extra_body = parse_extra_body(self._extra_body_text)
+        except ValueError as e:
+            raise GeminiWebError(f"自定義{e}") from None
         self._log(f"API 後端就緒：{self._scheme} @ {self._base_url}，"
                   f"模型 {self._model}，共 {len(self._keys)} 把金鑰輪換，"
                   f"逾時 {self._timeout}s"
@@ -360,8 +412,11 @@ class ChatApiSession:
                 body["system"] = self._system_prompt
             if self._thinking_level:
                 body["output_config"] = {"effort": self._thinking_level}
+            if self._thinking_switch:
+                body["thinking"] = {
+                    "type": THINKING_SWITCH_VALUES["anthropic"][self._thinking_switch]}
             return url, headers, body
-        # openai（含 DeepSeek／自定義）
+        # openai（含 DeepSeek／GLM／自定義）
         url = f"{self._base_url}/chat/completions"
         headers = {
             "Content-Type": "application/json",
@@ -375,6 +430,10 @@ class ChatApiSession:
         body = {"model": self._model, "messages": messages}
         if self._thinking_level:
             body["reasoning_effort"] = self._thinking_level
+        if self._thinking_switch:
+            body["thinking"] = {
+                "type": THINKING_SWITCH_VALUES["openai"][self._thinking_switch]}
+        body.update(self._extra_body)
         return url, headers, body
 
     def _extract_text(self, payload: dict) -> str:
@@ -407,8 +466,8 @@ class ChatApiSession:
         msg = choices[0].get("message", {}) or {}
         text = (msg.get("content") or "").strip()
         if not text:
-            if finish == "content_filter":
-                # 供應商的內容過濾擋下回應 → 視同被審查
+            if finish in ("content_filter", "sensitive"):
+                # 供應商的內容過濾擋下回應 → 視同被審查（GLM 用 sensitive）
                 raise GeminiContentBlocked(
                     f"API 回應被內容過濾擋下（finish_reason={finish}）")
             raise GeminiWebError(f"API 回應為空（finish_reason={finish}）")

@@ -259,7 +259,7 @@ class AppCache:
     auto_translate_auto_number: bool = False
     # 翻譯後端：'browser'（操控網頁版 Gemini）或 'api'（呼叫供應商 API）。
     translate_backend: str = "browser"
-    # API 供應商：gemini / openai / claude / deepseek / custom（見
+    # API 供應商：gemini / openai / claude / deepseek / glm / custom（見
     # aa_tool.openai_api.API_PROVIDERS）。gemini 走 GeminiApiSession，其餘走
     # ChatApiSession（OpenAI／Anthropic 相容）。
     api_provider: str = "gemini"
@@ -275,6 +275,11 @@ class AppCache:
     api_models: dict = field(default_factory=dict)
     # API 思考程度（v3.16）：{供應商: 值}，空白／沒有＝不送、用模型預設
     api_thinking_levels: dict = field(default_factory=dict)
+    # API 思考開關（v3.17）：{供應商: "on"|"off"}，沒有＝不送；只有 DeepSeek／GLM／
+    # Claude／自定義有獨立開關（見 openai_api「思考開關」註解）
+    api_thinking_switches: dict = field(default_factory=dict)
+    # 自定義供應商的額外請求參數（v3.17）：JSON 物件字串，合併進請求 body
+    api_custom_extra_body: str = ""
     # 自定義（custom）供應商的 OpenAI 相容端點 base_url（含 /v1）。
     api_custom_base_url: str = ""
     # API 模式的系統指令（翻譯人設／要求）；金鑰另存於加密檔 aa_api_keys.dat。
@@ -629,6 +634,11 @@ class SettingsManager:
             cache.api_thinking_levels = {
                 str(k): str(v).strip() for k, v in tl.items() if str(v).strip()} \
                 if isinstance(tl, dict) else {}
+            ts = data.get('api_thinking_switches', cache.api_thinking_switches)
+            cache.api_thinking_switches = {
+                str(k): v for k, v in ts.items() if v in ("on", "off")}                 if isinstance(ts, dict) else {}
+            cache.api_custom_extra_body = str(data.get(
+                'api_custom_extra_body', cache.api_custom_extra_body) or "")
             cache.gemini_api_only_prompt = str(data.get(
                 'gemini_api_only_prompt', cache.gemini_api_only_prompt))
             cache.gemini_api_system_prompt = str(data.get(
@@ -769,6 +779,8 @@ class SettingsManager:
                 'gemini_api_model': cache.gemini_api_model,
                 'api_models': cache.api_models,
                 'api_thinking_levels': cache.api_thinking_levels,
+                'api_thinking_switches': cache.api_thinking_switches,
+                'api_custom_extra_body': cache.api_custom_extra_body,
                 'api_custom_base_url': cache.api_custom_base_url,
                 'gemini_api_only_prompt': cache.gemini_api_only_prompt,
                 'gemini_api_system_prompt': cache.gemini_api_system_prompt,

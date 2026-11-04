@@ -8,20 +8,26 @@
 - 已有前綴的檔案重排時先去掉舊前綴再編，重跑結果一致。
 - 讀不到日期的檔案排在最後（依原檔名）。
 - 檔名比對（同名檔判定、從資料夾讀話數）一律先 ``strip_order_prefix``。
+- 有些 blog 每一話開頭都轉載同一組置頂貼文（>>1 規則等），第一個標頭全部相同。
+  出現在資料夾裡大多數檔案的標頭日期視為共用置頂、不拿來排序（見 ``plan_order``）。
 """
 from __future__ import annotations
 
 import os
 import re
+from collections import Counter
 
-from . import original_cache
 from .html_io import read_html_pre_content
 
 ORDER_PREFIX_RE = re.compile(r'^\d{3,}_')
 _DATE_RE = re.compile(
     r'(\d{4})/(\d{1,2})/(\d{1,2})\([^)\s]+\)\s*(\d{1,2}):(\d{2}):(\d{2})')
+_HEADER_ID_RE = re.compile(_DATE_RE.pattern + r'(?:\.\d+)?\s*ID:[A-Za-z0-9+/]+')
 _EXTS = ('.html', '.htm')
 _TMP_SUFFIX = '.__reorder_tmp'
+# 共用置頂的判定：同一個標頭日期出現在至少這麼多個檔案、且至少一半的檔案。
+# 下限 3 是為了不誤判重翻多存的「X.html／X-2.html」（兩檔內容相同）。
+_SHARED_MIN_FILES = 3
 
 
 def strip_order_prefix(name: str) -> str:
@@ -50,8 +56,12 @@ def taken_names(folder: str) -> set[str]:
         return set()
 
 
-def post_date(path: str) -> tuple | None:
-    """檔案內文第一個投稿標頭的日期時間（可直接比較大小的 tuple）；讀不到回 None。"""
+def post_dates(path: str) -> list[tuple]:
+    """檔案內文所有投稿標頭的日期時間（依出現順序，可直接比較大小的 tuple）。
+
+    有帶 ``ID:`` 的標頭時只取這些（與 ``original_cache.compute_fingerprint`` 一致），
+    沒有才退回只看日期的老格式。讀不到回空 list。
+    """
     try:
         try:
             text = read_html_pre_content(path)
@@ -61,9 +71,9 @@ def post_date(path: str) -> tuple | None:
             with open(path, encoding='utf-8', errors='replace') as f:
                 text = f.read()
     except OSError:
-        return None
-    m = _DATE_RE.search(original_cache.compute_fingerprint(text) or '')
-    return tuple(int(x) for x in m.groups()) if m else None
+        return []
+    ms = list(_HEADER_ID_RE.finditer(text)) or list(_DATE_RE.finditer(text))
+    return [tuple(int(x) for x in m.groups()) for m in ms]
 
 
 def plan_order(folder: str) -> tuple[list[tuple[str, str]], list[str]]:
@@ -71,14 +81,24 @@ def plan_order(folder: str) -> tuple[list[tuple[str, str]], list[str]]:
 
     回傳 ``(renames, undated)``：renames 為全部 HTML 檔依閱讀順序的
     ``(目前檔名, 新檔名)``（包含不必改名的）；undated 為讀不到日期的目前檔名。
+
+    每檔取第一個「不是共用置頂」的標頭日期排序；共用置頂＝出現在至少
+    ``_SHARED_MIN_FILES`` 個、且至少一半檔案裡的日期。整檔都是共用的才退回第一個日期。
     """
-    dated, undated = [], []
+    files = []
     for n in os.listdir(folder):
         p = os.path.join(folder, n)
         if not n.lower().endswith(_EXTS) or not os.path.isfile(p):
             continue
+        files.append((n, post_dates(p)))
+    counts = Counter(d for _n, ds in files for d in set(ds))
+    shared = {d for d, c in counts.items()
+              if c >= _SHARED_MIN_FILES and c * 2 >= len(files)}
+    dated, undated = [], []
+    for n, ds in files:
         base = strip_order_prefix(n)
-        d = post_date(p)
+        own = [d for d in ds if d not in shared]
+        d = own[0] if own else (ds[0] if ds else None)
         # 同日期時比不含副檔名的檔名：重翻多存的「X-2.html」排在「X.html」之後
         key = os.path.splitext(base)[0].casefold()
         if d is None:

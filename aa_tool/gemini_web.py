@@ -523,10 +523,21 @@ def _win_input_types():
     return _INPUT, _MOUSEINPUT, _KEYBDINPUT
 
 
-def _send_ctrl_key(vk: int, human: bool = False) -> bool:
+def _is_foreground(hwnd) -> bool:
+    """``hwnd`` 是不是目前的前景視窗（Windows）。"""
+    if os.name != "nt" or not hwnd:
+        return False
+    import ctypes
+    fg = ctypes.windll.user32.GetForegroundWindow()
+    return bool(fg) and (fg & 0xFFFFFFFF) == (int(hwnd) & 0xFFFFFFFF)
+
+
+def _send_ctrl_key(vk: int, human: bool = False, guard=None) -> bool:
     """用 SendInput 按一下 Ctrl+<vk>（Windows 真實鍵盤事件，送往目前的前景視窗）。
 
     human=True 時各鍵之間的間隔隨機、比照真人（約 0.15～0.35 秒完成）。
+    guard：按下 Ctrl 與 <vk> 之前各檢查一次（例：前景還是瀏覽器），不成立就不按、回 False
+    ——使用者中途切到別的視窗時，按鍵會送進那個視窗（誤貼）。
     """
     if os.name != "nt":
         return False
@@ -543,8 +554,13 @@ def _send_ctrl_key(vk: int, human: bool = False) -> bool:
 
     gaps = ((random.uniform(0.06, 0.14), random.uniform(0.05, 0.11),
              random.uniform(0.03, 0.09)) if human else (0.03, 0.05, 0.03))
+    if guard is not None and not guard():
+        return False
     ok = _key(vk_ctrl, 0)
     time.sleep(gaps[0])
+    if guard is not None and not guard():
+        _key(vk_ctrl, keyup)
+        return False
     ok = ok and _key(vk, 0)
     time.sleep(gaps[1])
     _key(vk, keyup)                   # 放開一定要送，避免 Ctrl／按鍵卡在按下狀態
@@ -553,9 +569,9 @@ def _send_ctrl_key(vk: int, human: bool = False) -> bool:
     return ok
 
 
-def _send_ctrl_v(human: bool = False) -> bool:
+def _send_ctrl_v(human: bool = False, guard=None) -> bool:
     """用 SendInput 按一下 Ctrl+V。"""
-    return _send_ctrl_key(0x56, human)
+    return _send_ctrl_key(0x56, human, guard)
 
 
 def _human_path(x0: int, y0: int, x1: int, y1: int,
@@ -1092,12 +1108,18 @@ class GeminiWebSession:
         finally:
             _win_clipboard_set(backup or "")
 
-    def _os_paste_into(self, editor, text: str, human: bool = False) -> bool:
+    def _os_paste_into(self, editor, text: str, human: bool = False, hwnd=0) -> bool:
         """擬人操作用（瀏覽器已在前景時）暫借剪貼簿、用系統鍵盤 Ctrl+V 貼上並核對內容，貼完還原剪貼簿。
 
         輸入框沒有焦點先用程式點一下；裡面已經有字（上一則沒清乾淨、草稿被還原等）
         就先 Ctrl+A 全選，讓這次貼上直接取代掉。human=True 時按鍵節奏比照真人。
+
+        hwnd：瀏覽器視窗。系統按鍵會送進「目前的前景視窗」，使用者中途切去操作別的程式
+        就會誤貼到那裡（v3.20）。所以按鍵前確認前景是瀏覽器、頁面與輸入框有焦點，
+        不是就叫回前景再確認一次；仍不是就不按、回 False（呼叫端改用頁面內填入）。
+        每個 Ctrl+A／Ctrl+V 按下前也再查一次前景。
         """
+        guard = (lambda: _is_foreground(hwnd)) if hwnd else None
         backup = _win_clipboard_get()
         try:
             if not _win_clipboard_set(text):
@@ -1105,23 +1127,53 @@ class GeminiWebSession:
                 return False
             if not self._editor_focused():
                 editor.click()
+            if hwnd and not self._paste_target_ready(editor, hwnd):
+                self._log("  （擬人操作：瀏覽器不在前景（可能正在操作其他視窗），"
+                          "這次不用鍵盤貼上，避免貼到別的程式）")
+                return False
             try:
                 leftover = (editor.inner_text(timeout=2000) or "").strip()
             except Exception:  # noqa: BLE001
                 leftover = ""
             if leftover:
                 self._dbg(f"系統鍵盤貼上：輸入框原本有 {len(leftover)} 字，先全選再貼上")
-                _send_ctrl_key(0x41, human)                     # Ctrl+A
+                if not _send_ctrl_key(0x41, human, guard):      # Ctrl+A
+                    return self._paste_aborted(guard)
                 time.sleep(0.1)
-            if not _send_ctrl_v(human):
-                self._dbg("系統鍵盤貼上：SendInput 送不出去")
-                return False
+            if not _send_ctrl_v(human, guard):
+                return self._paste_aborted(guard)
             return self._input_matches(editor, text, wait=15.0)
         except Exception as e:  # noqa: BLE001
             self._dbg(f"系統鍵盤貼上失敗：{brief_error(e)}")
             return False
         finally:
             _win_clipboard_set(backup or "")
+
+    def _paste_target_ready(self, editor, hwnd) -> bool:
+        """系統鍵盤貼上前：前景是瀏覽器、頁面有焦點、焦點在輸入框；不是就叫回來再查一次。"""
+        def _ok() -> bool:
+            if not _is_foreground(hwnd):
+                return False
+            try:
+                return bool(self._iso_eval("document.hasFocus()")) and self._editor_focused()
+            except Exception:  # noqa: BLE001
+                return False
+
+        if _ok():
+            return True
+        self._dbg("系統鍵盤貼上：前景不是瀏覽器或輸入框沒有焦點，重新叫回前景")
+        self._wait_page_focus(hwnd)
+        if not self._editor_focused():
+            editor.click()
+        return _ok()
+
+    def _paste_aborted(self, guard) -> bool:
+        """按鍵前發現前景換掉（guard 不成立）或 SendInput 失敗：記 Log、回 False。"""
+        if guard is not None and not guard():
+            self._log("  （擬人操作：貼上途中前景換成別的視窗，停止按鍵，避免貼到別的程式）")
+        else:
+            self._dbg("系統鍵盤貼上：SendInput 送不出去")
+        return False
 
     # ── 對話管理 ──
 
@@ -1877,7 +1929,7 @@ class GeminiWebSession:
                 self._log("  （擬人操作：點不到輸入框，改用程式點擊）")
                 editor.click()
             time.sleep(rnd.uniform(*_HUMAN_PRE_PASTE))
-            if not self._os_paste_into(editor, text, human=True):
+            if not self._os_paste_into(editor, text, human=True, hwnd=hwnd):
                 self._log("  （擬人操作：系統鍵盤貼上沒成功，改用逐字填入）")
                 self._clear_input(editor)
                 editor.fill(text)

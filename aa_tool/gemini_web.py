@@ -575,16 +575,21 @@ def _send_ctrl_v(human: bool = False, guard=None) -> bool:
 
 
 def _human_path(x0: int, y0: int, x1: int, y1: int,
-                rnd: random.Random) -> tuple[list[tuple[int, int]], float]:
+                rnd: random.Random, fast: bool = False) -> tuple[list[tuple[int, int]], float]:
     """擬人滑鼠軌跡：微彎的三次貝茲曲線、頭尾慢中間快、帶一點抖動。
 
-    回傳 (各點螢幕座標, 每步間隔秒數)；距離越遠越久（約 0.2～0.9 秒）。最後一點必為終點。
+    回傳 (各點螢幕座標, 每步間隔秒數)；距離越遠越久（約 0.2～0.9 秒；fast＝約 0.15～0.5 秒，
+    連線設定「滑鼠直接移動」）。最後一點必為終點。
     """
     dist = math.hypot(x1 - x0, y1 - y0)
     if dist < 3:
         return [(x1, y1)], 0.0
-    dur = min(0.9, 0.2 + dist / 1800.0) * rnd.uniform(0.85, 1.2)
-    steps = max(10, int(dur * 80))
+    if fast:
+        dur = min(0.5, 0.15 + dist / 3000.0) * rnd.uniform(0.85, 1.15)
+        steps = max(8, int(dur * 60))   # 每步約 16ms，接近 Windows sleep 的最小粒度
+    else:
+        dur = min(0.9, 0.2 + dist / 1800.0) * rnd.uniform(0.85, 1.2)
+        steps = max(10, int(dur * 80))
     nx, ny = -(y1 - y0) / dist, (x1 - x0) / dist          # 垂直方向（讓路徑微彎）
     b1, b2 = rnd.uniform(-0.18, 0.18) * dist, rnd.uniform(-0.18, 0.18) * dist
     c1 = (x0 + (x1 - x0) * 0.3 + nx * b1, y0 + (y1 - y0) * 0.3 + ny * b1)
@@ -733,6 +738,7 @@ class GeminiWebSession:
         input_method: str = DEFAULT_INPUT_METHOD,
         send_method: str = DEFAULT_SEND_METHOD,
         thinking_level: str = "",
+        human_direct: bool = False,
     ) -> None:
         """``debug``：`aa_tool.debug_log.DebugLog`（勾「Debug Log」時由協調器傳入），
         記錄每一步耗時、頁面健康度、瀏覽器事件與錯誤截圖；None＝不記。
@@ -765,6 +771,8 @@ class GeminiWebSession:
                             else DEFAULT_SEND_METHOD)
         # 思考程度：low／medium／high＝每個新對話確認調成該程度；空字串＝不動
         self.thinking_level = thinking_level if thinking_level in THINKING_LEVELS else ""
+        # 擬人操作的滑鼠直接移動（v3.21）：不在頁面閒晃、移動較快（_human_path fast）
+        self.human_direct = bool(human_direct)
         self._channel_used = ""   # 實際啟動的瀏覽器（Debug Log 用）
         self._pw = None
         self._context = None
@@ -1276,7 +1284,8 @@ class GeminiWebSession:
             ver = ""
         dbg(f"瀏覽器：{self._channel_used or '?'} {ver}｜headless={self.headless}"
             f"｜每 {self.max_per_session} 次送出換新對話｜要求模型 {self.required_model or '不限'}"
-            f"｜填入方式 {self.input_method}")
+            f"｜填入方式 {self.input_method}"
+            + ("｜擬人滑鼠直接移動" if self.human_direct else ""))
         try:
             page.on("crash", lambda *_: dbg("💥 頁面崩潰（crash 事件）"))
             page.on("close", lambda *_: dbg("頁面被關閉（close 事件）"))
@@ -1922,7 +1931,7 @@ class GeminiWebSession:
             if not self._wait_page_focus(hwnd):
                 self._dbg("擬人操作：瀏覽器視窗沒有取得焦點，照樣嘗試")
             self._iso_eval(_MOVE_LISTENER_JS)
-            if first:
+            if first and not self.human_direct:
                 self._human_wander(rnd)
             if not self._human_click(editor, "輸入框", rnd, self._editor_focused,
                                      lambda: True, role="input"):
@@ -1959,7 +1968,7 @@ class GeminiWebSession:
         u32 = ctypes.windll.user32
         cur = wintypes.POINT()
         u32.GetCursorPos(ctypes.byref(cur))
-        pts, step = _human_path(cur.x, cur.y, int(x), int(y), rnd)
+        pts, step = _human_path(cur.x, cur.y, int(x), int(y), rnd, fast=self.human_direct)
         if len(pts) < 2:
             pts = [(int(x) - 2, int(y) + 1), (int(x), int(y))]
             step = step or 0.03

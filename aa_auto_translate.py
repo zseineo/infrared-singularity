@@ -1305,7 +1305,8 @@ def run_auto_translate(
             headless=headless, log=log, debug=dlog,
             input_method=getattr(cache, "gemini_input_method", "fill"),
             thinking_level=str(getattr(cache, "gemini_thinking_level", "") or ""),
-            send_method=getattr(cache, "gemini_send_method", "program"))
+            send_method=getattr(cache, "gemini_send_method", "program"),
+            human_direct=bool(getattr(cache, "gemini_human_direct", False)))
         open_log = "開啟瀏覽器並登入 Gemini…"
 
     # 待補翻列表（v2.30）：伺服器忙碌／逾時連續重試達上限（後端丟

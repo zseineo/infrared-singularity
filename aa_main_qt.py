@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.20"
+APP_VERSION = "3.21"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -783,6 +783,7 @@ class MainWindow(QMainWindow):
         self._gemini_profile_dir: str = ""
         self._gemini_max_per_session: int = 3
         self._gemini_input_method: str = "fill"   # 瀏覽器模式填入方式（gemini_web.INPUT_METHODS）
+        self._gemini_human_direct: bool = False   # 擬人操作滑鼠直接移動（不閒晃、較快）
         self._gemini_thinking_level: str = ""   # 瀏覽器模式思考程度 low／medium／high；空＝不調整
         self._gemini_send_method: str = "program"  # 瀏覽器模式送出方式（gemini_web.SEND_METHODS）
         self._gemini_required_model: str = "pro"
@@ -2029,6 +2030,8 @@ class MainWindow(QMainWindow):
                 1, int(params.get("max_per_session") or 3))
         if "input_method" in params:
             self._gemini_input_method = params.get("input_method") or "fill"
+        if "human_direct" in params:
+            self._gemini_human_direct = bool(params.get("human_direct"))
         if "thinking_level" in params:
             self._gemini_thinking_level = str(params.get("thinking_level") or "")
         if "error_policy" in params:
@@ -2865,6 +2868,7 @@ class MainWindow(QMainWindow):
             gemini_profile_dir=self._gemini_profile_dir,
             gemini_max_per_session=self._gemini_max_per_session,
             gemini_input_method=self._gemini_input_method,
+            gemini_human_direct=self._gemini_human_direct,
             gemini_thinking_level=self._gemini_thinking_level,
             gemini_send_method=self._gemini_send_method,
             gemini_required_model=self._gemini_required_model,
@@ -3003,6 +3007,7 @@ class MainWindow(QMainWindow):
             cache.gemini_max_per_session or 3))
         self._gemini_input_method = str(
             getattr(cache, "gemini_input_method", "fill") or "fill")
+        self._gemini_human_direct = bool(getattr(cache, "gemini_human_direct", False))
         self._gemini_thinking_level = str(
             getattr(cache, "gemini_thinking_level", "") or "")
         self._gemini_send_method = str(

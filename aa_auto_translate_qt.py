@@ -752,6 +752,15 @@ class AutoTranslatePanel(QWidget):
             "「擬人操作」一律用系統鍵盤貼上，不看這個設定。")
         form.addRow("填入方式：", self.input_method_combo)
 
+        # 擬人操作的滑鼠直接移動（v3.21）
+        self.human_direct_cb = QCheckBox("滑鼠直接移動（不閒晃、移動較快）")
+        self.human_direct_cb.setToolTip(
+            "只影響「擬人操作」送出方式：\n"
+            "・不勾：新對話第一則送出前，滑鼠會先在頁面隨意晃兩三下；每段移動約 0.2～0.9 秒\n"
+            "・勾選：不閒晃，直接滑到輸入框、再滑到送出鈕點擊；每段移動約 0.15～0.5 秒\n"
+            "移動仍是微彎的曲線、頭尾慢中間快，點擊前的停頓不變。")
+        form.addRow("擬人操作：", self.human_direct_cb)
+
         # 分隔線：上方為通用／瀏覽器設定，下方為 API 專屬設定
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -1255,6 +1264,7 @@ class AutoTranslatePanel(QWidget):
         idx = self.input_method_combo.findData(
             getattr(m, "_gemini_input_method", "fill") or "fill")
         self.input_method_combo.setCurrentIndex(max(0, idx))
+        self.human_direct_cb.setChecked(bool(getattr(m, "_gemini_human_direct", False)))
         self._set_send_method(getattr(m, "_gemini_send_method", "program") or "program")
         # 翻譯方式現於主頁，須在開啟面板時就反映已存後端（不必先開連線設定）
         backend = (getattr(m, "_translate_backend", "browser") or "browser")
@@ -1383,6 +1393,7 @@ class AutoTranslatePanel(QWidget):
             "required_model": self.model_combo.currentData(),
             "max_per_session": self.max_session_spin.value(),
             "input_method": self.input_method_combo.currentData(),
+            "human_direct": self.human_direct_cb.isChecked(),
             "thinking_level": self.thinking_combo.currentData(),
             # 進階設定：只記與預設不同的項目（預設日後調整時，未改過的項目跟著走）
             "error_policy": self._collect_error_policy(),
@@ -2221,7 +2232,7 @@ class AutoTranslatePanel(QWidget):
                   self.title_filter_edit, self.btn_title_from_series,
                   self.title_auto_cb, self.debug_log_cb,
                   self.gem_edit, self.model_combo, self.thinking_combo, self.max_session_spin,
-                  self.input_method_combo, *self._send_btns.values(),
+                  self.input_method_combo, self.human_direct_cb, *self._send_btns.values(),
                   self.doc_title_edit, self.out_edit, self.skip_existing_cb,
                   self.btn_url_list, self.group_by_series_cb, self.auto_number_cb,
                   self.btn_reorder,

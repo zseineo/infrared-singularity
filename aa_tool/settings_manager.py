@@ -205,6 +205,8 @@ class AppCache:
     gemini_max_per_session: int = 3
     # gemini_input_method：填入輸入框的方式 fill／quill／clipboard（見 gemini_web.INPUT_METHODS）。
     gemini_input_method: str = "fill"
+    # 擬人操作的滑鼠直接移動（v3.21）：不在頁面閒晃、移動較快
+    gemini_human_direct: bool = False
     # gemini_thinking_level：瀏覽器模式每個新對話把思考程度調成 low／medium／high；
     # 空字串＝不調整（v3.07；取代 v3.05 的 gemini_extended_thinking 開關）。
     gemini_thinking_level: str = ""
@@ -531,6 +533,8 @@ class SettingsManager:
                 pass
             cache.gemini_input_method = str(data.get(
                 'gemini_input_method', cache.gemini_input_method) or "fill")
+            cache.gemini_human_direct = bool(data.get(
+                'gemini_human_direct', cache.gemini_human_direct))
             if 'gemini_thinking_level' in data:
                 cache.gemini_thinking_level = str(data.get('gemini_thinking_level') or "")
             elif data.get('gemini_extended_thinking'):
@@ -744,6 +748,7 @@ class SettingsManager:
                 'gemini_profile_dir': cache.gemini_profile_dir,
                 'gemini_max_per_session': cache.gemini_max_per_session,
                 'gemini_input_method': cache.gemini_input_method,
+                'gemini_human_direct': cache.gemini_human_direct,
                 'gemini_thinking_level': cache.gemini_thinking_level,
                 'gemini_send_method': cache.gemini_send_method,
                 'gemini_selectors': cache.gemini_selectors,

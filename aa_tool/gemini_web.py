@@ -234,6 +234,17 @@ _THINKING_LEVEL_RE = {
 # v3.10 再改版：三個程度收進模型選單裡的「思考程度 ▸」子選單（點／滑過才展開）。
 # 先在主選單找程度項目，找不到就找首行含這些字的子選單項目點開再找。
 _THINKING_SUBMENU_RE = re.compile(r"思考|thinking|推理", re.I)
+# v3.23 再改版：模型選單項目的首行變成用途名稱（「快速解答」「全方位協助」「深度研究」），
+# 型號移到第二行（「3.5 Flash-Lite」「3.6 Flash」「3.1 Pro」）；模型按鈕只顯示「Flash-Lite」，
+# 不再顯示思考程度。以「版本數字＋空白開頭」的那一行當型號，沒有才退回首行（舊版面）。
+_MODEL_NAME_LINE_RE = re.compile(r"^\d+(?:\.\d+)*\s+\S")
+
+
+def model_name_of_item(text: str) -> str:
+    """模型選單項目文字中的型號那一行（「快速解答\n3.5 Flash-Lite」→「3.5 Flash-Lite」）。"""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    return next((ln for ln in lines if _MODEL_NAME_LINE_RE.match(ln)),
+                lines[0] if lines else "")
 
 # 額度上限訊息關鍵字（命中即視為撞額度，全小寫比對）。
 # 刻意只收「具體片語」，不收「額度」「升級」等單詞 —— 那些會出現在 Gemini 常駐
@@ -1028,9 +1039,11 @@ class GeminiWebSession:
             raise
         self._dbg(f"回覆：{reply.count(chr(10)) + 1 if reply else 0} 行／{len(reply)} 字")
         if self.thinking_level and self._debug is not None:
-            # 診斷用：送出後思考程度有沒有被 Gemini 彈回
-            cur = self._current_thinking_level()
-            self._dbg(f"回覆後思考程度：{THINKING_LEVELS.get(cur or '', cur or '讀不到')}")
+            # 診斷用：送出後思考程度有沒有被 Gemini 彈回。只看模型按鈕，不為了記 Log 多點開
+            # 一次選單（v3.23 版面按鈕不顯示程度＝讀不到就不記；下一次送出前的檢查會點開選單確認）
+            cur = self._current_thinking_level(menu=False)
+            if cur is None or cur:
+                self._dbg(f"回覆後思考程度：{THINKING_LEVELS.get(cur or '', '讀不到')}")
         self._health("回覆後")
         return reply
 
@@ -1323,9 +1336,12 @@ class GeminiWebSession:
         self._check_model()
         self._ensure_thinking()
 
-    def _current_thinking_level(self) -> str | None:
-        """模型按鈕第二行顯示的思考程度（low／medium／high）；讀不到按鈕回 None、
-        按鈕沒有第二行或認不出來回空字串。"""
+    def _current_thinking_level(self, menu: bool = True) -> str | None:
+        """目前的思考程度（low／medium／high）；讀不到按鈕回 None、認不出來回空字串。
+
+        先看模型按鈕第二行（v3.07～v3.22 的版面）。v3.23 改版後按鈕只顯示模型
+        （「Flash-Lite」），menu=True 時改點開選單、讀「思考程度」子選單裡打勾的項目，讀完關掉。
+        """
         picker = self._find("model_indicator")
         if picker is None:
             return None
@@ -1338,11 +1354,50 @@ class GeminiWebSession:
             for level, rx in _THINKING_LEVEL_RE.items():
                 if rx.search(ln.strip()):
                     return level
+        if not menu:
+            return ""
+        try:
+            picker.click()
+            self._page.wait_for_timeout(700)
+            return self._checked_thinking_level()
+        except Exception:  # noqa: BLE001
+            return ""
+        finally:
+            self._dismiss_menu()
+
+    @staticmethod
+    def _menu_item_checked(item) -> bool:
+        """選單項目是否為目前選中的那個（gem-menu-item：aria-checked="true"、class 帶 selected）。"""
+        try:
+            if item.get_attribute("aria-checked") == "true":
+                return True
+            return "selected" in (item.get_attribute("class") or "").split()
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _checked_thinking_level(self) -> str:
+        """（模型選單已點開）打勾的思考程度；程度收在子選單裡時先展開。認不出來回空字串。"""
+        for opened in (False, True):
+            found = False
+            for level, rx in _THINKING_LEVEL_RE.items():
+                item = self._menu_item_matching(rx)
+                if item is None:
+                    continue
+                found = True
+                if self._menu_item_checked(item):
+                    return level
+            if found or opened:
+                return ""
+            trigger = self._menu_item_matching(_THINKING_SUBMENU_RE)
+            if trigger is None:
+                return ""
+            trigger.click(timeout=_MODEL_CLICK_TIMEOUT_MS)
+            self._page.wait_for_timeout(600)
         return ""
 
     def _thinking_menu_item(self, level: str):
         """模型選單（已點開）裡該思考程度的項目；找不到回 None。
-        模型項目的首行以版本數字開頭（「3.6 Flash」），不會被誤認。
+        模型項目的首行是版本數字（「3.6 Flash」）或用途名稱（v3.23「全方位協助」），不會被誤認。
 
         v3.10：程度收在「思考程度 ▸」子選單裡時，先點開子選單再找。
         """
@@ -1382,7 +1437,7 @@ class GeminiWebSession:
         if not want:
             return
         label = THINKING_LEVELS[want]
-        cur = self._current_thinking_level()
+        cur = self._current_thinking_level(menu=False)
         if cur is None:
             self._log("⚠️ 讀不到思考程度（找不到模型按鈕），略過")
             return
@@ -1398,6 +1453,13 @@ class GeminiWebSession:
                 self._dismiss_menu()
                 self._log(f"⚠️ 模型選單裡找不到思考程度「{label}」（目前模型可能不支援），略過")
                 return
+            if not cur:
+                # 按鈕不顯示程度（v3.23 版面）：看子選單打勾的是哪個
+                if self._menu_item_checked(item):
+                    self._dismiss_menu()
+                    self._dbg(f"思考程度：已是「{label}」")
+                    return
+                cur = self._checked_thinking_level()
             item.click(timeout=_MODEL_CLICK_TIMEOUT_MS)
             self._page.wait_for_timeout(800)
         except Exception as e:  # noqa: BLE001 — 切不了只提醒，不中斷翻譯
@@ -1534,10 +1596,19 @@ class GeminiWebSession:
             time.sleep(min(1.0, remaining))
 
     def _dismiss_menu(self) -> None:
-        try:
-            self._page.keyboard.press("Escape")
-        except Exception:
-            pass
+        """按 Escape 關選單；子選單（思考程度）開著時一次只關一層，模型按鈕仍是展開狀態就再按。"""
+        for _ in range(3):
+            try:
+                self._page.keyboard.press("Escape")
+            except Exception:
+                return
+            try:
+                self._page.wait_for_timeout(150)
+                picker = self._find("model_indicator")
+                if picker is None or picker.get_attribute("aria-expanded") != "true":
+                    return
+            except Exception:
+                return
 
     def _try_select_model(self, req: str) -> tuple[str, str]:
         """點開模型選單、找符合 req 的項目並點選。
@@ -1583,7 +1654,7 @@ class GeminiWebSession:
                     continue
                 if not txt:
                     continue
-                name = txt.splitlines()[0].strip()  # 首行＝模型名
+                name = model_name_of_item(txt)  # 型號那一行（v3.23 起在第二行）
                 seen.append(name)
                 if target is None and model_matches(name, req):
                     target = item
@@ -1638,6 +1709,8 @@ class GeminiWebSession:
         """讀取頁面上顯示的目前模型名稱（例如 '2.5 Pro'）。讀不到回空字串。
 
         按鈕第二行是思考程度（「Flash」「高點」），合併成一行回傳（「Flash 高點」）。
+        v3.23 起按鈕只有一行（「Flash-Lite」）；模型按鈕本身（bard-mode-switcher）的短文字
+        不必含已知關鍵字也採用，新型號（「Argon」）才讀得到、不會被當成讀不到而略過檢查。
         """
         for sel in self.selectors.get("model_indicator", []):
             try:
@@ -1651,7 +1724,7 @@ class GeminiWebSession:
             if 1 <= len(text) <= 60 and any(
                 kw in text.lower() for kw in
                 ("pro", "flash", "ultra", "gemini", "2.5", "3.0", "3.1", "3.5", "3.6")
-            ):
+            ) or (sel.startswith("bard-mode-switcher") and 1 <= len(text) <= 30):
                 return " ".join(text.split())
         return ""
 

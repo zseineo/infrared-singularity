@@ -1310,6 +1310,28 @@ def _dialogue_region(line: str) -> 'tuple[int, int, bool] | None':
     return start, end, has_gap
 
 
+# symbol_regex 未收錄、但確定是 AA 筆畫的字元（`_embedded_in_aa` 用）
+_AA_STROKE_CHARS = set('`´^{}=_/\\~¨\'"-‐')
+
+
+def _embedded_in_aa(line: str, start: int, end: int,
+                    symbol_regex: re.Pattern) -> bool:
+    """候選 [start, end) 是否左右**都**緊貼 AA 筆畫（中間沒有空白）。
+
+    AA 筆畫＝AA 噪聲（半形片假名／AA 標點／symbol_regex 命中）或
+    `_AA_STROKE_CHARS`；對話框記號不算。刻意採正面表列 — 台詞常被 ♥♪×＝
+    這類符號夾住（「♥あっ♥」「×２だよ、閣下❤」），那不是 AA。
+    """
+    def aa(ch: str) -> bool:
+        return (ch not in _DIALOGUE_LEFT_MARKERS
+                and ch not in _DIALOGUE_RIGHT_MARKERS
+                and (ch in _HALFWIDTH_KANA_CHARS or ch in _AA_PUNCT_CHARS
+                     or ch in _AA_STROKE_CHARS
+                     or bool(symbol_regex.match(ch))))
+    return (start > 0 and aa(line[start - 1])
+            and end < len(line) and aa(line[end]))
+
+
 def _in_clean_cluster(line: str, start: int, end: int) -> bool:
     """候選 [start, end) 所在的「空白團」是否全是合法內文字元。
 
@@ -1379,12 +1401,20 @@ def _is_dialogue_box_bounded(line: str, start: int, end: int) -> bool:
     # box 邊框 `┃`，即「|┃その時┃」）仍算合法邊框，不排除。
     if line[i] in _PIPE_MARKERS and i - 1 >= 0 and line[i - 1] == line[i]:
         return False
+    # 豎線外側緊貼半形片假名（「,ｲ|　　寸ん.　|」的 `ｲ|`）：那條豎線是 AA 筆畫的
+    # 一部分，不是對話框邊框。
+    if (line[i] in _PIPE_MARKERS and i - 1 >= 0
+            and line[i - 1] in _HALFWIDTH_KANA_CHARS):
+        return False
     j = end
     while j < len(line) and line[j].isspace():
         j += 1
     if not (j < len(line) and line[j] in _DIALOGUE_RIGHT_MARKERS):
         return False
     if line[j] in _PIPE_MARKERS and j + 1 < len(line) and line[j + 1] == line[j]:
+        return False
+    if (line[j] in _PIPE_MARKERS and j + 1 < len(line)
+            and line[j + 1] in _HALFWIDTH_KANA_CHARS):
         return False
     return True
 
@@ -1500,6 +1530,15 @@ def _extract_experimental_line(
         while text and text[0] in 'ゝゞ':
             text = text[1:]
             s += 1
+        # 落單的 `''`：半形雙撇號當引號用時必成對（「''気配''」）。首尾落單的那個
+        # 是 AA 筆畫被擴展吃進來（「芯ぅ''」），剝除後回到真實邊界。
+        if (text.count("''") % 2 == 1 and "'''" not in text):
+            if text.endswith("''"):
+                text = text[:-2]
+                e -= 2
+            elif text.startswith("''"):
+                text = text[2:]
+                s += 2
         # 一般候選需 ≥ 3 char；長度 2 的特殊放行見 `_allows_len2`。
         # 注意：通過 min_len 不等於最終保留，後續的 score 過濾與孤立過濾還會
         # 進一步把可疑短候選擋下。
@@ -1547,13 +1586,29 @@ def _extract_experimental_line(
     def side(pos: int) -> bool:
         return split_at is not None and pos >= split_at
 
-    companion_sides = {side(s) for t, s, _ in out if len(t) >= 5}
+    # 「長度 ≥4 即保留」的例外：去掉首尾半形點點後不足 4 字、且本體被詞典判定
+    # 為強雜訊者（「にう......」— 長度是裝飾點點撐出來的）仍視為短候選。
+    # 「...そして」（本體是已知詞）與「……ふふ.」（全形刪節號不算裝飾）不受影響。
+    # 另外，實字 ≤4 且左右都緊貼 AA 筆畫的候選（`_embedded_in_aa`，如
+    # 「ﾆくつく`」的「くつく」）是嵌在圖裡的筆畫，不論其他條件一律剔除。
+    def long_enough(t: str) -> bool:
+        core = t.strip('.．')
+        return len(t) >= 4 and not (len(core) < 4
+                                    and _janome_signal(core) < 0)
+
+    companion_sides = {side(s) for t, s, _ in out
+                       if len(t) >= 5 and long_enough(t)}
     if block not in ('text', 'struct'):
         kept = []
         for t, s, e in out:
+            if (len(_LETTER_RE.findall(t)) <= 4
+                    and _embedded_in_aa(line, s, e, symbol_regex)):
+                if rejected_sink is not None:
+                    rejected_sink.append(t)
+                continue
             if (side(s) in companion_sides
                     or (companion_sides and _in_clean_cluster(line, s, e))
-                    or len(t) >= 4
+                    or long_enough(t)
                     or _is_strong_short_candidate(t)
                     or _is_right_edge_dialogue(line, s, e)
                     or (_in_dialogue_region(line, s, e, require_gap=False)

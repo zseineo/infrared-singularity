@@ -1970,7 +1970,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-per-session", type=int, default=None,
                         help="同一對話最多送幾次後開新對話（覆寫設定）")
     parser.add_argument("--required-model", default="",
-                        help="要求的模型（pro／flash／flash-lite／any，預設讀設定）")
+                        help="要求的模型（pro／hydrogen／flash-lite／any，預設讀設定）")
     parser.add_argument("--doc-title", default="",
                         help="作品名稱（手動模式檔名前綴）；預設 '未命名'")
     parser.add_argument("--auto-fill-title", action="store_true",

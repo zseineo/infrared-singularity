@@ -146,7 +146,7 @@ _BACKEND_BTN_UNSEL = (
 # (顯示文字, 內部值)；內部值需與 aa_tool.gemini_web.model_matches 一致。
 _MODEL_OPTIONS: list[tuple[str, str]] = [
     ("Pro", "pro"),
-    ("Flash", "flash"),
+    ("Hydrogen", "hydrogen"),   # v3.24 取代 Flash（Gemini 選單的 3.6 Flash 換成 4 Hydrogen）
     ("Flash-Lite", "flash-lite"),
     ("不檢查（任何模型都接受）", "any"),
 ]

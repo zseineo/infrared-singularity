@@ -144,7 +144,8 @@ def model_matches(detected: str, required: str) -> bool:
     required 可選值：
       - ``""`` / ``"any"`` → 不檢查，永遠視為符合
       - ``"pro"``        → 字串含 ``pro`` 且不含 ``flash``
-      - ``"flash"``      → 字串含 ``flash`` 但不含 ``lite``
+      - ``"hydrogen"``   → 字串含 ``hydrogen``（v3.24：Gemini 以「4 Hydrogen」取代 3.6 Flash，
+        原本的 ``"flash"`` 選項改成這個；舊設定的 ``"flash"`` 讀取時轉成 ``"hydrogen"``）
       - ``"flash-lite"`` → 字串含 ``flash`` 且含 ``lite``
 
     讀不到模型字串（``detected`` 為空）時回 True（不阻擋，但會在 Log 顯示警告）；
@@ -159,8 +160,8 @@ def model_matches(detected: str, required: str) -> bool:
         return "pro" in d and "flash" not in d
     if required == "flash-lite":
         return "flash" in d and "lite" in d
-    if required == "flash":
-        return "flash" in d and "lite" not in d
+    if required == "hydrogen":
+        return "hydrogen" in d
     return True  # 未知 required 值 → 不阻擋
 
 
@@ -1723,7 +1724,7 @@ class GeminiWebSession:
             # 模型字串通常很短（如 "2.5 Pro"、"Gemini 2.5 Pro"），過長視為命中錯元素。
             if 1 <= len(text) <= 60 and any(
                 kw in text.lower() for kw in
-                ("pro", "flash", "ultra", "gemini", "2.5", "3.0", "3.1", "3.5", "3.6")
+                ("pro", "flash", "hydrogen", "ultra", "gemini", "2.5", "3.0", "3.1", "3.5", "3.6")
             ) or (sel.startswith("bard-mode-switcher") and 1 <= len(text) <= 30):
                 return " ".join(text.split())
         return ""

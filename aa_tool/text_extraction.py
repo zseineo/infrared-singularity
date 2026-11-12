@@ -96,6 +96,8 @@ _POSTER_LINE_RE = re.compile(r'ID:[A-Za-z0-9+/.]{6,}')
 # 提取後再 `_DICE_NOTATION_FW_RE` 把它換回半形，使最終輸出維持原始的半形冒號。
 _DICE_NOTATION_RE = re.compile(r'(【\d+D\d+):(\d+】)')
 _DICE_NOTATION_FW_RE = re.compile(r'(【\d+D\d+)：(\d+】)')
+# 候選後方 1~2 個空白接骰子（評分用的強脈絡，見 `_score_candidate`）
+_DICE_SUFFIX_RE = re.compile(r'[ 　]{1,2}【\d+[DdＤｄ]\d+[:：]')
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -189,7 +191,11 @@ _SPEAKER_TAG_PREFIX_RE = re.compile(r'^【[^【】！？。：…、，]{1,8}】
 def _strip_speaker_tag(text: str) -> str:
     """剝除開頭的「【說話者】」名牌前綴（後仍有內容時）。見 `_SPEAKER_TAG_PREFIX_RE`。"""
     m = _SPEAKER_TAG_PREFIX_RE.match(text)
-    return text[m.end():] if m else text
+    if not m:
+        return text
+    # 名牌後的連接橫線（「【響】───だってさ」）一併剝除，但不可剝到空
+    rest = text[m.end():]
+    return rest.lstrip('─━') or rest
 
 # 半形片假名 — AA 圖最大宗的噪聲來源
 _HALFWIDTH_KANA_CHARS = set(chr(c) for c in range(0xFF66, 0xFFA0))
@@ -222,6 +228,8 @@ _SHORT_UTT_RE = re.compile(
 # 為避免放掉 AA 圖中的純片假名碎片：恰好 2 片假名 + 標點的最短型（`_SHORT_KATA_UTT_RE`）
 # 須位於括號區間內才保留（見 `_extract_experimental_line` 的 bracket 閘）。
 _KATA_UTT_RE = re.compile(r'[゠-ーヿ]{2,}[！？]')
+_HIRA_ELLIPSIS_RE = re.compile(r'(?<![ぁ-ゖァ-ヺ一-鿿])[ぁ-ゖ]…{2,}')
+_KANA2_SEG_RE = re.compile(r'(?<![^ 　┃║])([ぁ-ゖァ-ヺ]{2})(?=[ 　]|$)')
 _SHORT_KATA_UTT_RE = re.compile(r'^[゠-ーヿ]{2}[！？]+$')
 
 # 平假名 + 真片假名（非 ー）+ 平假名 — 「こンっ」這類片假名單字夾在平假名間。
@@ -438,6 +446,7 @@ def _janome_signal(core: str) -> int:
                   # 會誤判為強日文，一律中性交回 _REPEAT_* 懲罰處理
     total = known = 0
     max_known_len = 0
+    known_kanji_tokens = 0
     try:
         tokens = list(tk.tokenize(core))
     except Exception:
@@ -452,6 +461,8 @@ def _janome_signal(core: str) -> int:
             total += len(surf)
             known += len(surf)
             max_known_len = max(max_known_len, len(surf))
+            if _KANJI_RE.search(surf):
+                known_kanji_tokens += 1
             continue
         # 未知詞
         if len(set(surf)) == 1:
@@ -467,6 +478,13 @@ def _janome_signal(core: str) -> int:
     ratio = known / total
     if ratio >= 0.95 and max_known_len >= 2:
         return 2
+    # 全是已知詞、且其中 ≥2 個是漢字詞：單一漢字本身就是完整語素（「半/人/半/獣
+    # /の/王」「二/撃/決/殺」「急/に/何/す」），不是「にんり」那種假名單字拼湊。
+    # 門檻取 3：AA 的「杙ん汐」「灯芥ぅ」也湊得出 2 個生僻漢字詞。含數字的
+    # 不適用（「性能値：06」數值格維持原判定）。
+    if (ratio >= 0.95 and known_kanji_tokens >= 3
+            and not any(ch.isdigit() for ch in core)):
+        return 0
     if ratio < 0.5 or max_known_len <= 1:
         # 吃音（片假名+讀點+同片假名，「ヤ、ヤバい」）是強對話特徵，
         # 俚語（ヤバい）常不在詞典，不可因未知詞比例誤殺。
@@ -480,7 +498,8 @@ def _janome_signal(core: str) -> int:
 # （如「【質問】」「【フリーナ】」「《頭砕》」「〔砲剣〕」「〚ついばむ〛」）。內容不可含空白或
 # 巢狀括號；「」（） 不納入 — AA 圖常借 「（ 作裝飾筆畫，成對誤命中率高。
 _BRACKET_TERM_RE = re.compile(
-    r'[【《〔『〚][^\s　【】《》〔〕『』〚〛]{1,12}[】》〕』〛]')
+    r'[【《〔『〚][^\s　【】《》〔〕『』〚〛]{1,12}'
+    r'(?:[ 　][^\s　【】《》〔〕『』〚〛]{1,12})?[】》〕』〛]')
 # 連續 ≥3 漢字：純漢字名詞（「主人公」「難易度」「王国元老院」）。只在
 # 「文字區塊」內作為錨點 — AA 圖大量借用裝飾漢字（淡上丕旦丑…），
 # 無區塊脈絡時此錨點假陽性過高。
@@ -531,6 +550,7 @@ def _line_block_signal(line: str, symbol_regex: re.Pattern) -> str:
     `= / _ { } ^` 等常見筆畫不在 symbol_regex 裡，只算噪聲會把
     「《==|ぃぃ　＿_ぃぃ《==》ノ/」這種左側 AA 低估成 0.19。
     """
+    full_line = line
     reg = _dialogue_region(line)
     if reg is not None and reg[2]:
         left = line[:reg[0]]
@@ -558,7 +578,12 @@ def _line_block_signal(line: str, symbol_regex: re.Pattern) -> str:
     noise = sum(1 for i, ch in enumerate(line)
                 if marked[i] and not ch.isspace())
     ratio = noise / non_space if non_space else 0.0
-    if (non_space and ratio < 0.3
+    # 另以「非合法內文字元」佔比把關：`; ' = { }` 等不在 symbol_regex 裡的筆畫
+    # 佔多數的行（「にんり`ﾉ＼/-ヽjI斗-＝ﾆ　…,ィ升;';';';」）不是文字行。
+    invalid = sum(1 for ch in line
+                  if not ch.isspace() and not _is_valid_char(ch)
+                  and ch not in _TEXT_BLOCK_EXTRA_CHARS)
+    if (non_space and ratio < 0.3 and invalid / non_space < 0.3
             and any(len(set(m.group(0))) >= 2
                     for m in _LINE_HIRA_RUN3_RE.finditer(line))):
         return 'T'
@@ -573,16 +598,38 @@ def _line_block_signal(line: str, symbol_regex: re.Pattern) -> str:
     # 「┃　TP1<腕> ：遠隔・槍/攻撃力に+(SL/2)した…」散落平假名 <4 不滿足規則二）
     # → 擴展字元不放行 → 在 /() 處切碎。框線／量表／半形 | 是結構標記，從噪聲
     # 比的分子分母同時剔除後再判。
+    # 整行乾淨文字：整行（去頭尾空白）就是一個對話區、左側沒有任何東西，且含
+    # ≥3 個相異的非筆畫實字 → 文字行。原本的 'T' 需要連續平假名，純片假名／
+    # 漢字假名混寫的獨立短行（「先発　ピカチュウ」「デスメイカー感」
+    # 「ビンゴォ・・・」）因此落成中性、被無平假名懲罰擋掉。AA 行幾乎必含非合法
+    # 內文字元；整行只有「して」「へへ」這種 2 字的不算。
+    # 半形括號在這裡視同全形（「魔王軍　竜の軍団　隊長　ゴール(ブラックドラゴン)」）。
+    # 文字區塊擴展字元（量表 ■□、＜＞ 等）在這裡視同中黑點（合法內文、非實字；
+    # 「スシヌ　：　■■■＜MAX＞」）。
+    creg = reg if reg is not None else _dialogue_region(
+        ''.join('・' if ch in _TEXT_BLOCK_EXTRA_CHARS or ch in '△▲' else ch
+                for ch in full_line.replace('(', '（').replace(')', '）')))
+    if (creg is not None and not full_line[:creg[0]].strip()
+            and not _AA_WALL_RUN_RE.search(full_line)):
+        distinct = {ch for ch in _LETTER_RE.findall(full_line[creg[0]:creg[1]])
+                    if not symbol_regex.match(ch)}
+        # 須含 ≥2 個相異假名：純漢字的獨立行（「○武装魔法」「通常強化」）依政策不抓
+        if len(distinct) >= 3 and sum(
+                1 for ch in distinct if _KANA_LETTER_RE.match(ch)) >= 2:
+            return 'T'
     stripped = line.lstrip(' 　')
     if stripped and (stripped[0] in _BOX_LEAD_CHARS
                      or stripped.startswith('||')):
+        # 頭尾都是重框線（「┃　ティアマト　　ｴﾝｼｪﾝﾄ　┃」）：框內的半形片假名是
+        # 表格內容，不算噪聲
+        closed = stripped.rstrip()[-1:] in _BOX_LEAD_CHARS
         s_non_space = s_noise = content = 0
         for i, ch in enumerate(line):
             if (ch.isspace() or ch in _BOX_LEAD_CHARS
                     or ch in _GAUGE_CHARS or ch == '|'):
                 continue
             s_non_space += 1
-            if marked[i]:
+            if marked[i] and not (closed and ch in _HALFWIDTH_KANA_CHARS):
                 s_noise += 1
             cp = ord(ch)
             if 0x3041 <= cp <= 0x30FF or 0x4E00 <= cp <= 0x9FFF or ch == '々':
@@ -660,6 +707,20 @@ def _find_anchors(line: str, in_text_block: bool = False) -> list[tuple[int, int
         anchors.append((m.start(), m.end()))
     for m in _KATA_UTT_RE.finditer(line):
         anchors.append((m.start(), m.end()))
+    # 單一平假名＋刪節號（「…ですわ だ……」的「だ……」）：語尾被空白隔開的一拍。
+    # 刪節號 `…` AA 不用；能否保留仍看分數與同側伴隨。
+    for m in _HIRA_ELLIPSIS_RE.finditer(line):
+        anchors.append((m.start(), m.end()))
+    # 框線開頭的表格列（「┃　ネギ　　…」）：2 個相異假名的段是名稱欄
+    if line.lstrip(' 　')[:1] in _BOX_LEAD_CHARS:
+        for m in _KANA2_SEG_RE.finditer(line):
+            if m.group(1)[0] != m.group(1)[1]:
+                anchors.append((m.start(1), m.end(1)))
+    # 重框線之間的半形片假名詞（「┃　ヘラクレス　　ﾓﾝｽﾀｰ　┃」）
+    for m in _HALFWIDTH_KANA_RUN3_RE.finditer(line):
+        if (any(c in '┃║' for c in line[:m.start()])
+                and any(c in '┃║' for c in line[m.end():])):
+            anchors.append((m.start(), m.end()))
     # 成對術語括號錨點（不限區塊）：內容需含 CJK 實字（漢字／假名）才算，
     # 排除「【1D100:38】」這類純骰子（另有 _DICE 處理）以外的純英數雜訊。
     for m in _BRACKET_TERM_RE.finditer(line):
@@ -728,6 +789,9 @@ def _is_valid_char(ch: str) -> bool:
 _TEXT_BLOCK_EXTRA_CHARS = set('/()[]<>＜＞=＝｡､・◆◇■□─━÷×〔〕')
 
 
+_TRAILING_HW_WORD_RE = re.compile(r'[ｦ-ﾟ]{4,}(?=[ 　]|$)')
+
+
 def _expand_boundary(line: str, start: int, end: int,
                      block: str = 'neutral') -> tuple[int, int]:
     """從錨點 [start, end) 向兩側擴張到非 valid char / 連續空白邊界。
@@ -751,7 +815,7 @@ def _expand_boundary(line: str, start: int, end: int,
         if ch in (' ', '　'):
             # 只要遇到空白就停（連續空白 / AA padding 邊界）
             break
-        if not ok(ch):
+        if not (ok(ch) or (in_region and ch in '()')):
             break
         start -= 1
     # 向右
@@ -759,9 +823,16 @@ def _expand_boundary(line: str, start: int, end: int,
         ch = line[end]
         if ch in (' ', '　'):
             break
-        if not (ok(ch) or (in_region and ch in '─━')):
+        if not (ok(ch) or (in_region and ch in '─━()')):
             break
         end += 1
+    # 句子後面緊接（無空白）一整段半形片假名、且該段一路到空白或行尾：那是台詞的
+    # 一部分（「…イカれたメンバー、ｹﾞﾌﾝｹﾞﾌﾝ」的咳嗽聲），不是 AA。前面須已是含
+    # 平假名的 ≥5 字句子，半形段須 ≥4 字。
+    m = _TRAILING_HW_WORD_RE.match(line, end)
+    if (m and end - start >= 5
+            and any(0x3041 <= ord(c) <= 0x3096 for c in line[start:end])):
+        end = m.end()
     return start, end
 
 
@@ -961,7 +1032,10 @@ def _score_candidate(text: str, line: str, start: int, end: int,
         s += w('box_bounded')
     # 名牌前綴 bonus + 密度豁免：候選前方為「【說話者】───」名牌時，
     # 名牌後的對話常被破折號 `───`（屬 symbol_regex）拉高局部密度而誤殺。
-    has_name_tag = bool(_NAME_TAG_PREFIX_RE.search(line[:start]))
+    # 候選後方緊接骰子（「尚シュナイゼル　【1D2:2】」「ゴブの躍進　【1D100:2】」）
+    # 同樣是強脈絡：骰子前面的就是判定項目名。
+    has_name_tag = bool(_NAME_TAG_PREFIX_RE.search(line[:start])
+                        or _DICE_SUFFIX_RE.match(line[end:]))
     if has_name_tag:
         s += w('name_tag')
     # 成對術語括號 bonus + 密度/無平假名豁免：候選整體是「【…】《…》〔…〕『…』」
@@ -1014,7 +1088,11 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     # 文字行豁免：半形片假名詞（「ﾓﾝｽﾀｰ」）在文字行是內容非噪聲。
     # 以 core（剝除首尾點點）計算 — 「大将赤犬が.....」的裝飾點點
     # 會把噪聲比拉過 0.4，但候選本體是乾淨的日文。
+    # 重框線表格內的純半形片假名詞（「ﾓﾝｽﾀｰ」）是內容，同樣豁免。
     if (len(text) >= 4 and block not in ('text', 'struct')
+            and not (is_box_bounded
+                     and all(ch in _HALFWIDTH_KANA_CHARS for ch in text)
+                     and any(c in '┃║' for c in line[:start]))
             and aa_noise_ratio(core, symbol_regex) > 0.4):
         s += w('self_noise')
     # 註：曾評估「整行 AA 比例懲罰」，但實測無效 — AA 圖常用 content-class 字元
@@ -1030,7 +1108,13 @@ def _score_candidate(text: str, line: str, start: int, end: int,
             and not strong_jp):
         s += w('class_trans')
     # 連續相同片假名懲罰：AA 圖邊框/裝飾特徵；行尾對話豁免（涵蓋「ハハハ」笑聲）
-    if _REPEAT_KATAKANA_RE.search(text) and not is_right_edge:
+    # 對話框內同樣豁免（「|　ハハハハハ　|」）
+    # （兩側都緊貼豎線的不算 —「|ニ|ヨヨヨヨヨ|ニ|」是 AA 牆；「＜ガキィィィィン！！＞」
+    # 這種緊貼 ＜＞ 的狀聲字照樣豁免）
+    box_text = is_box_bounded and not (
+        line[start - 1:start] in _PIPE_MARKERS
+        and line[end:end + 1] in _PIPE_MARKERS)
+    if _REPEAT_KATAKANA_RE.search(text) and not (is_right_edge or box_text):
         s += w('repeat_kata')
     # 連續相同小字假名懲罰：「ぃぃぃ」這類 AA 裝飾
     if _REPEAT_SMALL_HIRA_RE.search(text) and not is_right_edge:
@@ -1082,7 +1166,7 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     if block in ('text', 'struct') and not (
             len(set(text)) == 1 and len(text) >= 3 and not is_right_edge):
         s += w('block_text')
-    elif block == 'aa' and not (any_hira
+    elif block == 'aa' and not (any_hira or box_text
                                 or is_right_edge or has_name_tag
                                 or is_bracket_term or has_num_option
                                 or any(ch in text for ch in '！？')):
@@ -1106,7 +1190,8 @@ def _score_candidate(text: str, line: str, start: int, end: int,
         if is_whole_segment and _janome_signal(core) > 0:
             s += 2
     elif (t <= s <= t + 4 and len(core) >= 3 and block != 'struct'
-          and not any(ch in text for ch in '！？')):
+          and not any(ch in text for ch in '！？…')):
+        # 含刪節號「…」者不殺（「怖っ……」「え、えぇ――……」）：AA 不用這個字。
         # 長度 ≥3 才殺：「私だ」「君は」這類 2 字真句每個 token 都是單字元，
         # 與「にんり」型拼湊無法用詞典區分，交回既有規則。
         # 'struct'（框線引導的名牌／表格行）不殺：未知專名（「カルラ」
@@ -1125,8 +1210,9 @@ def _score_candidate(text: str, line: str, start: int, end: int,
             and any(ch.isspace() for ch in line[reg[0]:reg[1]]))
         long_hira = any(len(set(m.group(0))) >= 4
                         for m in _LONG_HIRA_RUN_RE.finditer(text))
+        # 成對術語括號也不殺（「【２年後】」：２/年/後 全是單字元詞）
         if (not in_multi_seg_region and not long_hira
-                and _janome_signal(core) < 0):
+                and not is_bracket_term and _janome_signal(core) < 0):
             s = t - 1
     return s
 
@@ -1182,6 +1268,89 @@ def _find_kata_sentence(line: str) -> list[tuple[str, int, int]]:
     return out
 
 
+# AA 專用漢字：只被拿來當眼睛／頭髮／衣褶筆畫、正常台詞不會用的字。
+# 64 篇約 1.7 萬筆提取實測：含這些字的提取項全是 AA 碎片（「'沁う》」「仡う沁,、」
+# 「つてこ乂」），沒有任何正常台詞。刻意不收 芥／灯／斧／示／込／寸／升／汐
+# 這些 AA 也常用、但正常日文同樣會出現的字。
+_AA_ONLY_KANJI_RE = re.compile(r'[沁仡笊弋抒辷圦爻癶廴从乂彡杙]')
+_LEAD_DOTS_RE = re.compile(r'[.．]{1,2}(?![.．])')
+# 「有內容」的字元：實字、英數，以及會被翻譯保留的語氣標點（刪節號、驚嘆問號、破折號）
+_CONTENT_RE = re.compile(r'[ぁ-ゖァ-ヺ一-鿿々0-9０-９A-Za-zＡ-Ｚａ-ｚ…・！？!?―]')
+
+
+def _trim_candidate(text: str, s: int, e: int) -> 'tuple[str, int, int]':
+    """剝除邊界擴展從 AA／排版吃進來的首尾字元，回傳 (text, s, e)。
+
+    - 開頭的疊字記號 ゝゞ：疊字記號重複「前一個」假名，不可能出現在詞首
+      （「ゝYこぅ」→「Yこぅ」，再由 AA latin 前綴懲罰擋下）。
+    - 首尾落單的 `''`：半形雙撇號當引號用時必成對（「''気配''」）；落單的是 AA
+      筆畫（「芯ぅ''」）。
+    - 開頭 1~2 個半形／全形點點：對齊用的填充（「..ヴィーシャ大佐」
+      「.【ヴィーシャ准将」「.ギガデイン！！」）。3 個以上是刪節號
+      （「...そして」），保留。
+    """
+    while text and text[0] in 'ゝゞ':
+        text = text[1:]
+        s += 1
+    if text.count("''") % 2 == 1 and "'''" not in text:
+        if text.endswith("''"):
+            text = text[:-2]
+            e -= 2
+        elif text.startswith("''"):
+            text = text[2:]
+            s += 2
+    m = _LEAD_DOTS_RE.match(text)
+    if m and m.end() < len(text):
+        text = text[m.end():]
+        s += m.end()
+    # 開頭的框線橫線（文字區塊的擴展字元）：「───だってさ」「━前回より数カ月後━」
+    # 的橫線是裝飾框；開頭有才連帶剝掉結尾對稱的那段。句尾拉長線（「お見事───」）
+    # 只出現在結尾，不受影響。
+    # 結尾是完整的成對術語括號、而括號前只有符號（「-)：【安価】」）：只留括號
+    m = None
+    for m in _BRACKET_TERM_RE.finditer(text):
+        pass
+    if (m is not None and m.end() == len(text) and m.start() > 0
+            and not _CONTENT_RE.search(text[:m.start()])):
+        s += m.start()
+        text = text[m.start():]
+    lead = len(text) - len(text.lstrip('─━'))
+    if lead and lead < len(text):
+        text = text[lead:]
+        s += lead
+        tail = len(text) - len(text.rstrip('─━'))
+        if tail and tail < len(text):
+            text = text[:-tail]
+            e -= tail
+    return text, s, e
+
+
+def _aa_veto(text: str) -> 'str | None':
+    """候選是否為「正常日文不會出現的形狀」；是則回傳原因（硬否決），否則 None。"""
+    if _AA_WALL_RUN_RE.search(text):
+        return '含 AA 牆（牆面用字同字連續 ≥3）'
+    if _AA_EYE_MOTIF_RE.search(text):
+        return '含 AA 眼睛筆畫「うぅ」（前接漢字／片假名或後接 ミ／x 等）'
+    if _AA_HAND_RE.fullmatch(text):
+        return 'AA 的手（と…つ）'
+    if _AA_ONLY_KANJI_RE.search(text):
+        return '含 AA 專用漢字（沁仡笊弋… 這類只當筆畫用的字）'
+    # 「丶」落在漢字區段但是 AA 筆畫，不算實字
+    letters = [c for c in _LETTER_RE.findall(text) if c != '丶']
+    # 同一個漢字重複且沒有別的實字（「丁丁！」「人人」）：日文的疊字寫「々」
+    if (len(letters) >= 2 and len(set(letters)) == 1
+            and '一' <= letters[0] <= '鿿'):
+        return '同一漢字重複（日文疊字用「々」）'
+    if re.search(r'([一-鿿])\1\1', text):
+        return '同一漢字連續 ≥3（「圭圭圭圭」）'
+    # 沒有任何實字／英數／半形片假名，也不是沉默或驚訝的「・・・」「……」
+    # 「？？？」「！！！！」：只剩括號標點（「）」」「<丶、」「：」「。」）
+    if not letters and not re.search(
+            r'[0-9０-９A-Za-zＡ-Ｚａ-ｚ①-⑳ｦ-ﾟ・…！？!?]', text):
+        return '只有括號／標點，沒有內容'
+    return None
+
+
 def _allows_len2(text: str, line: str, start: int, end: int) -> bool:
     """長度 2 的候選是否特別放行（一般候選需 ≥ 3 char）。
 
@@ -1196,10 +1365,21 @@ def _allows_len2(text: str, line: str, start: int, end: int) -> bool:
     """
     if _SHORT_UTT_RE.fullmatch(text) or _HIRAGANA_RUN_RE.fullmatch(text):
         return True
+    # 框線開頭的表格列裡的 2 字假名名稱（「┃　ネギ」）
+    if (line.lstrip(' 　')[:1] in _BOX_LEAD_CHARS
+            and _KANA2_SEG_RE.match(line, start) and end - start == 2
+            and text[0] != text[1]):
+        return True
+    # 整行就只有這 2 個字的「漢字＋平假名」（「餌か」）也放行
+    if (_KANJI_HIRA_RE.fullmatch(text)
+            and _in_dialogue_region(line, start, end, require_gap=False)):
+        return True
     if not _is_right_edge_dialogue(line, start, end):
         return False
+    # 單一漢字＋讀點（「小、」）不放行 — 讀點不是句末，AA 右緣常見這種碎片
     return bool(_KANJI_HIRA_RE.fullmatch(text)
-                or _KANJI_END_PUNCT_RE.fullmatch(text)
+                or (_KANJI_END_PUNCT_RE.fullmatch(text)
+                    and not text.endswith('、'))
                 or _janome_signal(text) > 0)
 
 
@@ -1293,14 +1473,24 @@ def _dialogue_region(line: str) -> 'tuple[int, int, bool] | None':
     has_gap = start is not None
     if start is None:
         start = len(line) - len(line.lstrip())
-    elif (line[start] in _PIPE_MARKERS and start + 1 < end
+    if start < end and line[start] in '＜<':
+        # 「＜ナザリック地下大墳墓　第十階層『玉座』＞」：開頭的對話框記號不算內容
+        start += 1
+        while start < end and line[start].isspace():
+            start += 1
+    elif (has_gap and line[start] in _PIPE_MARKERS and start + 1 < end
           and line[start + 1].isspace()):
         start += 1
         while start < end and line[start].isspace():
             start += 1
-    for ch in line[start:end]:
+    # 成對的半形括號（「…ステータスは21(+2)だろう。」）視為內文；落單的是 AA 筆畫
+    body = line[start:end]
+    parens_ok = (body.count('(') == body.count(')')
+                 and body.find('(') <= body.find(')'))
+    for ch in body:
         if not (ch.isspace() or _is_valid_char(ch)
-                or ch in _RIGHT_EDGE_CLOSERS):
+                or ch in _RIGHT_EDGE_CLOSERS
+                or (parens_ok and ch in '()')):
             return None
     segs = line[start:end].split()
     if any(_LONE_LATIN_SEG_RE.fullmatch(seg) for seg in segs):
@@ -1390,9 +1580,15 @@ def _is_dialogue_box_bounded(line: str, start: int, end: int) -> bool:
     這類對話框內的合法日文 — 候選因鄰近 `│|｜` 邊框會被 `_local_aa_density`
     判定為高 AA 密度而誤殺，此機制把這種「自帶 AA 邊界」情境視為強信號。
     """
-    # 空白判定用 `str.isspace()`：框內常混用窄空白（U+2005／U+2009 等）微調寬度
+    # 重框線表格列（「┃　ヘラクレス　　ﾓﾝｽﾀｰ　┃」）：候選左右各有一條重框線即算
+    # 框內 — AA 筆畫不用 ┃║，同一列有多欄時候選不會緊鄰邊框。
+    if (any(c in '┃║' for c in line[:start])
+            and any(c in '┃║' for c in line[end:])):
+        return True
+    # 空白判定用 `str.isspace()`：框內常混用窄空白（U+2005／U+2009 等）微調寬度；
+    # 半形點點是框內的對齊填充（「|　..ヴィーシャ大佐　.....|」），一併跳過。
     i = start - 1
-    while i >= 0 and line[i].isspace():
+    while i >= 0 and (line[i].isspace() or line[i] in '.．'):
         i -= 1
     if not (i >= 0 and line[i] in _DIALOGUE_LEFT_MARKERS):
         return False
@@ -1407,7 +1603,7 @@ def _is_dialogue_box_bounded(line: str, start: int, end: int) -> bool:
             and line[i - 1] in _HALFWIDTH_KANA_CHARS):
         return False
     j = end
-    while j < len(line) and line[j].isspace():
+    while j < len(line) and (line[j].isspace() or line[j] in '.．'):
         j += 1
     if not (j < len(line) and line[j] in _DIALOGUE_RIGHT_MARKERS):
         return False
@@ -1448,7 +1644,12 @@ def _is_right_edge_dialogue(line: str, start: int, end: int) -> bool:
             i -= 1
         if space_count >= 3:
             return True
-    return _in_dialogue_region(line, start, end)
+    if _in_dialogue_region(line, start, end):
+        return True
+    # 整行都是乾淨文字（沒有寬間隔、左側也沒有 AA）且候選有 ≥3 個相異實字：
+    # 該行就是一句話（「あたれぇぇぇぇぇぇぇぇ」「ビンゴォ・・・」），等同行尾對話。
+    return (_in_dialogue_region(line, start, end, require_gap=False)
+            and len(set(_LETTER_RE.findall(line[start:end]))) >= 3)
 
 
 def _in_bracket_region(line: str, start: int, end: int) -> bool:
@@ -1524,30 +1725,15 @@ def _extract_experimental_line(
                and not (0x30A0 <= ord(text[-2]) <= 0x30FF)):
             text = text[:-1]
             e -= 1
-        # 開頭的疊字記號 ゝゞ 必是 AA 筆畫：疊字記號重複「前一個」假名，不可能
-        # 出現在詞首。邊界擴展會把它從 AA 一起吃進來（「ゝYこぅ」），剝除後候選
-        # 回到真實邊界，再由既有規則判定（「Yこぅ」由 AA latin 前綴懲罰擋下）。
-        while text and text[0] in 'ゝゞ':
-            text = text[1:]
-            s += 1
-        # 落單的 `''`：半形雙撇號當引號用時必成對（「''気配''」）。首尾落單的那個
-        # 是 AA 筆畫被擴展吃進來（「芯ぅ''」），剝除後回到真實邊界。
-        if (text.count("''") % 2 == 1 and "'''" not in text):
-            if text.endswith("''"):
-                text = text[:-2]
-                e -= 2
-            elif text.startswith("''"):
-                text = text[2:]
-                s += 2
+        text, s, e = _trim_candidate(text, s, e)
         # 一般候選需 ≥ 3 char；長度 2 的特殊放行見 `_allows_len2`。
         # 注意：通過 min_len 不等於最終保留，後續的 score 過濾與孤立過濾還會
         # 進一步把可疑短候選擋下。
         min_len = 2 if _allows_len2(text, line, s, e) else 3
         if len(text) < min_len:
             continue
-        # AA 牆／眼睛筆畫／手的硬否決（不進落選收集 — 名牌救援不該把它們救回來）
-        if (_AA_WALL_RUN_RE.search(text) or _AA_EYE_MOTIF_RE.search(text)
-                or _AA_HAND_RE.fullmatch(text)):
+        # AA 形狀硬否決（不進落選收集 — 名牌救援不該把它們救回來）
+        if _aa_veto(text) is not None:
             continue
         if invalid_regex.match(text):
             continue
@@ -1867,7 +2053,9 @@ def extract_text(
                 text = _strip_speaker_tag(text)
                 if any(reg.search(text) for reg in custom_regexes):
                     continue
-                if text:
+                # 剝除名牌後只剩括號／標點（「【白黒双子】「「」」」→「「「」」」、
+                # 「【難易度】：」→「：」）不是可翻譯內容
+                if text and _aa_veto(text) is None:
                     extracted.append((text, line_num))
             continue
 
@@ -2139,13 +2327,11 @@ def analyze_extraction(
                     report.append("    -> ❌ 剔除：已被拉長念法／片假名整句覆蓋。")
                     continue
                 t = raw.strip()
-                # 與 _extract_experimental_line 一致：剝除開頭的疊字記號 ゝゞ
-                if t[:1] in ('ゝ', 'ゞ'):
-                    t0 = t
-                    while t and t[0] in 'ゝゞ':
-                        t = t[1:]
-                        s += 1
-                    report.append(f"    [剝除開頭疊字記號] '{t0}' => '{t}'")
+                # 與 _extract_experimental_line 一致的候選修剪
+                t0 = t
+                t, s, e = _trim_candidate(t, s, e)
+                if t != t0:
+                    report.append(f"    [修剪首尾 AA 筆畫] '{t0}' => '{t}'")
                 # 與 _extract_experimental_line 一致的「長度 2 特殊放行」
                 allow_short = _allows_len2(t, proc_line, s, e)
                 min_len = 2 if allow_short else 3
@@ -2154,17 +2340,9 @@ def analyze_extraction(
                         f"    -> ❌ 剔除：長度 {len(t)} < {min_len}"
                         f"（allow_short={allow_short}）。")
                     continue
-                if _AA_WALL_RUN_RE.search(t):
-                    report.append(
-                        "    -> ❌ 剔除：含 AA 牆（牆面用字同字連續 ≥3），硬否決。")
-                    continue
-                if _AA_EYE_MOTIF_RE.search(t):
-                    report.append(
-                        "    -> ❌ 剔除：含 AA 眼睛筆畫「うぅ」（前接漢字／片假名或"
-                        "後接 ミ／x 等），硬否決。")
-                    continue
-                if _AA_HAND_RE.fullmatch(t):
-                    report.append("    -> ❌ 剔除：AA 的手（と…つ），硬否決。")
+                veto = _aa_veto(t)
+                if veto is not None:
+                    report.append(f"    -> ❌ 剔除：{veto}，硬否決。")
                     continue
                 if invalid_regex.match(t):
                     report.append("    -> ❌ 剔除：全句符合 invalid_regex。")
@@ -2240,6 +2418,9 @@ def analyze_extraction(
                     None)
                 if hit:
                     report.append(f"    -> ❌ 剔除：命中自訂濾網 ({hit})。")
+                    continue
+                if text and _aa_veto(text) is not None:
+                    report.append(f"    -> ❌ 剔除：{_aa_veto(text)}。")
                     continue
                 if text:
                     report.append(f"    -> ✅ 成功提取最終文字: '{text}'")

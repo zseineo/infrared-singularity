@@ -798,8 +798,9 @@ class AutoTranslatePanel(QWidget):
         self.api_thinking_combo.setToolTip(
             "API 的思考程度，留空＝不送、用模型自己的預設。下拉為該供應商常見的值，\n"
             "也可直接輸入其他值（原樣送出）。各供應商分開記住。\n"
-            "  • Gemini：thinkingLevel（minimal／low／medium／high；\n"
-            "    各型號不同，例：gemini-3.8-flash 不收 minimal）\n"
+            "  • Gemini：thinkingLevel（minimal／low／medium／high／xhigh；\n"
+            "    各型號不同，例：gemini-3.8-flash 不收 minimal；\n"
+            "    gemini-4-hydrogen 收 low／medium／high（預設）／xhigh、不收 minimal）\n"
             "  • OpenAI：reasoning_effort（none＝不推理／low／medium／high／xhigh）\n"
             "  • Claude：effort（low／medium／high／xhigh／max；Haiku 4.5 不支援）\n"
             "  • DeepSeek：reasoning_effort（low／high／max）\n"

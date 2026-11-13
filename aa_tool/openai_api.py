@@ -51,7 +51,7 @@ API_PROVIDERS: dict[str, dict] = {
         "base_url": "",
         "models": [],  # 見 aa_tool.gemini_api.API_MODELS
         # 思考程度建議值（v3.16，見下方「思考程度」註解）；空白＝不送、用模型預設
-        "thinking": ["minimal", "low", "medium", "high"],
+        "thinking": ["minimal", "low", "medium", "high", "xhigh"],   # xhigh：gemini-4-hydrogen
     },
     "openai": {
         "label": "OpenAI (GPT)",

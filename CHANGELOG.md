@@ -3,6 +3,10 @@
 以版號為單位彙整每次更新的摘要。最新版本置於最上方。
 逐筆技術細節請見 git commit 歷史；本檔僅記人類可讀的更新重點。
 
+## v3.27
+
+- 自動翻譯（API）：Gemini 模型下拉加入 gemini-4-hydrogen；思考程度下拉多一個 xhigh（Hydrogen 支援）。
+
 ## v3.26
 
 - 自動翻譯（瀏覽器）：Gemini 把選單裡的 3.6 Flash 換成 4 Hydrogen，「要求模型」的 Flash 選項改為 Hydrogen（原本選 Flash 的設定自動改成 Hydrogen）。

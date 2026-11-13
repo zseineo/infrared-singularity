@@ -49,8 +49,11 @@ from .gemini_web import (
 # 可選模型（依使用者指定）。下拉選單與此清單一致，第一個為預設。
 # v3.07：3.5／3.7 系列（含 3.5 flash-lite）已廢除，Flash 只剩 3.6 與 3.8；
 # 設定檔存著已廢除的型號時，讀取時改成預設（settings_manager.RETIRED_API_MODELS）。
+# v3.27：加入 gemini-4-hydrogen（2026-11 GA，Google 文件的 model code；thinkingLevel 收
+# low／medium／high（預設）／xhigh，不收 minimal；最大輸出預設 65,536 tokens）。
 API_MODELS = [
     "gemini-3.8-flash",
+    "gemini-4-hydrogen",
     "gemini-3.6-flash",
     "gemini-3.1-pro",
     "gemini-2.5-pro",

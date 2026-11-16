@@ -3,6 +3,11 @@
 以版號為單位彙整每次更新的摘要。最新版本置於最上方。
 逐筆技術細節請見 git commit 歷史；本檔僅記人類可讀的更新重點。
 
+## v3.28
+
+- 新增自動更新：⚙ 設定裡的「檢查更新」會到 GitHub 查新版，確認後下載、核對 SHA256，通過才關閉程式換成新版並自動重新開啟；設定不受影響。
+- 發佈用 `release_assets.py`：打包 zip、產生 SHA256 並上傳到 GitHub Release。
+
 ## v3.27
 
 - 自動翻譯（API）：Gemini 模型下拉加入 gemini-4-hydrogen；思考程度下拉多一個 xhigh（Hydrogen 支援）。

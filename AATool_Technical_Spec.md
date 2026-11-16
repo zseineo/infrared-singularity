@@ -644,6 +644,17 @@
     *   **API 金鑰加密儲存**（`aa_tool/secure_store.py`）：金鑰存於 `aa_api_keys.dat`（非 cache JSON），Windows 走 **DPAPI**（ctypes 呼叫 Crypt32.dll，綁定使用者帳號、零主密碼、無第三方相依）；非 Windows 退回 base64 混淆並於 UI 標警告。檔案已列入 `.gitignore`。`save_keys` / `load_keys` 失敗一律安全降級（回 `[]`）。
     *   持久化：`translate_backend` / `api_provider`（v2.03）/ `gemini_api_model` / `api_models`（v2.03，非 Gemini 供應商各自模型）/ `api_thinking_levels`（v3.16，{供應商: 思考程度}，空白不存）/ `api_thinking_switches`（v3.17，{供應商: on/off}，不指定不存）/ `api_custom_extra_body`（v3.17，自定義額外參數 JSON 字串）/ `api_custom_base_url`（v2.03）/ `api_timeout`（v2.10）/ `gemini_api_only_prompt`（v1.84）/ `gemini_api_system_prompt` / `browser_use_gem`／（v1.47 新增）`gemini_gem_url` / `gemini_required_model` / `gemini_max_per_session` 在 `aa_settings_cache.json`；金鑰在加密檔。由 `MainWindow.save_connection_settings()` 一併寫入（移入的三項以 `if key in params` 防呆；`provider_keys` 走 `save_all_keys` 覆寫各家金鑰）。**base_dir 一致性（v2.05；v2.15 起指向設定資料夾）**：設定 cache／金鑰／`run_auto_translate` 都必須用 `MainWindow._settings_base_dir`（＝`app_paths.data_dir()`，預設 `%APPDATA%\AATool`，見 §1「設定資料夾」）。先前 `save_connection_settings`／`run_auto_translate` 呼叫／面板載入金鑰／檔名試算各自用 `__file__` 推目錄，打包後指向 `_internal/`，導致協調器讀不到使用者存的 cache 而整批回退預設（gemini / gemini-2.5-pro）——凡新增讀寫設定或金鑰的路徑，一律沿用 `_settings_base_dir`，勿再用 `__file__`。
 
+### 4.16 自動更新（`aa_tool/updater.py` ＋ `release_assets.py`，v3.28）
+
+只在使用者按 ⚙ 設定「程式版本：vX ［檢查更新］」時連網（`SettingsDialog(app_version=, on_check_update=)` → `MainWindow.check_for_updates()`）。自動翻譯執行中不檢查、不更新。
+
+*   **發佈端**：`py release_assets.py`（先 `pyinstaller aa_main_qt.spec`）把 `dist/aa_main_qt_v<版本>/` 打成 `aa_main_qt_v<版本>.zip`（頂層一個同名資料夾）、寫 `aa_main_qt_v<版本>.zip.sha256`（sha256sum 格式），用 gh 上傳到 tag `v<版本>`（Release 不存在就 `--generate-notes` 建立）；`--no-upload` 只產生檔案。程式只認這兩個附件名稱（`updater.ASSET_RE`）。
+*   **檢查**：`check_latest()` 讀 `https://api.github.com/repos/zseineo/infrared-singularity/releases/latest`，找 zip 與 `.sha256`（缺 zip →「沒有附 zip 安裝檔」；缺 .sha256 →「為了安全不自動更新」）；`is_newer()` 逐段數字比（3.10 > 3.9），不降版。原始碼執行（非 frozen）只告知有新版、請 git pull。
+*   **下載與驗證**（背景執行緒，狀態列顯示百分比）：`prepare_update()` 下載到 `%TEMP%\AATool_update\<版本>\`；比對 .sha256，GitHub API 附件 `digest`（`sha256:…`）有值時也必須一致；通過才 `safe_extract()`（任何項目落在目的地外——`..`、絕對路徑、磁碟代號——整個拒絕；解壓總量上限 3 GB）；解壓後刪 zip。網路一律走 `_open()`：只允許 https 且網域為 github.com／api.github.com／*.githubusercontent.com（轉址後的實際網址也檢查）；附件上限 1 GB、下載位元組數須等於 API 回報大小。
+*   **換檔**：驗證通過 → 問「確定」→ `_pending_update` 記下新版資料夾、`self.close()`（未儲存術語表等照常詢問；按取消則放棄更新）→ `closeEvent` 確定關閉後才 `launch_apply()`：以**新版 exe** `aa_main_qt.exe --apply-update <程式資料夾> <舊 PID>` 啟動（執行中的 exe 不能覆寫自己），再 `QApplication.quit()`（網址讀取視窗開著也一併結束）。新版 `main()` 一開頭攔這個參數 → `_run_apply_update()`：小視窗顯示步驟，背景 `run_apply()` 等舊 PID 結束（上限 90 秒）→ `apply_files()`：新版 zip 裡的每個項目（兩個 exe、`_internal`）先改名到程式資料夾內的 `_update_backup_<時間>`（被佔用就重試，仍失敗＝例如單獨開的網址讀取 exe 還在跑 → 還原並報錯）→ 複製新檔 → 成功刪備份；任一步失敗刪掉已放的新檔、把備份搬回原位。**只換 zip 裡有的項目**，程式資料夾根目錄的其他檔案（舊版留下的設定等）不動；`_internal` 整個換掉（舊版多餘的 DLL 不殘留）。最後寫 `設定資料夾\aa_update_result.json`、重新開啟程式資料夾的 exe。
+*   **結果**：啟動後 0.8 秒 `show_update_result()` → `pop_result()` 讀出並刪除結果檔（同時清掉 `%TEMP%\AATool_update`）；成功只顯示狀態列「✅ 已更新到 vX」，失敗跳視窗並提示可再檢查一次。
+*   **注意**：`--apply-update` 是由「下一版」執行的——之後每一版都必須保留 `main()` 開頭這段處理與 `updater.run_apply` 的參數格式，否則舊版下載到這一版時無法完成換檔。安裝在 Program Files 等沒有寫入權限的位置時換檔會失敗並還原。
+
 ## 5. UI 介面關聯變數
 UI widget 屬於 `TranslatePanel`（除特別註明外）：
 *   `self.source_text`: 原文輸入區 `QPlainTextEdit`（含 AA 圖）

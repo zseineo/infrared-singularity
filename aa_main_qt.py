@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.27"
+APP_VERSION = "3.28"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -839,6 +839,8 @@ class MainWindow(QMainWindow):
         # 每次開始 +1；強制停止也 +1，讓被丟下的背景執行緒之後的回呼全部作廢
         self._auto_run_id: int = 0
         self._auto_thread: threading.Thread | None = None
+        self._pending_update: str = ""   # 自動更新：已驗證的新版資料夾，關閉時啟動換檔
+        self._update_busy = False          # 檢查／下載更新中
         self._author_only: bool = False
         self._author_name: str = ""
         # 「不讀暫存」（網址讀取面板的開關）：本次執行中**所有**讀取網址的行為
@@ -3197,6 +3199,8 @@ class MainWindow(QMainWindow):
             on_clear_url_history=self._on_clear_url_history_from_settings,
             on_import_settings=self._on_import_old_settings,
             on_close=self._settings_panel.hide,
+            app_version=APP_VERSION,
+            on_check_update=self.check_for_updates,
         )
         # setWidget 會接管所有權並刪除舊內容 widget
         self._settings_scroll.setWidget(content)
@@ -4050,7 +4054,139 @@ class MainWindow(QMainWindow):
                 return
             if reply == QMessageBox.StandardButton.Yes:
                 self.export_settings()
+        if self._pending_update:
+            # 自動更新：確定要關閉了才啟動新版換檔（新版會等本程式結束）
+            pkg_root, self._pending_update = self._pending_update, ""
+            try:
+                from aa_tool import app_paths as _ap, updater
+                updater.launch_apply(pkg_root, _ap.app_root())
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.critical(self, "更新失敗", f"無法啟動更新程式：{e}")
+                event.ignore()
+                return
+            # 網址讀取等其他視窗開著時程式不會自己結束，直接整個退出
+            QTimer.singleShot(0, QApplication.instance().quit)
         event.accept()
+
+    # ── 自動更新（v3.28，⚙ 設定「檢查更新」）──
+
+    def check_for_updates(self) -> None:
+        """到 GitHub 查最新版；有新版就問要不要下載更新（見 aa_tool.updater）。"""
+        from aa_tool import updater
+        if self._update_busy:
+            return
+        if self._auto_thread is not None and self._auto_thread.is_alive():
+            QMessageBox.information(self, "檢查更新", "自動翻譯執行中，請停止後再更新。")
+            return
+        self._update_busy = True
+        self.show_status("🔍 檢查更新中…", "#17a2b8")
+
+        def _bg() -> None:
+            try:
+                info, err = updater.check_latest(), ""
+            except updater.UpdateError as e:
+                info, err = None, str(e)
+            self._invoke_on_main.emit(lambda: self._on_update_checked(info, err))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _on_update_checked(self, info, err: str) -> None:
+        from aa_tool import updater
+        self._update_busy = False
+        if err:
+            self.show_status("⚠️ 檢查更新失敗", "#f39c12")
+            QMessageBox.warning(self, "檢查更新", err)
+            return
+        if not updater.is_newer(info.version, APP_VERSION):
+            self.show_status(f"✅ 已是最新版（v{APP_VERSION}）", "#28a745")
+            QMessageBox.information(
+                self, "檢查更新", f"目前已是最新版（v{APP_VERSION}）。")
+            return
+        notes = info.notes.strip()
+        if len(notes) > 1500:
+            notes = notes[:1500] + "\n…"
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(
+                self, "檢查更新",
+                f"有新版 v{info.version}（目前 v{APP_VERSION}）。\n\n"
+                "目前是原始碼執行，不支援自動更新，請用 git pull 更新。")
+            return
+        size_mb = info.zip_size / 1024 / 1024 if info.zip_size else 0
+        if QMessageBox.question(
+                self, "有新版本",
+                f"有新版 v{info.version}（目前 v{APP_VERSION}）"
+                + (f"，下載約 {size_mb:.0f} MB" if size_mb else "") + "。\n\n"
+                + (f"更新說明：\n{notes}\n\n" if notes else "")
+                + "要下載並更新嗎？（下載完會先核對 SHA256，確認後才關閉程式）",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            self.show_status("已取消更新", "#6c757d")
+            return
+        self._download_update(info)
+
+    def _download_update(self, info) -> None:
+        from aa_tool import updater
+        self._update_busy = True
+        last = {"pct": -1}
+
+        def _progress(got: int, total: int) -> None:
+            pct = int(got * 100 / total) if total else -1
+            if pct == last["pct"] or (pct < 0 and got % (10 * 1024 * 1024) > 256 * 1024):
+                return
+            last["pct"] = pct
+            text = (f"⬇️ 下載更新 v{info.version}：{pct}%" if pct >= 0
+                    else f"⬇️ 下載更新 v{info.version}：{got // (1024 * 1024)} MB")
+            self._invoke_on_main.emit(lambda t=text: self.show_status(t, "#17a2b8"))
+
+        def _bg() -> None:
+            try:
+                pkg, err = updater.prepare_update(info, _progress), ""
+            except updater.UpdateError as e:
+                pkg, err = "", str(e)
+            except Exception as e:  # noqa: BLE001
+                pkg, err = "", f"更新失敗：{e}"
+            self._invoke_on_main.emit(lambda: self._on_update_ready(info, pkg, err))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _on_update_ready(self, info, pkg_root: str, err: str) -> None:
+        self._update_busy = False
+        if err:
+            self.show_status("❌ 更新失敗", "#dc3545")
+            QMessageBox.warning(self, "更新失敗", err)
+            return
+        self.show_status(f"✅ v{info.version} 已下載並通過 SHA256 驗證", "#28a745")
+        if self._auto_thread is not None and self._auto_thread.is_alive():
+            QMessageBox.information(
+                self, "更新", "自動翻譯執行中，請停止後再按一次「檢查更新」。")
+            return
+        if QMessageBox.question(
+                self, "準備更新",
+                f"v{info.version} 已下載並通過 SHA256 驗證。\n\n"
+                "按「確定」後程式會關閉並換成新版，完成後自動重新開啟"
+                "（有未儲存的術語表等內容時會先詢問）。",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+        ) != QMessageBox.StandardButton.Ok:
+            self.show_status("已取消更新（下次檢查更新會重新下載）", "#6c757d")
+            return
+        self._pending_update = pkg_root
+        self.close()
+        if self.isVisible():   # 關閉時按了「取消」
+            self._pending_update = ""
+            self.show_status("已取消更新", "#6c757d")
+
+    def show_update_result(self) -> None:
+        """啟動時顯示上次自動更新的結果（成功只顯示狀態列，失敗跳視窗）。"""
+        from aa_tool import updater
+        r = updater.pop_result()
+        if not r:
+            return
+        if r.get("ok"):
+            self.show_status(f"✅ {r.get('message') or '更新完成'}", "#28a745")
+        else:
+            QMessageBox.warning(
+                self, "更新沒有完成",
+                f"{r.get('message') or '更新失敗'}\n\n目前仍是 v{APP_VERSION}，可再按一次「檢查更新」。")
 
 
 # ════════════════════════════════════════════════════════════
@@ -4058,6 +4194,14 @@ class MainWindow(QMainWindow):
 # ════════════════════════════════════════════════════════════
 
 def main() -> None:
+    from aa_tool import updater
+    if len(sys.argv) >= 4 and sys.argv[1] == updater.APPLY_ARG:
+        try:
+            pid = int(sys.argv[3])
+        except ValueError:
+            return
+        _run_apply_update(sys.argv[2], pid)
+        return
     # 先接收舊設定再裝日誌：crash_logger 一裝上就會寫入 aa_crash.log，
     # 之後 auto_migrate 便會因「新資料夾已有該檔」而不再接走根目錄的舊日誌。
     app_paths.auto_migrate()
@@ -4072,7 +4216,42 @@ def main() -> None:
             app.setStyleSheet(f.read())
     win = MainWindow()
     win.showMaximized()
+    QTimer.singleShot(800, win.show_update_result)
     sys.exit(app.exec())
+
+
+def _run_apply_update(app_dir: str, pid: int) -> None:
+    """``aa_main_qt.exe --apply-update <程式資料夾> <PID>``：自動更新的換檔步驟（由暫存裡的
+    新版 exe 執行，見 aa_tool.updater）。顯示小視窗，換完重新開啟程式資料夾的 exe。"""
+    from PyQt6.QtWidgets import QLabel
+    from aa_tool import updater
+    app = QApplication(sys.argv)
+    lbl = QLabel(f"正在更新到 v{APP_VERSION}…")
+    lbl.setWindowTitle("AA 創作翻譯輔助小工具 — 更新中")
+    lbl.setMinimumWidth(380)
+    lbl.setMargin(20)
+    lbl.show()
+    state = {"step": "", "done": False}
+
+    def _bg() -> None:
+        try:
+            updater.run_apply(app_dir, pid, APP_VERSION,
+                              on_step=lambda s: state.__setitem__("step", s))
+        finally:
+            state["done"] = True
+
+    threading.Thread(target=_bg, daemon=True).start()
+    timer = QTimer()
+
+    def _tick() -> None:
+        if state["step"]:
+            lbl.setText(f"正在更新到 v{APP_VERSION}…\n{state['step']}")
+        if state["done"]:
+            app.quit()
+
+    timer.timeout.connect(_tick)
+    timer.start(200)
+    app.exec()
 
 
 if __name__ == "__main__":

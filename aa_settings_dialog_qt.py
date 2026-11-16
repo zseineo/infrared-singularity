@@ -87,8 +87,12 @@ class SettingsDialog(QWidget):
         on_clear_url_history: Callable[[int], int],
         on_import_settings: Callable[[str], tuple[str | None, list[str]]],
         on_close: Callable[[], None] | None = None,
+        app_version: str = "",
+        on_check_update: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
+        self._app_version = app_version
+        self._on_check_update = on_check_update
         self._orig_cache_base_dir = orig_cache_base_dir
         self._data_dir = data_dir
         self._on_import_settings = on_import_settings
@@ -479,6 +483,23 @@ class SettingsDialog(QWidget):
         row4.addWidget(btn_import)
         row4.addStretch()
         root.addLayout(row4)
+
+        # ── 程式版本／檢查更新（v3.28）──
+        if self._on_check_update is not None:
+            row_ver = QHBoxLayout()
+            lbl_ver = QLabel(f"程式版本：v{self._app_version}")
+            lbl_ver.setFont(_ui_font(12))
+            row_ver.addWidget(lbl_ver)
+            btn_update = _make_btn("檢查更新", "#28a745", "#218838",
+                                   font=_ui_font(11), width=90)
+            btn_update.setToolTip(
+                "到 GitHub 查有沒有新版。有新版時會顯示更新說明，確認後才下載；\n"
+                "下載完會核對 SHA256，通過才關閉程式換成新版，完成後自動重新開啟。\n"
+                "設定資料夾不受影響。")
+            btn_update.clicked.connect(self._on_check_update)
+            row_ver.addWidget(btn_update)
+            row_ver.addStretch()
+            root.addLayout(row_ver)
 
         # ── Debug 模式（開發用）──
         self.debug_mode_cb = QCheckBox(

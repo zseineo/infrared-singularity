@@ -969,6 +969,12 @@ def _parse_himanatokiniyaruo(page_html: str, base_url: str, *, author_name: str 
         r'<h2[^>]*>\s*<a[^>]+class="kjax"[^>]*>([^<]+)</a>\s*</h2>',
         page_html,
     )
+    if not title_m:
+        # 2026-11 新模板：<h2 class="entry-title"><a href="…" id="entryN">TITLE</a></h2>
+        title_m = re.search(
+            r'<h2[^>]*class="entry-title"[^>]*>\s*<a[^>]*>([^<]+)</a>\s*</h2>',
+            page_html,
+        )
     if title_m:
         page_title = html.unescape(title_m.group(1)).strip()
     else:
@@ -1066,6 +1072,22 @@ def _parse_himanatokiniyaruo(page_html: str, base_url: str, *, author_name: str 
                         related_html_full = page_html[inner_start:pos + next_close.start()]
                         nav_links.extend(_parse_related_segments(related_html_full))
                     pos += next_close.start() + len('</div>')
+
+    # ── 2026-11 新模板：<ol class="related-entries" id="related-entries"> 每話一個 <li>，
+    #    當前話為 <li class="now">（無連結）；同樣是「新 → 舊」 ──
+    if not nav_links:
+        list_m = re.search(
+            r'<(ol|ul)\s[^>]*class="related-entries"[^>]*>(.*?)</\1>',
+            page_html, re.DOTALL,
+        )
+        if list_m:
+            for li in re.finditer(r'<li\b([^>]*)>(.*?)</li>', list_m.group(2), re.DOTALL):
+                items = _parse_related_segments(li.group(2))
+                cls = re.search(r'class="([^"]*)"', li.group(1))
+                if cls and 'now' in cls.group(1).split():
+                    for it in items:
+                        it['is_current'] = True
+                nav_links.extend(items)
 
     # 原始清單為「新 → 舊」（第 N 話 → 第 1 話）；反轉為時間順序，
     # 讓「下一話」按鈕可以 current_idx + 1 正確取得下一集。

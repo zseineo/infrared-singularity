@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.28"
+APP_VERSION = "3.29"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -771,6 +771,12 @@ class MainWindow(QMainWindow):
         # 代理伺服器：抓網頁與 API 翻譯分開設定（見 aa_tool/net_proxy.py）
         self._fetch_proxy_url: str = ""
         self._api_proxy_url: str = ""
+        # 手機遠端控制自動翻譯（v3.29，aa_tool/remote_control.py）
+        self._remote_enabled: bool = False
+        self._remote_port: int = 8765
+        self._remote_token: str = ""
+        self._remote_server = None
+        self._last_status_msg: str = ""   # 最後一則狀態訊息（遠端開始失敗時回報原因）
         # 「複製指定範圍」上次輸入的範圍字串（僅本次執行期間記住）
         self._copy_range_last: str = ""
 
@@ -1955,6 +1961,7 @@ class MainWindow(QMainWindow):
 
     def show_status(self, message: str, color: str = "#28a745",
                     duration: int = 3000) -> None:
+        self._last_status_msg = message
         bg = self._STATUS_COLOR_MAP.get(color.lower(), color)
         # duration <= 0 視為使用預設，避免 QTimer 立刻刪除 toast
         dur = duration if duration > 0 else 3000
@@ -2252,7 +2259,7 @@ class MainWindow(QMainWindow):
         self._auto_banner_resume_btn.hide()
         self._set_auto_banner_text("⚡ 繼續自動翻譯…")
 
-    def _force_stop_auto_translate(self) -> None:
+    def _force_stop_auto_translate(self, confirm: bool = True) -> None:
         """「⏏ 強制停止」：不等當前動作，立刻回到可操作狀態，正在翻的這一話捨棄。
 
         背景執行緒無法從外部砍掉：這裡設定 stop／discard 事件讓它盡快收尾
@@ -2262,14 +2269,15 @@ class MainWindow(QMainWindow):
         """
         if not self._auto_translate_running:
             return
-        ans = QMessageBox.question(
-            self, "強制停止",
-            "立即結束自動翻譯？\n\n"
-            "・正在翻譯的這一話直接捨棄，不存檔\n"
-            "・已完成的話不受影響\n"
-            "・瀏覽器／連線會在背景收尾後自行關閉，關閉前無法開始下一批")
-        if ans != QMessageBox.StandardButton.Yes:
-            return
+        if confirm:   # 手機遠端呼叫時 confirm=False（手機頁面自己問過）
+            ans = QMessageBox.question(
+                self, "強制停止",
+                "立即結束自動翻譯？\n\n"
+                "・正在翻譯的這一話直接捨棄，不存檔\n"
+                "・已完成的話不受影響\n"
+                "・瀏覽器／連線會在背景收尾後自行關閉，關閉前無法開始下一批")
+            if ans != QMessageBox.StandardButton.Yes:
+                return
         if not self._auto_translate_running:
             return   # 詢問期間已自己結束
         for ev in (self._auto_discard_event, self._auto_stop_event):
@@ -2866,6 +2874,9 @@ class MainWindow(QMainWindow):
             fetch_clear_ai_text=self._fetch_clear_ai_text,
             fetch_proxy_url=self._fetch_proxy_url,
             api_proxy_url=self._api_proxy_url,
+            remote_enabled=self._remote_enabled,
+            remote_port=self._remote_port,
+            remote_token=self._remote_token,
             gemini_gem_url=self._gemini_gem_url,
             gemini_profile_dir=self._gemini_profile_dir,
             gemini_max_per_session=self._gemini_max_per_session,
@@ -2996,6 +3007,9 @@ class MainWindow(QMainWindow):
             getattr(cache, "fetch_clear_ai_text", False))
         self._fetch_proxy_url = str(getattr(cache, "fetch_proxy_url", "") or "")
         self._api_proxy_url = str(getattr(cache, "api_proxy_url", "") or "")
+        self._remote_enabled = bool(getattr(cache, "remote_enabled", False))
+        self._remote_port = int(getattr(cache, "remote_port", 8765) or 8765)
+        self._remote_token = str(getattr(cache, "remote_token", "") or "")
         # 抓網頁代理是 url_fetcher 的模組狀態，載入設定後立即套用
         _url_fetcher.set_fetch_proxy(self._fetch_proxy_url)
         cb = getattr(p, "clear_ai_cb", None)
@@ -3201,6 +3215,10 @@ class MainWindow(QMainWindow):
             on_close=self._settings_panel.hide,
             app_version=APP_VERSION,
             on_check_update=self.check_for_updates,
+            remote_enabled=self._remote_enabled,
+            remote_port=self._remote_port,
+            remote_links=self._remote_links(),
+            on_reset_remote_token=self._reset_remote_token,
         )
         # setWidget 會接管所有權並刪除舊內容 widget
         self._settings_scroll.setWidget(content)
@@ -3539,6 +3557,10 @@ class MainWindow(QMainWindow):
                 values.get('fetch_proxy_url', ''))
         if 'api_proxy_url' in values:
             self._api_proxy_url = str(values.get('api_proxy_url', '') or '')
+        if 'remote_enabled' in values:
+            self._remote_enabled = bool(values['remote_enabled'])
+            self._remote_port = int(values.get('remote_port', self._remote_port))
+            self._apply_remote_server()
         self._apply_doc_num_state()
         if self._batch_window is not None:
             self._batch_window.glossary_auto_search = self._glossary_auto_search
@@ -4068,6 +4090,145 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, QApplication.instance().quit)
         event.accept()
 
+    # ── 手機遠端控制自動翻譯（v3.29，aa_tool/remote_control.py）──
+
+    def _remote_links(self) -> list[str]:
+        from aa_tool import remote_control as rc
+        if not self._remote_token:
+            self._remote_token = rc.new_token()
+            self.save_cache()
+        return rc.access_links(self._remote_port, self._remote_token)
+
+    def _reset_remote_token(self) -> list[str]:
+        from aa_tool import remote_control as rc
+        self._remote_token = rc.new_token()
+        self.save_cache()
+        self._apply_remote_server()
+        return self._remote_links()
+
+    def _apply_remote_server(self) -> None:
+        """依設定啟動／停止／重啟遠端伺服器（埠或密鑰變了就重啟）。"""
+        from aa_tool import remote_control as rc
+        srv = self._remote_server
+        if srv is not None and (not self._remote_enabled or srv.port != self._remote_port
+                                or srv._token != self._remote_token):
+            srv.stop()
+            self._remote_server = srv = None
+        if not self._remote_enabled or srv is not None:
+            return
+        if not self._remote_token:
+            self._remote_token = rc.new_token()
+            self.save_cache()
+        srv = rc.RemoteServer(
+            self._remote_port, self._remote_token,
+            snapshot=lambda since: self._call_on_main(lambda: self._remote_snapshot(since)),
+            act=lambda a, p: self._call_on_main(lambda: self._remote_act(a, p)))
+        try:
+            srv.start()
+        except OSError as e:
+            self.show_status(f"⚠️ 手機遠端控制無法啟動（埠 {self._remote_port}：{e}）",
+                             "#f39c12", 6000)
+            return
+        self._remote_server = srv
+
+    def _call_on_main(self, fn, timeout: float = 10.0):
+        """在 Qt 主執行緒執行 fn 並等結果（遠端伺服器的背景執行緒用）。"""
+        if threading.current_thread() is threading.main_thread():
+            return fn()
+        box: dict = {}
+        done = threading.Event()
+
+        def _run() -> None:
+            try:
+                box["v"] = fn()
+            except Exception as e:  # noqa: BLE001
+                box["e"] = e
+            finally:
+                done.set()
+
+        self._invoke_on_main.emit(_run)
+        if not done.wait(timeout):
+            raise TimeoutError("電腦端沒有回應")
+        if "e" in box:
+            raise box["e"]
+        return box.get("v")
+
+    def _remote_snapshot(self, since: int) -> dict:
+        p = self._auto_window
+        log = list(p._log_full) if p is not None else []
+        total = len(log)
+        reset = since > total            # 電腦上按了清除 Log
+        lines = log[0 if reset else since:]
+        if (since == 0 or reset) and len(lines) > 500:
+            lines = lines[-500:]
+        running = bool(self._auto_translate_running)
+
+        def _items(lst) -> list[str]:
+            return [lst.item(i).text() for i in range(lst.count())]
+
+        if p is not None:
+            form = {"url": p.url_edit.text().strip(), "count": p.count_spin.value(),
+                    "until_last": p.until_last.isChecked(),
+                    "url_list": len(p._url_list_lines())}
+        else:
+            form = {"url": self.current_url or "",
+                    "count": int(getattr(self, "_auto_translate_count", 1) or 1),
+                    "until_last": bool(getattr(self, "_auto_translate_until_last", False)),
+                    "url_list": len([x for x in (self._auto_translate_url_list or "").splitlines()
+                                     if x.strip()])}
+        return {
+            "running": running,
+            "stopping": running and self._auto_stop_event is not None
+            and self._auto_stop_event.is_set(),
+            "paused": running and not self._auto_banner_resume_btn.isHidden(),
+            "thread_busy": (not running and self._auto_thread is not None
+                            and self._auto_thread.is_alive()),
+            "banner": self._auto_banner_label.text() if running else "",
+            "current": p.cur_title_label.text() if p is not None else "",
+            "done": _items(p.done_list) if p is not None else [],
+            "skipped": _items(p.skip_list) if p is not None else [],
+            "log": lines, "log_total": total, "log_reset": reset,
+            "form": form,
+        }
+
+    def _remote_act(self, action: str, payload: dict) -> tuple[bool, str]:
+        running = self._auto_translate_running
+        if action == "stop":
+            if not running:
+                return False, "目前沒有在執行"
+            self._stop_auto_translate()
+            return True, "已送出停止，會等這一話翻完再結束"
+        if action == "force_stop":
+            if not running:
+                return False, "目前沒有在執行"
+            self._force_stop_auto_translate(confirm=False)
+            return True, "已強制停止（正在翻的這一話已捨棄）"
+        if action == "resume":
+            if not running or self._auto_banner_resume_btn.isHidden():
+                return False, "目前沒有暫停"
+            self._resume_auto_translate()
+            return True, "已繼續"
+        if action == "start":
+            if running:
+                return False, "已經在執行中"
+            if self._auto_window is None or self.stack.currentIndex() != 4:
+                self.show_auto_translate_panel()
+            p = self._auto_window
+            url = str(payload.get("url") or "").strip()
+            if url:
+                p.url_edit.setText(url)
+            try:
+                p.count_spin.setValue(max(1, int(payload.get("count") or 1)))
+            except (TypeError, ValueError):
+                pass
+            p.until_last.setChecked(bool(payload.get("until_last")))
+            self._last_status_msg = ""
+            p._on_start()
+            if self._auto_translate_running:
+                return True, "已開始自動翻譯"
+            return False, self._last_status_msg or "沒有開始（請在電腦上確認設定）"
+        return False, "未知的動作"
+
     # ── 自動更新（v3.28，⚙ 設定「檢查更新」）──
 
     def check_for_updates(self) -> None:
@@ -4217,6 +4378,7 @@ def main() -> None:
     win = MainWindow()
     win.showMaximized()
     QTimer.singleShot(800, win.show_update_result)
+    QTimer.singleShot(0, win._apply_remote_server)
     sys.exit(app.exec())
 
 

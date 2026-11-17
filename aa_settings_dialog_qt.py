@@ -89,10 +89,18 @@ class SettingsDialog(QWidget):
         on_close: Callable[[], None] | None = None,
         app_version: str = "",
         on_check_update: Callable[[], None] | None = None,
+        remote_enabled: bool = False,
+        remote_port: int = 8765,
+        remote_links: list[str] | None = None,
+        on_reset_remote_token: Callable[[], list[str]] | None = None,
     ) -> None:
         super().__init__(parent)
         self._app_version = app_version
         self._on_check_update = on_check_update
+        self._remote_enabled = remote_enabled
+        self._remote_port = remote_port
+        self._remote_links = list(remote_links or [])
+        self._on_reset_remote_token = on_reset_remote_token
         self._orig_cache_base_dir = orig_cache_base_dir
         self._data_dir = data_dir
         self._on_import_settings = on_import_settings
@@ -501,6 +509,10 @@ class SettingsDialog(QWidget):
             row_ver.addStretch()
             root.addLayout(row_ver)
 
+        # ── 手機遠端控制（v3.29）──
+        if self._on_reset_remote_token is not None:
+            self._build_remote_section(root)
+
         # ── Debug 模式（開發用）──
         self.debug_mode_cb = QCheckBox(
             "Debug 模式：編輯器 F1／右鍵選單可收集漏抓／誤抓／誤嵌")
@@ -616,6 +628,63 @@ class SettingsDialog(QWidget):
         new_count = self._on_clear_url_history(keep_n)
         self.fetch_count_lbl.setText(f"（目前共 {new_count} 筆）")
 
+    def _build_remote_section(self, root) -> None:
+        row = QHBoxLayout()
+        self.remote_cb = QCheckBox("手機遠端控制自動翻譯")
+        self.remote_cb.setFont(_ui_font(12))
+        self.remote_cb.setChecked(self._remote_enabled)
+        self.remote_cb.setToolTip(
+            "電腦開著本程式時，手機瀏覽器開下方連結即可查看自動翻譯的進度與 Log，\n"
+            "並開始／停止／強制停止／繼續。按「確定」後生效。\n"
+            "・手機與電腦要在同一個網路；在外面請兩邊都裝 Tailscale（免費）連回來，\n"
+            "  連結改用 100.x 開頭的那個位址。不要在路由器開 port 對外。\n"
+            "・第一次啟用時 Windows 防火牆會詢問，請允許「私人網路」。")
+        row.addWidget(self.remote_cb)
+        row.addWidget(QLabel("埠："))
+        self.remote_port_spin = QSpinBox()
+        self.remote_port_spin.setRange(1024, 65535)
+        self.remote_port_spin.setValue(self._remote_port)
+        self.remote_port_spin.setFont(_ui_font(11))
+        row.addWidget(self.remote_port_spin)
+        row.addStretch()
+        root.addLayout(row)
+
+        row2 = QHBoxLayout()
+        self.remote_link_combo = QComboBox()
+        self.remote_link_combo.setFont(_ui_font(10))
+        self.remote_link_combo.setMinimumWidth(150)
+        self.remote_link_combo.setToolTip(
+            "在手機瀏覽器開這個連結（含存取密鑰，別給別人）。電腦有多張網卡時下拉可選其他位址；\n"
+            "改了埠要按「確定」後再複製。手機上可以「加到主畫面」當成 App 用。")
+        self._fill_remote_links(self._remote_links)
+        row2.addWidget(self.remote_link_combo, 1)
+        btn_copy = _make_btn("複製", "#17a2b8", "#138496", font=_ui_font(11), width=56)
+        btn_copy.clicked.connect(self._copy_remote_link)
+        row2.addWidget(btn_copy)
+        btn_reset = _make_btn("重設密鑰", "#6c757d", "#5a6268", font=_ui_font(11), width=80)
+        btn_reset.setToolTip("換一組新密鑰：之前給出去的連結全部失效（手機要重新開新連結）")
+        btn_reset.clicked.connect(self._reset_remote_token)
+        row2.addWidget(btn_reset)
+        root.addLayout(row2)
+
+    def _fill_remote_links(self, links: list[str]) -> None:
+        self.remote_link_combo.clear()
+        for ln in links:
+            self.remote_link_combo.addItem(ln)
+
+    def _copy_remote_link(self) -> None:
+        from PyQt6.QtWidgets import QApplication
+        link = self.remote_link_combo.currentText()
+        if link:
+            QApplication.clipboard().setText(link)
+
+    def _reset_remote_token(self) -> None:
+        if QMessageBox.question(
+                self, "重設密鑰", "換一組新密鑰？之前的連結會全部失效。"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self._fill_remote_links(self._on_reset_remote_token())
+
     def _on_ok(self) -> None:
         values = {
             'auto_copy': self.auto_copy_cb.isChecked(),
@@ -652,6 +721,9 @@ class SettingsDialog(QWidget):
             'fetch_proxy_url': self.fetch_proxy_edit.text().strip(),
             'api_proxy_url': self.api_proxy_edit.text().strip(),
         }
+        if hasattr(self, "remote_cb"):
+            values['remote_enabled'] = self.remote_cb.isChecked()
+            values['remote_port'] = int(self.remote_port_spin.value())
         try:
             self._on_apply(values)
         except Exception as e:

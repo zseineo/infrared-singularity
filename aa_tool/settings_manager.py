@@ -191,6 +191,11 @@ class AppCache:
     # 格式如 http://127.0.0.1:7890（Clash 預設）或 127.0.0.1:10809（v2rayN）。
     fetch_proxy_url: str = ""
     api_proxy_url: str = ""
+    # 手機遠端控制自動翻譯（v3.29，aa_tool/remote_control.py）：預設關閉；
+    # remote_token 為存取密鑰（第一次啟用時產生，「重設密鑰」可換）
+    remote_enabled: bool = False
+    remote_port: int = 8765
+    remote_token: str = ""
     # 主畫面「填入翻譯」旁的核取框：讀取新的一話（上一話／下一話／網址讀取）
     # 成功後自動清空「填入翻譯」欄，避免舊譯文殘留被誤用。預設關閉。
     fetch_clear_ai_text: bool = False
@@ -517,6 +522,13 @@ class SettingsManager:
                 'fetch_proxy_url', cache.fetch_proxy_url))
             cache.api_proxy_url = str(data.get(
                 'api_proxy_url', cache.api_proxy_url))
+            cache.remote_enabled = bool(data.get('remote_enabled', cache.remote_enabled))
+            try:
+                cache.remote_port = min(65535, max(1024, int(
+                    data.get('remote_port', cache.remote_port))))
+            except (TypeError, ValueError):
+                pass
+            cache.remote_token = str(data.get('remote_token', cache.remote_token) or "")
             try:
                 cache.api_timeout = max(0, int(data.get(
                     'api_timeout', cache.api_timeout)))
@@ -745,6 +757,9 @@ class SettingsManager:
                 'fetch_clear_ai_text': cache.fetch_clear_ai_text,
                 'fetch_proxy_url': cache.fetch_proxy_url,
                 'api_proxy_url': cache.api_proxy_url,
+                'remote_enabled': cache.remote_enabled,
+                'remote_port': cache.remote_port,
+                'remote_token': cache.remote_token,
                 'api_timeout': cache.api_timeout,
                 'gemini_gem_url': cache.gemini_gem_url,
                 'gemini_profile_dir': cache.gemini_profile_dir,

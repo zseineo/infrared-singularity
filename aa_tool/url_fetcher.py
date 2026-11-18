@@ -459,7 +459,10 @@ def _normalize_color_tags(text: str) -> str:
         if cm:
             return f'<span style="color:{_canon_color_value(cm.group(1))}">'
         return ''
-    text = re.sub(r'<span\s+style="([^"]*color[^"]*)">', _repl, text)
+    # span 可帶其他屬性（himanatokiniyaruo 的骰子結果：
+    # `<span style="color:red" data-dice-color="1">`）；只認 style 不正規化的話，
+    # 它的 </span> 會在 _cleanup_unmatched_spans 被當成多餘刪掉，紅色延伸到行尾。
+    text = re.sub(r'<span\b[^>]*?\sstyle="([^"]*color[^"]*)"[^>]*>', _repl, text)
 
     return text
 

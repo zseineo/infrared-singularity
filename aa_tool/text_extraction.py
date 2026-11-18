@@ -96,6 +96,8 @@ _POSTER_LINE_RE = re.compile(r'ID:[A-Za-z0-9+/.]{6,}')
 # 提取後再 `_DICE_NOTATION_FW_RE` 把它換回半形，使最終輸出維持原始的半形冒號。
 _DICE_NOTATION_RE = re.compile(r'(【\d+D\d+):(\d+】)')
 _DICE_NOTATION_FW_RE = re.compile(r'(【\d+D\d+)：(\d+】)')
+# 整項只有一個骰值（可帶加減值）：「【1D5:2】」「【1D6:5】+6」
+_DICE_ONLY_RE = re.compile(r'【\d+[DdＤｄ]\d+[:：]\d+(?:\([^)]*\))?】[+\-＋－\d]*')
 # 候選後方 1~2 個空白接骰子（評分用的強脈絡，見 `_score_candidate`）
 _DICE_SUFFIX_RE = re.compile(r'[ 　]{1,2}【\d+[DdＤｄ]\d+[:：]')
 
@@ -2052,6 +2054,10 @@ def extract_text(
                 text = _complete_brackets(text, line, hint_pos=cand_s)
                 text = _strip_speaker_tag(text)
                 if any(reg.search(text) for reg in custom_regexes):
+                    # 純骰值項先保留：它可能是句子的一部分（「【1D5:2】 0人は
+                    # 倒したはず……」），等空白相鄰合併之後仍單獨存在才剔除
+                    if _DICE_ONLY_RE.fullmatch(text):
+                        extracted.append((text, line_num))
                     continue
                 # 剝除名牌後只剩括號／標點（「【白黒双子】「「」」」→「「「」」」、
                 # 「【難易度】：」→「：」）不是可翻譯內容
@@ -2133,6 +2139,11 @@ def extract_text(
 
     if use_experimental:
         extracted = _merge_space_adjacent(extracted, lines, raw_lines)
+        # 合併後再套一次自訂規則：暫留的純骰值沒併進句子的（或只跟別的骰值
+        # 併在一起的）在這裡剔除
+        if custom_regexes:
+            extracted = [(t, n) for t, n in extracted
+                         if not any(reg.search(t) for reg in custom_regexes)]
     return extracted
 
 
@@ -2417,6 +2428,12 @@ def analyze_extraction(
                     (reg.pattern for reg in custom_regexes if reg.search(text)),
                     None)
                 if hit:
+                    if _DICE_ONLY_RE.fullmatch(text):
+                        report.append(
+                            f"    -> ⏸ 命中自訂濾網 ({hit})，但為純骰值：暫留，"
+                            "併進相鄰句子才保留（見步驟 6）。")
+                        finals.append(text)
+                        continue
                     report.append(f"    -> ❌ 剔除：命中自訂濾網 ({hit})。")
                     continue
                 if text and _aa_veto(text) is not None:
@@ -2436,16 +2453,20 @@ def analyze_extraction(
                         "且見於正文提取內容 → ✅ 救回")
                     finals.append(t)
             # 步驟 6：空白相鄰合併（與 extract_text 的 `_merge_space_adjacent` 一致）
-            if len(finals) >= 2:
+            # 合併後再套一次自訂濾網（暫留的純骰值沒併進句子的在這裡剔除）
+            if finals:
                 ordered = sorted(finals, key=lambda t: (line.find(t) < 0,
                                                         line.find(t)))
                 merged = _merge_line_items(ordered, line, line)
-                if len(merged) < len(ordered):
+                kept = [t for t in merged
+                        if not any(reg.search(t) for reg in custom_regexes)]
+                if len(merged) < len(ordered) or len(kept) < len(merged):
                     report.append(
                         "\n[步驟 6] 空白相鄰合併（原文只隔 1~2 個空白的相鄰項"
-                        "合併為一個 ID）：")
+                        "合併為一個 ID；合併後再套一次自訂濾網）：")
                     for t in merged:
-                        report.append(f"  -> ✅ '{t}'")
+                        mark = '✅' if t in kept else '❌（命中自訂濾網）'
+                        report.append(f"  -> {mark} '{t}'")
             report.append("\n" + "=" * 40 + "\n")
             continue
 

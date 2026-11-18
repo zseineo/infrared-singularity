@@ -12,6 +12,7 @@
     *   `check_ui_layout.py` — UI 版面解析度適配檢查（離螢幕跑，見 §4.14）
     *   `aa_auto_translate.py` — 連續多話自動翻譯協調器（CLI 入口，亦由主視窗 GUI 呼叫）。詳見 §4.13
     *   `aa_auto_translate_qt.py` — 自動翻譯面板 `AutoTranslatePanel`（嵌入主視窗 QStackedWidget index 4）。詳見 §4.13
+    *   `aa_remote_mirror_qt.py` — 手機遠端控制台的面板鏡像（把 Qt 面板轉成手機欄位清單、套回修改、鏡像對話框）。詳見 §4.17
     *   `aa_tool/` — 純邏輯模組（無 UI 依賴）：`app_paths`（設定資料夾位置，見 §1「設定資料夾」）、`net_proxy`（代理設定，見 §4.5）、`constants`、`font_measure`（Protocol）、`html_io`、`settings_manager`、`text_extraction`、`translation_engine`、`bubble_alignment`、`url_fetcher`、`wiki_name_fetcher`、`gemini_web`、`gemini_api`、`secure_store`、`original_cache`、`qt_helpers`、`dark_theme.qss`
 *   **技術棧**: Python 3, **PyQt6** (UI 框架), `re`, `math`, `os`, `html`, `urllib.request`, `threading`, `gzip`, `json`, `subprocess`；自動翻譯另需 **Playwright**（操控網頁版 Gemini，見 §4.13）
 *   **狀態存儲機制**:
@@ -669,7 +670,17 @@
     *   `_remote_snapshot(since)`：running／stopping（stop event 已設）／paused（橫幅「繼續」鈕顯示中）／thread_busy（強制停止後背景還在收尾）、橫幅文字、面板「當前」標題、已完成／已跳過清單文字、`AutoTranslatePanel._log_full[since:]`（第一次最多回最後 500 行；`since` 大於總數＝電腦上清過 Log → `log_reset`）、表單（面板的起始網址／話數／翻到最後一話與手動網址清單數；面板還沒建立時用主視窗狀態）。
     *   `_remote_act(action, payload)`：stop → `_stop_auto_translate()`；force_stop → `_force_stop_auto_translate(confirm=False)`（新增參數，手機頁面自己先 `confirm()`）；resume → `_resume_auto_translate()`；start → 必要時 `show_auto_translate_panel()`（電腦畫面會切到自動翻譯面板）、把網址／話數／翻到最後一話填進面板欄位，再走面板的 `_on_start()`（同一套驗證與參數收集）；沒開始時回傳 `show_status` 最後一則訊息（新增 `_last_status_msg`）當原因。
 *   **讀取網址（v3.32）**：手機起始網址旁「🌐 讀取」→ `POST /api/read {url}` → `_remote_read_url()`：同一時間只讀一個（`loading` 中拒絕），沒在翻譯時同時 `AutoTranslatePanel.set_start_url(url)`（面板照常背景算檔名／作品資料夾；面板未建立時先 `show_auto_translate_panel()`），背景以 `_fetch_page_html`（理會「不讀暫存」）＋`_parse_page_html` 解析，剛抓且內文達 `MIN_CONTENT_LINES` 才 `_write_url_cache`；結果放 `_remote_read`（`seq` 遞增、`url`、`loading`、`title`、`lines`、`chapters=[{title,url,current}]`、`error`；連線失敗附診斷第一行），只套用 seq 仍相同的結果。快照多回 `read` 與 `preview`（`_remote_preview()`：面板 `filename_preview` 的文字或 placeholder——讀取中／失敗訊息也照樣顯示；勾「依照標題過濾建立資料夾」時附作品資料夾欄文字）。手機端顯示「檔名」「作品資料夾」，讀取結果卡片列出上下話（當前話標 ▶ 並捲到可見處，`seq`／`loading` 沒變不重畫），點一話＝填入起始網址並再讀一次（翻譯中不可點）。
-*   **手機頁**：狀態徽章（閒置／執行中／停止中／暫停中）、橫幅、當前話、完成／跳過數與清單、停止／強制停止／繼續、開始表單（第一次載入與一批剛結束時帶入電腦面板的值——結束時電腦會把接續網址回填到起始網址）、Log（增量附加、可關自動捲動）。執行中表單鎖定。
+*   **手機頁（v3.33 起分四個分頁）**：頂端狀態徽章常駐。
+    *   **狀態**：橫幅、當前話、完成／跳過數與清單、開始（照電腦面板目前設定開始，`start` 不帶欄位＝不改面板）／停止／強制停止／繼續、Log（增量附加、可關自動捲動）。
+    *   **面板**、**連線設定**：`GET /api/ui?view=auto|conn` → `_remote_ui()` 以 `aa_remote_mirror_qt.Mirror` **自動鏡像**電腦上的元件（`auto`＝`AutoTranslatePanel` 排除 `_conn_panel`；`conn`＝`_conn_inner`）。切到連線設定時 `POST conn_open`：電腦上浮層沒開著就先 `_load_conn_from_main()`（與電腦開浮層時相同）。改值 `ui_set`、按鈕 `ui_click`。
+    *   **網址讀取**：網址＋「🌐 讀取」、上一話／下一話（依上次讀取的上下話清單）、作者名稱／忽略留言／不讀暫存（`POST fetchopts` → `_author_name`／`_author_only`／`_skip_url_cache`，網址讀取視窗開著時同步它的欄位，`schedule_save`）、檔名／作品資料夾預覽、上下話清單（點一話＝讀取該話）。
+    *   **電腦上跳出的對話框**：快照的 `modal`＝`Mirror.describe_modal()`（`QApplication.activeModalWidget()`；QMessageBox 給文字與按鈕、QDialog 走訪內容），手機以底部面板顯示並可直接回答（同樣走 `ui_set`／`ui_click`）。
+    *   **資料夾瀏覽**：`GET /api/fs?path=`（`_remote_fs()`：只列子資料夾名稱，不列檔案；空路徑列磁碟；`@out`＝輸出資料夾、`@reorder`＝整理順序預設資料夾）。
+*   **面板鏡像（`aa_remote_mirror_qt.py`，v3.33）**：`Mirror.describe(root, exclude=, overrides=)` 依 layout 順序走訪（QFormLayout 帶列標籤、跨欄列只走一次；水平排列中以「：」結尾的短 QLabel 當下一個控制項的標籤；QGroupBox／QTabWidget 標題當小標；QScrollArea／QSplitter 往內走；HLine 當分隔線），只收 `isVisibleTo(root)` 的元件，支援 QLineEdit／QPlainTextEdit（超過 2 萬字唯讀）／QComboBox（可編輯的用 datalist）／QCheckBox／QRadioButton／QSpinBox／QPushButton（可切換的顯示狀態）／QLabel／QTableWidget（儲存格文字、儲存格內的下拉、選取列）／QListWidget，各帶提示文字（手機上 ⓘ 展開）。元件 id＝`str(id(widget))`，每次描述重建對照表；各 view 一個 Mirror，動作時 `_remote_lookup()` 跨 view 找，找不到回「畫面已更新」。
+    *   **套用＝模擬使用者操作**（`apply_set`／`apply_click`）：QLineEdit `setText`＋補發 `editingFinished`（輸出資料夾等靠它持久化）、下拉 `setCurrentIndex`＋補發 `activated`、核取框值不同才 `click()`、SpinBox `setValue`＋`editingFinished`、按鈕 `QTimer.singleShot(0, click)`——按鈕開的模態對話框（`exec()`）不會把這次 HTTP 呼叫卡住，之後由 `describe_modal` 鏡像。停用中的元件拒絕修改。
+    *   **不鏡像的元件**：面板上 `setProperty("remoteSkip", True)` 標記——API 金鑰欄 `api_keys_edit`（金鑰完全不經手機）、開始／停止／強制停止三鈕（狀態分頁有專用版）、左下狀態欄、右側 Log 區（含「⤢ 完整 Log」）。
+    *   **改用手機版的按鈕**（`overrides`）：輸出資料夾「瀏覽…」（`btn_browse_out`，原本開系統原生檔案對話框、無法鏡像）→ 手機資料夾瀏覽，選好 `POST folder {id: out_edit, path}`；「整理順序…」→ 手機資料夾瀏覽（預設 `@reorder`）→ `POST reorder {path}` → `reorder_folder_files(folder=path)`（新參數，指定時不開選擇對話框），確認視窗鏡像到手機。網址清單／過濾詞清單／關鍵字設定本來就是 Qt 對話框，直接鏡像。
+    *   **新增面板欄位時**：一般元件自動出現在手機上；會開**系統原生**對話框（QFileDialog）的按鈕要加進 `_remote_ui` 的 overrides；不該給手機的元件標 `remoteSkip`。
 
 ## 5. UI 介面關聯變數
 UI widget 屬於 `TranslatePanel`（除特別註明外）：

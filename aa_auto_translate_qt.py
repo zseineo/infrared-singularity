@@ -360,6 +360,7 @@ class AutoTranslatePanel(QWidget):
         self.out_edit.textChanged.connect(lambda _t: self._update_series_exists())
         btn_browse = QPushButton("瀏覽…")
         btn_browse.clicked.connect(self._browse_out_dir)
+        self.btn_browse_out = btn_browse   # 手機遠端控制台改用手機上的資料夾瀏覽
         out_hl.addWidget(self.out_edit, 1)
         out_hl.addWidget(btn_browse)
         form.addRow("輸出資料夾：", out_row)
@@ -572,6 +573,9 @@ class AutoTranslatePanel(QWidget):
         self.btn_force_stop.setEnabled(False)
         self.btn_force_stop.clicked.connect(self._on_force_stop)
         btn_hl.addWidget(self.btn_force_stop)
+        # 手機遠端控制台（aa_remote_mirror_qt）有自己的開始／停止鈕與 Log，不重複鏡像
+        for _b in (self.btn_start, self.btn_stop, self.btn_force_stop):
+            _b.setProperty("remoteSkip", True)
         btn_clear = _btn("清空 Log", "#6c757d", "#5a6268", width=80)
         btn_clear.clicked.connect(self._clear_log)
         btn_hl.addWidget(btn_clear)
@@ -613,13 +617,16 @@ class AutoTranslatePanel(QWidget):
         # ── 左下：本批進度一覽（當前／已完成／已跳過），由協調器的 on_event
         # 結構化事件驅動（MainWindow._start_auto_translate → on_translate_event）。
         # Log 是逐行流水帳，一長就看不出「翻到哪、哪幾話沒翻」，這裡一眼看完。
-        splitter.addWidget(self._build_status_column())
+        status_col = self._build_status_column()
+        status_col.setProperty("remoteSkip", True)   # 手機控制台另有狀態區
+        splitter.addWidget(status_col)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([240, 480])
 
         # ── 右：執行 Log ──
         log_col = QWidget()
+        log_col.setProperty("remoteSkip", True)
         lv = QVBoxLayout(log_col)
         lv.setContentsMargins(0, 0, 0, 0)
         lv.setSpacing(4)
@@ -844,6 +851,7 @@ class AutoTranslatePanel(QWidget):
         form.addRow("額外參數：", self.api_extra_body_edit)
 
         self.api_keys_edit = QPlainTextEdit()
+        self.api_keys_edit.setProperty("remoteSkip", True)   # 金鑰一律不經手機遠端控制台
         self.api_keys_edit.setPlaceholderText(
             "每行一把 API 金鑰；多把會輪流送出請求（各供應商分開記住）")
         self.api_keys_edit.setFixedHeight(90)

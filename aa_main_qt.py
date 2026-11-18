@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.32"
+APP_VERSION = "3.33"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -1860,14 +1860,16 @@ class MainWindow(QMainWindow):
         else:
             self.show_status("⚠️ 尚未讀取過網址！", "#f39c12")
 
-    def reorder_folder_files(self, start_dir: str = "") -> None:
+    def reorder_folder_files(self, start_dir: str = "", folder: str = "") -> None:
         """自動翻譯面板「整理順序」：依投稿日期替作品資料夾的檔名加上閱讀順序編號。
 
         start_dir：選資料夾對話框的起始位置（面板傳目前的作品資料夾），空字串用 _last_dir。
+        folder：直接指定資料夾、不開選擇對話框（手機遠端控制台在手機上選好）。
         """
         from aa_tool import reading_order
-        folder = QFileDialog.getExistingDirectory(
-            self, "選取要整理順序的作品資料夾", start_dir or self._last_dir)
+        if not folder:
+            folder = QFileDialog.getExistingDirectory(
+                self, "選取要整理順序的作品資料夾", start_dir or self._last_dir)
         if not folder:
             return
         try:
@@ -1972,12 +1974,18 @@ class MainWindow(QMainWindow):
     #  自動翻譯（連續多話，操控網頁版 Gemini）
     # ════════════════════════════════════════════════════════════
 
-    def show_auto_translate_panel(self) -> None:
-        """切換到自動翻譯面板（index 4）。"""
+    def _ensure_auto_panel(self) -> 'AutoTranslatePanel':
+        """自動翻譯面板還沒建立就建立（不切換畫面；手機遠端控制台鏡像時用）。"""
         if self._auto_window is None:
             self._auto_window = AutoTranslatePanel(self)
             self.stack.removeWidget(self._auto_placeholder)
             self.stack.insertWidget(4, self._auto_window)
+        return self._auto_window
+
+    def show_auto_translate_panel(self) -> None:
+        """切換到自動翻譯面板（index 4）。"""
+        if self._auto_window is None:
+            self._ensure_auto_panel()
         else:
             # 切回面板時若不在執行中，重新從目前狀態同步欄位（current_url 等可能變了）
             if not self._auto_translate_running:
@@ -4122,7 +4130,7 @@ class MainWindow(QMainWindow):
             self.save_cache()
         srv = rc.RemoteServer(
             self._remote_port, self._remote_token,
-            snapshot=lambda since: self._call_on_main(lambda: self._remote_snapshot(since)),
+            query=lambda n, p: self._call_on_main(lambda: self._remote_query(n, p)),
             act=lambda a, p: self._call_on_main(lambda: self._remote_act(a, p)))
         try:
             srv.start()
@@ -4192,6 +4200,9 @@ class MainWindow(QMainWindow):
             "form": form,
             "read": dict(self._remote_read),
             "preview": self._remote_preview(),
+            "modal": self._mirror("modal").describe_modal(),
+            "fetchopts": {"author": self._author_name, "author_only": self._author_only,
+                          "skip_cache": self._skip_url_cache},
         }
 
     def _remote_preview(self) -> dict:
@@ -4278,17 +4289,139 @@ class MainWindow(QMainWindow):
             url = str(payload.get("url") or "").strip()
             if url:
                 p.url_edit.setText(url)
-            try:
-                p.count_spin.setValue(max(1, int(payload.get("count") or 1)))
-            except (TypeError, ValueError):
-                pass
-            p.until_last.setChecked(bool(payload.get("until_last")))
+            if "count" in payload:
+                try:
+                    p.count_spin.setValue(max(1, int(payload.get("count") or 1)))
+                except (TypeError, ValueError):
+                    pass
+            if "until_last" in payload:
+                p.until_last.setChecked(bool(payload.get("until_last")))
             self._last_status_msg = ""
             p._on_start()
             if self._auto_translate_running:
                 return True, "已開始自動翻譯"
             return False, self._last_status_msg or "沒有開始（請在電腦上確認設定）"
+        if action in ("ui_set", "ui_click", "folder"):
+            w = self._remote_lookup(str(payload.get("id") or ""))
+            if w is None:
+                return False, "畫面已更新，請再試一次"
+            from aa_remote_mirror_qt import apply_click, apply_set
+            try:
+                if action == "ui_click":
+                    apply_click(w)
+                elif action == "folder":
+                    path = str(payload.get("path") or "")
+                    if not os.path.isdir(path):
+                        return False, "資料夾不存在"
+                    apply_set(w, path)
+                else:
+                    apply_set(w, payload.get("value"), payload)
+            except ValueError as e:
+                return False, str(e)
+            return True, "已套用"
+        if action == "conn_open":
+            p = self._ensure_auto_panel()
+            if not p._conn_panel.isVisible():   # 電腦上沒開著＝照電腦開浮層時一樣重新載入
+                p._load_conn_from_main()
+            return True, ""
+        if action == "reorder":
+            path = str(payload.get("path") or "") or self._remote_reorder_start()
+            if not os.path.isdir(path):
+                return False, "資料夾不存在"
+            # 延後執行：確認對話框會鏡像到手機，這次呼叫不能等它
+            QTimer.singleShot(0, lambda: self.reorder_folder_files(folder=path))
+            return True, "請在手機上確認新的順序"
+        if action == "fetchopts":
+            self._author_name = str(payload.get("author") or "").strip()
+            self._author_only = bool(payload.get("author_only"))
+            self._skip_url_cache = bool(payload.get("skip_cache"))
+            if self._url_fetch_win is not None and self._url_fetch_win_visible():
+                win = self._url_fetch_win
+                win.author_name_entry.setText(self._author_name)
+                win.author_only_switch.setChecked(self._author_only)
+                win.skip_cache_switch.setChecked(self._skip_url_cache)
+            self.schedule_save()
+            return True, "已套用"
         return False, "未知的動作"
+
+    # ── 手機遠端控制台：面板鏡像（aa_remote_mirror_qt）──
+
+    def _remote_query(self, name: str, params: dict) -> dict:
+        if name == "state":
+            try:
+                since = int(params.get("since") or 0)
+            except ValueError:
+                since = 0
+            return self._remote_snapshot(since)
+        if name == "ui":
+            return self._remote_ui(params.get("view", ""))
+        if name == "fs":
+            return self._remote_fs(params.get("path", ""))
+        return {"error": "unknown"}
+
+    def _mirror(self, view: str):
+        from aa_remote_mirror_qt import Mirror
+        if not hasattr(self, "_mirrors"):
+            self._mirrors = {}
+        return self._mirrors.setdefault(view, Mirror())
+
+    def _remote_lookup(self, key: str):
+        for mi in getattr(self, "_mirrors", {}).values():
+            w = mi.lookup(key)
+            if w is not None:
+                return w
+        return None
+
+    def _remote_ui(self, view: str) -> dict:
+        p = self._ensure_auto_panel()
+        if view == "auto":
+            items = self._mirror("auto").describe(
+                p, exclude={p._conn_panel},
+                overrides={p.btn_browse_out: f"folder:{id(p.out_edit)}",
+                           p.btn_reorder: "reorder"})
+        elif view == "conn":
+            items = self._mirror("conn").describe(p._conn_inner)
+        else:
+            return {"error": "unknown view"}
+        return {"items": items}
+
+    def _remote_reorder_start(self) -> str:
+        """「整理順序」預設資料夾（同 AutoTranslatePanel._on_reorder_clicked）。"""
+        p = self._auto_window
+        if p is None:
+            return ""
+        out_dir = p.out_edit.text().strip()
+        if out_dir and p._series_folder_value:
+            sub = os.path.join(out_dir, p._series_folder_value)
+            if os.path.isdir(sub):
+                return sub
+        return out_dir
+
+    def _remote_fs(self, path: str) -> dict:
+        """手機的資料夾瀏覽：只列子資料夾名稱（不列檔案、不讀內容）。"""
+        p = self._auto_window
+        if path == "@out":
+            path = p.out_edit.text().strip() if p is not None else ""
+        elif path == "@reorder":
+            path = self._remote_reorder_start()
+        if not path or not os.path.isdir(path):
+            drives = [f"{c}:\\" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                      if os.path.isdir(f"{c}:\\")]
+            return {"path": "", "parent": "",
+                    "dirs": [{"name": d, "path": d} for d in drives]}
+        path = os.path.abspath(path)
+        try:
+            names = sorted((n for n in os.listdir(path)
+                            if not n.startswith(("$", "."))
+                            and os.path.isdir(os.path.join(path, n))), key=str.casefold)
+        except OSError as e:
+            return {"path": path, "parent": os.path.dirname(path.rstrip("\\/")),
+                    "dirs": [], "error": str(e)}
+        parent = os.path.dirname(path.rstrip("\\/"))
+        if parent == path or (len(path) <= 3 and path.endswith(":\\")):
+            parent = ""
+        return {"path": path, "parent": parent,
+                "dirs": [{"name": n, "path": os.path.join(path, n)} for n in names[:500]]}
 
     # ── 自動更新（v3.28，⚙ 設定「檢查更新」）──
 

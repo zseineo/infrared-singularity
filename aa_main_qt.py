@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.30"
+APP_VERSION = "3.31"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -4092,14 +4092,14 @@ class MainWindow(QMainWindow):
 
     # ── 手機遠端控制自動翻譯（v3.29，aa_tool/remote_control.py）──
 
-    def _remote_links(self) -> list[str]:
+    def _remote_links(self) -> list[tuple[str, str]]:
         from aa_tool import remote_control as rc
         if not self._remote_token:
             self._remote_token = rc.new_token()
             self.save_cache()
         return rc.access_links(self._remote_port, self._remote_token)
 
-    def _reset_remote_token(self) -> list[str]:
+    def _reset_remote_token(self) -> list[tuple[str, str]]:
         from aa_tool import remote_control as rc
         self._remote_token = rc.new_token()
         self.save_cache()

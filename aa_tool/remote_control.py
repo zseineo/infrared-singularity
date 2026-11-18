@@ -15,8 +15,11 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 import secrets
+import shutil
 import socket
+import subprocess
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -49,8 +52,66 @@ def local_ipv4s() -> list[str]:
     return [ip for ip in ips if not ip.startswith("127.")] or ["127.0.0.1"]
 
 
-def access_links(port: int, token: str) -> list[str]:
-    return [f"http://{ip}:{port}/?t={token}" for ip in local_ipv4s()]
+def _tailscale_exe() -> str:
+    exe = shutil.which("tailscale")
+    if exe:
+        return exe
+    for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
+                 os.environ.get("ProgramFiles(x86)", "")):
+        p = os.path.join(base, "Tailscale", "tailscale.exe") if base else ""
+        if p and os.path.isfile(p):
+            return p
+    return ""
+
+
+def tailscale_info(timeout: float = 3.0) -> tuple[list[str], str]:
+    """向 Tailscale CLI 問本機的 Tailscale IPv4 與 MagicDNS 名稱；沒裝／沒登入回 ([], "")。
+
+    系統解析主機名稱（``local_ipv4s``）不一定列得出 Tailscale 網卡的 100.x，直接問最準。
+    """
+    exe = _tailscale_exe()
+    if not exe:
+        return [], ""
+    try:
+        r = subprocess.run(
+            [exe, "status", "--json"], capture_output=True, timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        data = json.loads(r.stdout.decode("utf-8", "replace") or "{}")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return [], ""
+    if data.get("BackendState") != "Running":
+        return [], ""
+    me = data.get("Self") or {}
+    ips = [ip for ip in me.get("TailscaleIPs") or [] if "." in ip]
+    return ips, str(me.get("DNSName") or "").rstrip(".")
+
+
+def _is_tailscale_ip(ip: str) -> bool:
+    """100.64.0.0/10（Tailscale 用的 CGNAT 網段）。"""
+    try:
+        a, b = (int(x) for x in ip.split(".")[:2])
+    except ValueError:
+        return False
+    return a == 100 and 64 <= b <= 127
+
+
+def access_links(port: int, token: str) -> list[tuple[str, str]]:
+    """(說明, 連結)：Tailscale（在家在外都能用）排前面，再來是區網位址。"""
+    ts_ips, ts_name = tailscale_info()
+    out: list[tuple[str, str]] = []
+    if ts_name:
+        out.append(("Tailscale 名稱", f"http://{ts_name}:{port}/?t={token}"))
+    seen: set[str] = set()
+    for ip in ts_ips + [ip for ip in local_ipv4s() if _is_tailscale_ip(ip)]:
+        if ip not in seen:
+            seen.add(ip)
+            out.append(("Tailscale", f"http://{ip}:{port}/?t={token}"))
+    for ip in local_ipv4s():
+        if ip in seen or ip.startswith("169.254."):   # 169.254＝沒拿到位址的網卡
+            continue
+        seen.add(ip)
+        out.append(("同一個 Wi-Fi／區網", f"http://{ip}:{port}/?t={token}"))
+    return out
 
 
 class RemoteServer:

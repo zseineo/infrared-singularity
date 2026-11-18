@@ -91,7 +91,7 @@ class SettingsDialog(QWidget):
         on_check_update: Callable[[], None] | None = None,
         remote_enabled: bool = False,
         remote_port: int = 8765,
-        remote_links: list[str] | None = None,
+        remote_links: list[tuple[str, str]] | None = None,
         on_reset_remote_token: Callable[[], list[str]] | None = None,
     ) -> None:
         super().__init__(parent)
@@ -637,7 +637,7 @@ class SettingsDialog(QWidget):
             "電腦開著本程式時，手機瀏覽器開下方連結即可查看自動翻譯的進度與 Log，\n"
             "並開始／停止／強制停止／繼續。按「確定」後生效。\n"
             "・手機與電腦要在同一個網路；在外面請兩邊都裝 Tailscale（免費）連回來，\n"
-            "  連結改用 100.x 開頭的那個位址。不要在路由器開 port 對外。\n"
+            "  連結選「Tailscale」那幾項（裝了 Tailscale 會自動列在最前面）。不要在路由器開 port 對外。\n"
             "・第一次啟用時 Windows 防火牆會詢問，請允許「私人網路」。")
         row.addWidget(self.remote_cb)
         row.addWidget(QLabel("埠："))
@@ -654,7 +654,9 @@ class SettingsDialog(QWidget):
         self.remote_link_combo.setFont(_ui_font(10))
         self.remote_link_combo.setMinimumWidth(150)
         self.remote_link_combo.setToolTip(
-            "在手機瀏覽器開這個連結（含存取密鑰，別給別人）。電腦有多張網卡時下拉可選其他位址；\n"
+            "在手機瀏覽器開這個連結（含存取密鑰，別給別人）。下拉可選其他位址：\n"
+            "・Tailscale：手機也開著 Tailscale 時，在家在外都能用（建議）\n"
+            "・同一個 Wi-Fi／區網：手機跟電腦連同一個網路時才能用\n"
             "改了埠要按「確定」後再複製。手機上可以「加到主畫面」當成 App 用。")
         self._fill_remote_links(self._remote_links)
         row2.addWidget(self.remote_link_combo, 1)
@@ -667,14 +669,14 @@ class SettingsDialog(QWidget):
         row2.addWidget(btn_reset)
         root.addLayout(row2)
 
-    def _fill_remote_links(self, links: list[str]) -> None:
+    def _fill_remote_links(self, links: list[tuple[str, str]]) -> None:
         self.remote_link_combo.clear()
-        for ln in links:
-            self.remote_link_combo.addItem(ln)
+        for label, url in links:
+            self.remote_link_combo.addItem(f"{label}：{url}", url)
 
     def _copy_remote_link(self) -> None:
         from PyQt6.QtWidgets import QApplication
-        link = self.remote_link_combo.currentText()
+        link = self.remote_link_combo.currentData()
         if link:
             QApplication.clipboard().setText(link)
 

@@ -668,6 +668,7 @@
 *   **執行緒**：伺服器回呼一律經 `MainWindow._call_on_main(fn, timeout=10)`（`_invoke_on_main` 訊號切回 Qt 主執行緒並等結果；電腦上開著對話框時巢狀事件迴圈仍會處理）。
     *   `_remote_snapshot(since)`：running／stopping（stop event 已設）／paused（橫幅「繼續」鈕顯示中）／thread_busy（強制停止後背景還在收尾）、橫幅文字、面板「當前」標題、已完成／已跳過清單文字、`AutoTranslatePanel._log_full[since:]`（第一次最多回最後 500 行；`since` 大於總數＝電腦上清過 Log → `log_reset`）、表單（面板的起始網址／話數／翻到最後一話與手動網址清單數；面板還沒建立時用主視窗狀態）。
     *   `_remote_act(action, payload)`：stop → `_stop_auto_translate()`；force_stop → `_force_stop_auto_translate(confirm=False)`（新增參數，手機頁面自己先 `confirm()`）；resume → `_resume_auto_translate()`；start → 必要時 `show_auto_translate_panel()`（電腦畫面會切到自動翻譯面板）、把網址／話數／翻到最後一話填進面板欄位，再走面板的 `_on_start()`（同一套驗證與參數收集）；沒開始時回傳 `show_status` 最後一則訊息（新增 `_last_status_msg`）當原因。
+*   **讀取網址（v3.32）**：手機起始網址旁「🌐 讀取」→ `POST /api/read {url}` → `_remote_read_url()`：同一時間只讀一個（`loading` 中拒絕），沒在翻譯時同時 `AutoTranslatePanel.set_start_url(url)`（面板照常背景算檔名／作品資料夾；面板未建立時先 `show_auto_translate_panel()`），背景以 `_fetch_page_html`（理會「不讀暫存」）＋`_parse_page_html` 解析，剛抓且內文達 `MIN_CONTENT_LINES` 才 `_write_url_cache`；結果放 `_remote_read`（`seq` 遞增、`url`、`loading`、`title`、`lines`、`chapters=[{title,url,current}]`、`error`；連線失敗附診斷第一行），只套用 seq 仍相同的結果。快照多回 `read` 與 `preview`（`_remote_preview()`：面板 `filename_preview` 的文字或 placeholder——讀取中／失敗訊息也照樣顯示；勾「依照標題過濾建立資料夾」時附作品資料夾欄文字）。手機端顯示「檔名」「作品資料夾」，讀取結果卡片列出上下話（當前話標 ▶ 並捲到可見處，`seq`／`loading` 沒變不重畫），點一話＝填入起始網址並再讀一次（翻譯中不可點）。
 *   **手機頁**：狀態徽章（閒置／執行中／停止中／暫停中）、橫幅、當前話、完成／跳過數與清單、停止／強制停止／繼續、開始表單（第一次載入與一批剛結束時帶入電腦面板的值——結束時電腦會把接續網址回填到起始網址）、Log（增量附加、可關自動捲動）。執行中表單鎖定。
 
 ## 5. UI 介面關聯變數

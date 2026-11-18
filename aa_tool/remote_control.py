@@ -235,7 +235,7 @@ class RemoteServer:
                     return
                 action = u.path.rsplit("/", 1)[-1]
                 if not u.path.startswith("/api/") or action not in (
-                        "start", "stop", "force_stop", "resume"):
+                        "start", "stop", "force_stop", "resume", "read"):
                     self._json(404, {"error": "not found"})
                     return
                 try:
@@ -287,6 +287,11 @@ details summary{cursor:pointer;color:var(--dim);font-size:14px}
 ul{margin:6px 0 0;padding-left:18px;font-size:13px}
 #msg{min-height:1.2em;margin-top:8px;font-size:14px}
 .err{color:#ff7b72}.okm{color:#7ee787}
+.chapters{max-height:40vh;overflow:auto;margin-top:8px;border-radius:8px;background:#1a1b1e}
+.chapters a{display:block;padding:9px 10px;border-bottom:1px solid var(--line);color:var(--fg);
+  text-decoration:none;font-size:14px;word-break:break-all}
+.chapters a.cur{background:#1f3b63;font-weight:600}
+.chapters a.sel{outline:2px solid var(--accent);outline-offset:-2px}
 </style></head><body>
 <h1>AATool 自動翻譯</h1>
 <div class="card">
@@ -303,13 +308,23 @@ ul{margin:6px 0 0;padding-left:18px;font-size:13px}
 </div>
 <div class="card" id="startCard">
   <label for="url">起始網址</label>
-  <input id="url" type="text" inputmode="url" autocomplete="off">
+  <div class="row" style="flex-wrap:nowrap">
+    <input id="url" type="text" inputmode="url" autocomplete="off" style="flex:1">
+    <button id="bRead" style="padding:10px 12px;white-space:nowrap">🌐 讀取</button>
+  </div>
+  <div class="dim" style="margin-top:6px">檔名：<span id="pvName">—</span></div>
+  <div class="dim" id="pvFolderRow" style="display:none">作品資料夾：<span id="pvFolder"></span></div>
   <div class="row" style="margin-top:4px">
     <div style="flex:1"><label for="count">話數</label><input id="count" type="number" min="1" max="999"></div>
     <label style="margin-top:28px"><input id="until" type="checkbox"> 翻到最後一話</label>
   </div>
   <div class="dim" id="listNote" style="margin-top:6px"></div>
   <div class="btns"><button id="bStart" style="grid-column:1/-1">▶ 開始自動翻譯</button></div>
+</div>
+<div class="card" id="readCard" style="display:none">
+  <div id="rdTitle" style="font-weight:600;word-break:break-all"></div>
+  <div id="rdStatus" class="dim" style="margin-top:4px"></div>
+  <div id="rdList" class="chapters"></div>
 </div>
 <div class="card">
   <details id="lists"><summary>已完成／已跳過清單</summary>
@@ -322,7 +337,7 @@ ul{margin:6px 0 0;padding-left:18px;font-size:13px}
   <pre id="log"></pre></div>
 <script>
 const $=id=>document.getElementById(id);
-let since=0,formFilled=false,busy=false,wasRunning=false;
+let since=0,formFilled=false,busy=false,wasRunning=false,readSeq=-1,readLoading=null;
 function fill(ul,items){ul.innerHTML='';for(const t of items){const li=document.createElement('li');li.textContent=t;ul.appendChild(li);}}
 async function post(action,body){
   busy=true;setBtns(window._st||{});$('msg').textContent='送出中…';$('msg').className='';
@@ -339,6 +354,28 @@ function setBtns(s){
   $('bForce').disabled=busy||!run;
   $('bResume').style.display=s.paused?'':'none';$('bResume').disabled=busy;
   for(const id of ['url','count','until'])$(id).disabled=run;
+  $('bRead').disabled=busy||(s.read&&s.read.loading);
+}
+function renderRead(r){
+  if(!r||!r.seq){return;}
+  if(r.seq===readSeq&&r.loading===readLoading)return;   // 沒變就不重畫（保留捲動位置）
+  readSeq=r.seq;readLoading=r.loading;
+  $('readCard').style.display='';
+  $('rdTitle').textContent=r.title||r.url||'';
+  const st=$('rdStatus');
+  if(!r.loading&&$('msg').textContent==='讀取中…')$('msg').textContent='';
+  if(r.loading){st.textContent='讀取中…';st.className='dim';}
+  else if(r.error){st.textContent=r.error;st.className='err';}
+  else{st.textContent='內文 '+r.lines+' 行，上下話 '+(r.chapters||[]).length+' 筆（點一下設為起始網址）';st.className='dim';}
+  const box=$('rdList');box.innerHTML='';let curEl=null;
+  for(const c of (r.chapters||[])){
+    const a=document.createElement('a');a.href='#';a.textContent=(c.current?'▶ ':'')+c.title;
+    if(c.current){a.className='cur';curEl=a;}
+    if(c.url===$('url').value)a.classList.add('sel');
+    a.onclick=ev=>{ev.preventDefault();if(window._st&&window._st.running)return;$('url').value=c.url;post('read',{url:c.url});};
+    box.appendChild(a);
+  }
+  if(curEl)box.scrollTop=curEl.offsetTop-box.offsetTop-box.clientHeight/3;
 }
 async function poll(){
   try{
@@ -357,6 +394,10 @@ async function poll(){
     if(!formFilled||(wasRunning&&!s.running)){
       $('url').value=s.form.url||'';$('count').value=s.form.count||1;$('until').checked=!!s.form.until_last;formFilled=true;}
     wasRunning=!!s.running;
+    renderRead(s.read);
+    const pv=s.preview||{};
+    $('pvName').textContent=pv.filename||'—';
+    $('pvFolderRow').style.display=pv.folder?'':'none';$('pvFolder').textContent=pv.folder||'';
     $('listNote').textContent=s.form.url_list?('電腦面板設了手動網址清單（'+s.form.url_list+' 個），會照清單翻，起始網址不用填'):'';
     if(s.log_reset){$('log').textContent='';}
     if(s.log.length){const lg=$('log');lg.textContent+=(lg.textContent?'\n':'')+s.log.join('\n');
@@ -367,6 +408,7 @@ async function poll(){
 }
 $('bStart').onclick=()=>post('start',{url:$('url').value.trim(),count:parseInt($('count').value||'1',10),until_last:$('until').checked});
 $('bStop').onclick=()=>post('stop');
+$('bRead').onclick=()=>{const u=$('url').value.trim();if(u)post('read',{url:u});};
 $('bForce').onclick=()=>{if(confirm('立即結束？正在翻譯的這一話會捨棄、不存檔。'))post('force_stop');};
 $('bResume').onclick=()=>post('resume');
 poll();setInterval(()=>{if(!busy)poll();},2000);

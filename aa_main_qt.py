@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.31"
+APP_VERSION = "3.32"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -776,6 +776,7 @@ class MainWindow(QMainWindow):
         self._remote_port: int = 8765
         self._remote_token: str = ""
         self._remote_server = None
+        self._remote_read: dict = {}      # 手機「讀取網址」的結果（seq 遞增，手機據此重畫清單）
         self._last_status_msg: str = ""   # 最後一則狀態訊息（遠端開始失敗時回報原因）
         # 「複製指定範圍」上次輸入的範圍字串（僅本次執行期間記住）
         self._copy_range_last: str = ""
@@ -4189,10 +4190,70 @@ class MainWindow(QMainWindow):
             "skipped": _items(p.skip_list) if p is not None else [],
             "log": lines, "log_total": total, "log_reset": reset,
             "form": form,
+            "read": dict(self._remote_read),
+            "preview": self._remote_preview(),
         }
+
+    def _remote_preview(self) -> dict:
+        """電腦面板目前算出的檔名與作品資料夾（AutoTranslatePanel._refresh_previews 的結果）。"""
+        p = self._auto_window
+        if p is None:
+            return {}
+        folder = ""
+        if p.group_by_series_cb.isChecked():
+            folder = (p.series_folder_edit.text().strip()
+                      or p.series_folder_edit.placeholderText().strip())
+        return {"filename": (p.filename_preview.text().strip()
+                             or p.filename_preview.placeholderText().strip()),
+                "folder": folder}
+
+    def _remote_read_url(self, url: str) -> tuple[bool, str]:
+        """手機「🌐 讀取」：背景抓取並解析，結果（標題、上下話清單）放進 _remote_read。
+
+        沒在翻譯時同時把網址填進電腦面板的起始網址，面板會照常算出檔名／作品資料夾。
+        """
+        if not url:
+            return False, "請先填網址"
+        if self._remote_read.get("loading"):
+            return False, "還在讀取上一個網址，請稍候"
+        seq = int(self._remote_read.get("seq", 0)) + 1
+        self._remote_read = {"seq": seq, "url": url, "loading": True}
+        if not self._auto_translate_running:
+            if self._auto_window is None:
+                self.show_auto_translate_panel()
+            self._auto_window.set_start_url(url)
+        author = self._author_name
+
+        def _bg() -> None:
+            res: dict = {"loading": False}
+            try:
+                page_html, fresh = self._fetch_page_html(url)
+                text, nav, title = _parse_page_html(page_html, url, author_name=author)
+                n_lines = _url_fetcher.content_line_count(text)
+                if fresh and n_lines >= _url_fetcher.MIN_CONTENT_LINES:
+                    self._write_url_cache(url, page_html)
+                res.update(
+                    title=title, lines=n_lines,
+                    chapters=[{"title": x["title"], "url": x["url"] or url,
+                               "current": bool(x["is_current"])} for x in nav],
+                    error=("" if n_lines >= _url_fetcher.MIN_CONTENT_LINES
+                           else _url_fetcher.too_short_message(n_lines)))
+            except Exception as e:  # noqa: BLE001
+                diag = getattr(e, "diagnosis", None)
+                res["error"] = f"讀取失敗：{e}" + (f"（{diag[0]}）" if diag else "")
+
+            def _apply() -> None:
+                if self._remote_read.get("seq") == seq:
+                    self._remote_read.update(res)
+            self._invoke_on_main.emit(_apply)
+
+        threading.Thread(target=_bg, daemon=True).start()
+        return True, "讀取中…"
 
     def _remote_act(self, action: str, payload: dict) -> tuple[bool, str]:
         running = self._auto_translate_running
+        if action == "read":
+            return self._remote_read_url(str(payload.get("url") or "").strip())
         if action == "stop":
             if not running:
                 return False, "目前沒有在執行"

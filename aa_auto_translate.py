@@ -100,6 +100,11 @@ _JAPANESE_MAX_RATIO = 0.3
 # 譯文文字字元少於此數不做③判定（樣本太少，幾個名字就能拉高比例）。
 _JAPANESE_MIN_CHARS = 200
 _HIRAGANA_RE = re.compile(r'[ぁ-ゖ]')
+# ④ 譯文英文比例（v3.37，與③共用設定項 reply_japanese）：AI 偶爾整段回英文譯文。
+#    英文字母佔（英文字母＋中日韓文字）超過此值即判定。實測原文暫存 4,981 份正常譯文
+#    P99＝10.4%、最高 35.6%；整段英文會接近 100%。
+_ENGLISH_MAX_RATIO = 0.4
+_LATIN_RE = re.compile(r'[A-Za-zＡ-Ｚａ-ｚ]')
 _TEXT_CHAR_RE = re.compile(
     r'[ぁ-ゖァ-ヺｦ-ﾝ㐀-䶿一-鿿'
     r'豈-﫿가-힯]')
@@ -142,7 +147,7 @@ ERROR_POLICY_LABELS = {
     "web_censored": "回覆被換成拒絕語",
     "reply_format": "回覆格式不符",
     "reply_lines": "譯文行數少太多",
-    "reply_japanese": "譯文殘留大量日文",
+    "reply_japanese": "譯文殘留大量日文／英文",
     "reply_ids": "譯文行號對不上",
     "fetch_fail": "抓取網頁失敗",
 }
@@ -634,6 +639,11 @@ def _check_reply_usable(sent: str, reply: str, policy: dict,
         _fail("reply_japanese",
               f"譯文殘留大量日文（平假名佔 {ja:.1%}，超過 {_JAPANESE_MAX_RATIO:.0%}，"
               "疑似有一部分沒翻）")
+    en, en_chars = _english_ratio(reply)
+    if en_chars >= _JAPANESE_MIN_CHARS and en > _ENGLISH_MAX_RATIO:
+        _fail("reply_japanese",
+              f"譯文大量是英文（英文字母佔 {en:.1%}，超過 {_ENGLISH_MAX_RATIO:.0%}，"
+              "疑似 AI 翻成了英文）")
 
 
 def _line_ids(text: str) -> list[str]:
@@ -648,6 +658,15 @@ def _japanese_ratio(reply: str) -> tuple[float, int]:
                    if _ID_LINE_RE.match(l))
     chars = len(_TEXT_CHAR_RE.findall(body))
     return (len(_HIRAGANA_RE.findall(body)) / chars if chars else 0.0), chars
+
+
+def _english_ratio(reply: str) -> tuple[float, int]:
+    """譯文（各 ``ID|`` 行 `|` 之後）英文字母佔（英文字母＋中日韓文字）的比例，與兩者總數。"""
+    body = "".join(l.split("|", 1)[1] for l in (reply or "").split("\n")
+                   if _ID_LINE_RE.match(l))
+    latin = len(_LATIN_RE.findall(body))
+    total = latin + len(_TEXT_CHAR_RE.findall(body))
+    return (latin / total if total else 0.0), total
 
 
 def _translate(session: GeminiWebSession, extracted: str,

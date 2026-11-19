@@ -1238,8 +1238,10 @@ def run_auto_translate(
     result.debug_log_path = result_debug_path
     url = start_url
 
-    # ── 依後端建立翻譯 session（兩者皆提供 open / translate / close） ──
-    if backend == "api":
+    # ── 依後端建立翻譯 session（皆提供 open / translate / close） ──
+    # hybrid（v3.34，「瀏覽器＋API」）：兩個都建立，外面包 HybridSession——瀏覽器優先，
+    # 瀏覽器額度用完改用 API，到了恢復時間切回瀏覽器（見 aa_tool/hybrid_session.py）。
+    if backend in ("api", "hybrid"):
         from aa_tool import gemini_api, openai_api, secure_store
         provider = (getattr(cache, "api_provider", "gemini") or "gemini").lower()
         keys = secure_store.load_keys(base_dir, provider)
@@ -1284,7 +1286,8 @@ def run_auto_translate(
             open_log = open_log[:-2] + f"，思考程度 {api_thinking}）…"
         if api_switch:
             open_log = open_log[:-2] + f"，思考{'開' if api_switch == 'on' else '關'}）…"
-    else:
+        api_session, api_open_log = session, open_log
+    if backend != "api":
         gem_url = gem_url or cache.gemini_gem_url
         if not gem_url:
             raise ValueError("未設定 Gem 網址（gemini_gem_url）")
@@ -1306,8 +1309,14 @@ def run_auto_translate(
             input_method=getattr(cache, "gemini_input_method", "fill"),
             thinking_level=str(getattr(cache, "gemini_thinking_level", "") or ""),
             send_method=getattr(cache, "gemini_send_method", "program"),
-            human_direct=bool(getattr(cache, "gemini_human_direct", False)))
+            human_direct=bool(getattr(cache, "gemini_human_direct", False)),
+            quota_fallback=(backend == "hybrid"))
         open_log = "開啟瀏覽器並登入 Gemini…"
+        if backend == "hybrid":
+            from aa_tool.hybrid_session import HybridSession
+            session = HybridSession(session, api_session, log=log, stop_event=stop_event)
+            open_log = ("開啟瀏覽器並登入 Gemini（瀏覽器額度用完時改用 "
+                        + api_open_log.removeprefix("使用 ").rstrip("…") + "）…")
 
     # 待補翻列表（v2.30）：伺服器忙碌／逾時連續重試達上限（後端丟
     # GeminiBusyRetriesExhausted）的話先暫時跳過、放進這裡，等下一次翻譯成功
@@ -1965,8 +1974,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--profile-dir", default=None,
                         help="Playwright 瀏覽器 profile 目錄")
     parser.add_argument("--backend", default=None,
-                        choices=["browser", "api"],
-                        help="翻譯後端：browser（操控網頁）或 api（Gemini API）")
+                        choices=["browser", "api", "hybrid"],
+                        help="翻譯後端：browser（操控網頁）、api（API）或 hybrid（瀏覽器優先，額度用完改 API）")
     parser.add_argument("--max-per-session", type=int, default=None,
                         help="同一對話最多送幾次後開新對話（覆寫設定）")
     parser.add_argument("--required-model", default="",

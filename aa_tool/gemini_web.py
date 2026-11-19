@@ -372,6 +372,72 @@ _QUOTA_RESET_RE = re.compile(
 )
 
 
+# 額度恢復時間（v3.34，「瀏覽器＋API」模式用來決定何時切回瀏覽器）。模型選單項目的
+# 額度字樣（「用量額度將於 15:30 重設」「下午3:30」「明天 09:00」「11月20日 上午9:00」、
+# 英文「resets at 3:30 PM」「available again Nov 20, 9:00 AM」「in 2 hours」…）。
+# 實際字樣尚未實測確認，這裡寬鬆解析；解析不到回 None，由呼叫端用預設間隔重試。
+_RESET_REL_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(小時|小时|hours?|hrs?|h\b|分鐘|分钟|minutes?|mins?)", re.I)
+_RESET_TIME_RE = re.compile(
+    r"(上午|下午|早上|晚上|中午|凌晨|傍晚)?\s*(\d{1,2})\s*[:：]\s*(\d{2})\s*"
+    r"(a\.?m\.?|p\.?m\.?)?", re.I)
+_RESET_DATE_ZH_RE = re.compile(r"(\d{1,2})\s*月\s*(\d{1,2})\s*[日号號]")
+_RESET_DATE_SLASH_RE = re.compile(r"(?<![\d:：])(\d{1,2})/(\d{1,2})(?![\d/])")
+_MONTHS = {m: i + 1 for i, m in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"))}
+_RESET_DATE_EN_RE = re.compile(
+    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b", re.I)
+
+
+def parse_quota_reset(text: str, now: float | None = None) -> float | None:
+    """從額度訊息解析恢復時刻（epoch 秒，本機時區）；解析不到回 None。"""
+    import datetime as _dt
+    if not text:
+        return None
+    now_ts = time.time() if now is None else now
+    base = _dt.datetime.fromtimestamp(now_ts)
+    m = _RESET_TIME_RE.search(text)
+    if m is None:
+        r = _RESET_REL_RE.search(text)
+        if r and re.search(r"後|后|\bin\b", text, re.I):
+            n = float(r.group(1))
+            secs = n * (3600 if r.group(2)[0] in "小hH" else 60)
+            return now_ts + secs
+        return None
+    hour, minute = int(m.group(2)), int(m.group(3))
+    zh, en = (m.group(1) or ""), (m.group(4) or "").lower().replace(".", "")
+    if (zh in ("下午", "晚上", "傍晚") or en == "pm") and hour < 12:
+        hour += 12
+    elif (zh == "凌晨" or en == "am") and hour == 12:
+        hour = 0
+    elif zh == "中午" and hour < 11:
+        hour += 12
+    if hour > 23 or minute > 59:
+        return None
+    day = base.date()
+    dated = False
+    d = (_RESET_DATE_ZH_RE.search(text) or _RESET_DATE_SLASH_RE.search(text))
+    de = _RESET_DATE_EN_RE.search(text)
+    try:
+        if d:
+            day = _dt.date(base.year, int(d.group(1)), int(d.group(2)))
+            dated = True
+        elif de:
+            day = _dt.date(base.year, _MONTHS[de.group(1).lower()[:3]], int(de.group(2)))
+            dated = True
+        elif re.search(r"明天|明日|tomorrow", text, re.I):
+            day = base.date() + _dt.timedelta(days=1)
+            dated = True
+    except ValueError:
+        dated = False
+    target = _dt.datetime.combine(day, _dt.time(hour, minute))
+    if dated and target < base - _dt.timedelta(days=180):
+        target = target.replace(year=target.year + 1)   # 跨年（12 月看到 1 月的日期）
+    if not dated and target <= base:
+        target += _dt.timedelta(days=1)                  # 只有時刻且已過＝明天這個時刻
+    return target.timestamp()
+
+
 def looks_quota_note(text: str) -> bool:
     """模型選單項目的文字看起來是否在說「這個模型額度已滿／某時才恢復」。"""
     if not text:
@@ -751,6 +817,7 @@ class GeminiWebSession:
         send_method: str = DEFAULT_SEND_METHOD,
         thinking_level: str = "",
         human_direct: bool = False,
+        quota_fallback: bool = False,
     ) -> None:
         """``debug``：`aa_tool.debug_log.DebugLog`（勾「Debug Log」時由協調器傳入），
         記錄每一步耗時、頁面健康度、瀏覽器事件與錯誤截圖；None＝不記。
@@ -785,6 +852,9 @@ class GeminiWebSession:
         self.thinking_level = thinking_level if thinking_level in THINKING_LEVELS else ""
         # 擬人操作的滑鼠直接移動（v3.21）：不在頁面閒晃、移動較快（_human_path fast）
         self.human_direct = bool(human_direct)
+        # 「瀏覽器＋API」模式（v3.34，aa_tool/hybrid_session）：要求的模型額度用完時不原地
+        # 長等，改丟 GeminiQuotaExceeded（帶 reset_at）讓外層改用 API
+        self.quota_fallback = bool(quota_fallback)
         self._channel_used = ""   # 實際啟動的瀏覽器（Debug Log 用）
         self._pw = None
         self._context = None
@@ -1522,6 +1592,10 @@ class GeminiWebSession:
                 return
             if status == "quota":
                 manual_deadline = None
+                if self.quota_fallback:
+                    exc = GeminiQuotaExceeded(f"瀏覽器「{req}」額度已滿（{info}）")
+                    exc.reset_at = parse_quota_reset(info)  # type: ignore[attr-defined]
+                    raise exc
                 if not announced_quota:
                     self._log(
                         f"⏸️ 目前無法切換到「{req}」（{info}），"
@@ -1639,6 +1713,7 @@ class GeminiWebSession:
         target_txt = ""
         target_name = ""
         seen: list[str] = []          # 選單上讀到的所有項目首行（診斷用）
+        notes: list[str] = []         # 選單上的額度字樣（含恢復時間，給「瀏覽器＋API」切回用）
         for sel in self.selectors.get("model_menu_item", []):
             try:
                 loc = self._page.locator(sel)
@@ -1657,6 +1732,7 @@ class GeminiWebSession:
                     continue
                 name = model_name_of_item(txt)  # 型號那一行（v3.23 起在第二行）
                 seen.append(name)
+                notes.extend(ln.strip() for ln in txt.splitlines() if looks_quota_note(ln))
                 if target is None and model_matches(name, req):
                     target = item
                     target_txt = txt
@@ -1665,12 +1741,13 @@ class GeminiWebSession:
                 break
 
         menu_desc = "／".join(seen[:8]) if seen else ""
+        note = f"；{notes[0]}" if notes else ""
         if target is None:
             self._dismiss_menu()
             if not seen:
                 return "fail", "選單打開了但讀不到任何模型項目"
             # 選單有東西、就是沒有要求的那個 → 多半是額度用完被下架
-            return "quota", f"選單中沒有符合「{req}」的模型（目前有：{menu_desc}）"
+            return "quota", f"選單中沒有符合「{req}」的模型（目前有：{menu_desc}）{note}"
 
         if looks_quota_note(target_txt):
             info = next(
@@ -2270,4 +2347,6 @@ class GeminiWebSession:
         text = reply.lower()
         for phrase in QUOTA_PHRASES:
             if phrase in text:
-                raise GeminiQuotaExceeded(f"偵測到額度上限訊息：「{phrase}」")
+                exc = GeminiQuotaExceeded(f"偵測到額度上限訊息：「{phrase}」")
+                exc.reset_at = parse_quota_reset(reply)  # type: ignore[attr-defined]
+                raise exc

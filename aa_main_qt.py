@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.33"
+APP_VERSION = "3.34"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -2142,6 +2142,9 @@ class MainWindow(QMainWindow):
         self._auto_banner_resume_btn.hide()
         if self._translate_backend == "api":
             self._set_auto_banner_text("⚡ 自動翻譯啟動中（API 模式）…")
+        elif self._translate_backend == "hybrid":
+            self._set_auto_banner_text(
+                "⚡ 自動翻譯啟動中（瀏覽器＋API：請在彈出的瀏覽器完成登入）…")
         else:
             self._set_auto_banner_text(
                 "⚡ 自動翻譯啟動中（請在彈出的瀏覽器完成登入）…")

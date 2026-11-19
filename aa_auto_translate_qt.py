@@ -39,6 +39,8 @@ from aa_tool import app_paths, secure_store
 _BACKEND_OPTIONS: list[tuple[str, str]] = [
     ("瀏覽器", "browser"),
     ("API", "api"),
+    # v3.34：瀏覽器優先，瀏覽器額度用完改用 API，到了恢復時間切回（aa_tool/hybrid_session）
+    ("瀏覽器＋API", "hybrid"),
 ]
 
 # 連線設定「進階設定」的項目：(分組, [(項目 key, 顯示文字, 說明), ...])。
@@ -446,6 +448,12 @@ class AutoTranslatePanel(QWidget):
             b.setFont(_font(11, bold=True))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.clicked.connect(lambda _=False, v=value: self._on_backend_clicked(v))
+            if value == "hybrid":
+                b.setToolTip(
+                    "優先用瀏覽器翻譯；瀏覽器要求的模型額度用完時，改用連線設定裡的 API 繼續翻。\n"
+                    "瀏覽器的模型選單會寫幾點恢復——記下那個時間，到了就開新對話切回瀏覽器\n"
+                    "（讀不到時間就每 20 分鐘試一次）。API 也用完時，等到瀏覽器恢復再接著翻。\n"
+                    "需要 Gem 網址與 API 金鑰都設定好。")
             self._backend_btns[value] = b
             bk_hl.addWidget(b)
         # 送出方式（只在瀏覽器模式顯示）：某些時段 Gemini 會擋「程式產生的點擊／按鍵」，
@@ -1029,11 +1037,11 @@ class AutoTranslatePanel(QWidget):
 
     def _set_backend(self, value: str) -> None:
         """切換翻譯方式並重繪兩顆鈕（選中上色）；連動 API 欄位啟用狀態。"""
-        self._backend = value if value in ("browser", "api") else "browser"
+        self._backend = value if value in ("browser", "api", "hybrid") else "browser"
         for v, b in self._backend_btns.items():
             b.setStyleSheet(_BACKEND_BTN_SEL if v == self._backend
                             else _BACKEND_BTN_UNSEL)
-        self._send_row.setVisible(self._backend == "browser")  # 送出方式只有瀏覽器模式有
+        self._send_row.setVisible(self._backend != "api")  # 送出方式只有用到瀏覽器時有
         self._on_backend_changed()
 
     def _set_send_method(self, value: str) -> None:
@@ -1410,7 +1418,7 @@ class AutoTranslatePanel(QWidget):
         self._main.save_connection_settings(params)
         kn = len(provider_keys.get(provider, []))
         label = {v: l for l, v in _PROVIDER_OPTIONS}.get(provider, provider)
-        if params["backend"] == "api" and kn == 0:
+        if params["backend"] in ("api", "hybrid") and kn == 0:
             self._main.show_status(
                 f"⚠️ 已儲存，但「{label}」尚未輸入任何金鑰", "#f39c12")
         else:
@@ -1429,8 +1437,8 @@ class AutoTranslatePanel(QWidget):
         if not url:
             self._main.show_status("⚠️ 請填入起始網址（或設定手動網址清單）", "#f39c12")
             return None
-        # Gem 網址僅瀏覽器模式必填；API 模式不需要 Gem
-        if backend == "browser" and not gem:
+        # Gem 網址僅用到瀏覽器時必填；API 模式不需要 Gem
+        if backend in ("browser", "hybrid") and not gem:
             self._main.show_status("⚠️ 請填入 Gemini Gem 網址", "#f39c12")
             return None
         if not out_dir:

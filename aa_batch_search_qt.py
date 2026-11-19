@@ -14,6 +14,8 @@ import os
 import re
 import sys
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QFontMetrics, QKeySequence, QShortcut
@@ -26,6 +28,32 @@ from PyQt6.QtWidgets import (
 from aa_tool.html_io import read_html_head, read_html_pre_content, write_html_file
 from aa_tool.qt_helpers import make_button, show_toast
 from aa_tool.translation_engine import expand_glossary_entry
+
+# 讀檔的同時開檔數。資料夾在傳統硬碟（HDD）上時，第一次搜尋慢的是冷讀取
+# （實測 359 檔 107 MB 依序讀 7.9 秒，第二次有系統快取 0.04 秒）；同時多開幾個讀取，
+# 硬碟能自己排序讀取位置，冷讀取約快一倍。
+_READ_WORKERS = 8
+# 同一個資料夾預讀過後，這段時間內再顯示面板不重複預讀（秒）
+_PREFETCH_TTL = 120
+
+
+def _read_pre_safe(path: str) -> str | None:
+    """read_html_pre_content；讀不到（被刪、權限、編碼）回 None，不讓搜尋整個中斷。"""
+    try:
+        return read_html_pre_content(path)
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _warm_file(path: str) -> None:
+    """把檔案讀過一次（內容丟掉），讓作業系統快取住，之後真正搜尋時直接從記憶體讀。"""
+    try:
+        with open(path, 'rb') as f:
+            while f.read(1 << 20):
+                pass
+    except OSError:
+        pass
+
 
 # ════════════════════════════════════════════════════════════════
 #  QSS 載入
@@ -78,6 +106,9 @@ class BatchSearchWindow(QMainWindow):
         self.ui_small_font = QFont("Microsoft JhengHei", 12)
 
         self.batch_matches: list[dict] = []
+        # 背景預讀（v3.36）：面板顯示／換資料夾時先把 HTML 讀進系統快取
+        self._prefetch_gen = 0
+        self._prefetched: tuple[str, float] = ("", 0.0)
         # 復原用：{file_path: original_text_content}
         self._undo_backups: dict[str, str] = {}
         self._undo_items: list[dict] = []
@@ -95,6 +126,7 @@ class BatchSearchWindow(QMainWindow):
 
         if folder:
             self.folder_entry.setText(folder)
+            self._start_prefetch()
 
         # 輪詢反向命令檔（主程式 → 批次搜尋）
         if self._reverse_cmd_file:
@@ -127,6 +159,7 @@ class BatchSearchWindow(QMainWindow):
 
         self.folder_entry = QLineEdit()
         self.folder_entry.setFont(self.ui_small_font)
+        self.folder_entry.editingFinished.connect(self._start_prefetch)
         folder_row.addWidget(self.folder_entry, 1)
 
         btn_browse = make_button("瀏覽…", color="#6c757d", hover="#5a6268",
@@ -395,6 +428,43 @@ class BatchSearchWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "選取 HTML 檔案所在的資料夾")
         if folder:
             self.folder_entry.setText(folder)
+            self._start_prefetch()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._start_prefetch()
+
+    def _start_prefetch(self) -> None:
+        """背景把資料夾裡的 HTML 讀進系統快取（v3.36）。
+
+        第一次搜尋慢的是硬碟冷讀取；面板一顯示就先讀，通常輸入完關鍵字時已讀完。
+        換資料夾或再次預讀時，舊的預讀會自己停掉（世代編號）。
+        """
+        folder = self.folder_entry.text().strip()
+        if not folder or not os.path.isdir(folder):
+            return
+        last_folder, last_at = self._prefetched
+        if folder == last_folder and time.time() - last_at < _PREFETCH_TTL:
+            return
+        self._prefetched = (folder, time.time())
+        self._prefetch_gen += 1
+        gen = self._prefetch_gen
+
+        def _run() -> None:
+            try:
+                paths = [os.path.join(folder, f) for f in os.listdir(folder)
+                         if f.lower().endswith('.html')]
+            except OSError:
+                return
+
+            def _one(p: str) -> None:
+                if self._prefetch_gen == gen:   # 換了資料夾就不再讀
+                    _warm_file(p)
+
+            with ThreadPoolExecutor(_READ_WORKERS) as ex:
+                list(ex.map(_one, paths))
+
+        threading.Thread(target=_run, daemon=True).start()
 
     # ────────────────────────────────────────────────────────
     #  Toast
@@ -444,9 +514,12 @@ class BatchSearchWindow(QMainWindow):
 
         def _search():
             matches: list[dict] = []
-            for i, fname in enumerate(html_files):
+            # 多開幾個讀取（map 依原順序取回結果）；找滿 500 筆提早結束時取消其餘讀取
+            ex = ThreadPoolExecutor(_READ_WORKERS)
+            texts = ex.map(_read_pre_safe,
+                           [os.path.join(folder, f) for f in html_files])
+            for i, (fname, text) in enumerate(zip(html_files, texts)):
                 fpath = os.path.join(folder, fname)
-                text = read_html_pre_content(fpath)
                 if text is None:
                     continue
 
@@ -486,6 +559,7 @@ class BatchSearchWindow(QMainWindow):
                     self._sig_progress.emit(
                         f"搜尋中... ({i + 1} / {file_count} 個檔案)")
 
+            ex.shutdown(wait=False, cancel_futures=True)
             self._sig_done.emit(matches, file_count)
 
         threading.Thread(target=_search, daemon=True).start()

@@ -431,6 +431,7 @@
     *   Qt→主程式（`cmd_file`）：`open`（開啟檔案並跳行）、`sync_folder`（同步資料夾路徑）
     *   主程式→Qt（`reverse_cmd_file`）：`restore`（恢復視窗顯示）
 *   **ESC 返回首頁**: `BatchSearchWindow.__init__` 接受 `on_back` callback；`MainWindow.show_batch_panel()` 傳入 `on_back=self.show_translate_panel`。面板建立後以 `QShortcut(Key_Escape, self, WidgetWithChildrenShortcut)` 連接 `on_back`，按 ESC 直接返回首頁（翻譯面板）。
+*   **冷讀取加速（v3.36）**: 資料夾在傳統硬碟時，第一次搜尋慢的是冷讀取（實測 87 檔 11 MB 依序讀 3.8 秒、359 檔 107 MB 7.9 秒；有系統快取後 0.04 秒）。①**背景預讀** `_start_prefetch()`：面板 `showEvent`、建立時帶資料夾、「瀏覽」選好、資料夾欄 `editingFinished` 時，背景以 `_READ_WORKERS`（8）個執行緒把 HTML 整檔讀過一次（`_warm_file`，內容丟掉，只為進系統快取）；同一資料夾 `_PREFETCH_TTL`（120 秒）內不重複預讀，換資料夾時舊的預讀以世代編號 `_prefetch_gen` 停掉。②**搜尋時多執行緒讀檔**：`ThreadPoolExecutor(_READ_WORKERS).map(_read_pre_safe, …)` 依原順序取回，找滿 500 筆提早結束時 `shutdown(cancel_futures=True)` 取消其餘讀取；`_read_pre_safe` 讀不到（OSError／UnicodeDecodeError）回 None 跳過，不讓整次搜尋中斷。實測冷讀取完整掃描 87 檔 13 MB 0.71 秒（舊做法同規模 3.8 秒）；開面板預讀 3 秒後才按搜尋 0.38 秒。
 *   **搜尋**: 在指定資料夾所有 HTML 的 `<pre>` 內容中搜尋，支援字串或正則，最多 500 筆結果。背景執行緒搜尋 + 分批渲染。
 *   **搜尋列寬度**: 搜尋／替換 `QLineEdit` 為可縮短寬度（min 120 / max 250 + stretch），非固定寬。理由與量測見 §4.14。
 *   **單筆替換 / 全部替換 / 復原**: 與舊版邏輯相同，另支援檔案層級的復原（`_undo_backups`）。

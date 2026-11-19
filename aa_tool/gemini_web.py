@@ -143,7 +143,8 @@ def model_matches(detected: str, required: str) -> bool:
 
     required 可選值：
       - ``""`` / ``"any"`` → 不檢查，永遠視為符合
-      - ``"pro"``        → 字串含 ``pro`` 且不含 ``flash``
+      - ``"neon"``       → 字串含 ``neon``（v3.35：Gemini 以「4 Neon」（Deeper analysis）取代 3.1 Pro，
+        原本的 ``"pro"`` 選項改成這個；舊設定的 ``"pro"`` 讀取時轉成 ``"neon"``）
       - ``"hydrogen"``   → 字串含 ``hydrogen``（v3.24：Gemini 以「4 Hydrogen」取代 3.6 Flash，
         原本的 ``"flash"`` 選項改成這個；舊設定的 ``"flash"`` 讀取時轉成 ``"hydrogen"``）
       - ``"flash-lite"`` → 字串含 ``flash`` 且含 ``lite``
@@ -156,8 +157,8 @@ def model_matches(detected: str, required: str) -> bool:
     if not detected:
         return True  # 讀不到不阻擋，由 Log 警告提示使用者
     d = detected.lower()
-    if required == "pro":
-        return "pro" in d and "flash" not in d
+    if required == "neon":
+        return "neon" in d
     if required == "flash-lite":
         return "flash" in d and "lite" in d
     if required == "hydrogen":
@@ -358,8 +359,9 @@ _QUOTA_POLL_INTERVAL = 600        # 每 10 分鐘重試一次自動切換
 # 會在簡體介面完全比對不到（「用量額度將於…重設」→「用量额度将于…重置」），
 # 導致額度已滿被誤判成「選單選擇器失效」而中止整批。
 _QUOTA_RESET_PHRASES = [
-    "用量額度將於", "額度將於", "額度已滿", "已達上限",
-    "用量额度将于", "额度将于", "额度已满", "已达上限",
+    "用量額度將於", "額度將於", "額度已滿", "已達上限", "已達用量上限",
+    "用量额度将于", "额度将于", "额度已满", "已达上限", "已达用量上限",
+    "重設時間", "重置时间",
     "quota will reset", "available again", "resets ",
 ]
 # 上面列不完的寫法（各語言／改版文案）再用寬鬆規則兜底：同一段文字裡同時出現
@@ -1801,7 +1803,8 @@ class GeminiWebSession:
             # 模型字串通常很短（如 "2.5 Pro"、"Gemini 2.5 Pro"），過長視為命中錯元素。
             if 1 <= len(text) <= 60 and any(
                 kw in text.lower() for kw in
-                ("pro", "flash", "hydrogen", "ultra", "gemini", "2.5", "3.0", "3.1", "3.5", "3.6")
+                ("pro", "flash", "hydrogen", "neon", "ultra", "gemini",
+                 "2.5", "3.0", "3.1", "3.5", "3.6")
             ) or (sel.startswith("bard-mode-switcher") and 1 <= len(text) <= 30):
                 return " ".join(text.split())
         return ""

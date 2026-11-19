@@ -147,7 +147,7 @@ _BACKEND_BTN_UNSEL = (
 
 # (顯示文字, 內部值)；內部值需與 aa_tool.gemini_web.model_matches 一致。
 _MODEL_OPTIONS: list[tuple[str, str]] = [
-    ("Pro", "pro"),
+    ("Neon", "neon"),           # v3.35 取代 Pro（Gemini 選單的 3.1 Pro 換成 4 Neon／Deeper analysis）
     ("Hydrogen", "hydrogen"),   # v3.24 取代 Flash（Gemini 選單的 3.6 Flash 換成 4 Hydrogen）
     ("Flash-Lite", "flash-lite"),
     ("不檢查（任何模型都接受）", "any"),
@@ -1270,7 +1270,7 @@ class AutoTranslatePanel(QWidget):
             getattr(m, "_auto_translate_until_last", False)))
         self.count_spin.setEnabled(not self.until_last.isChecked())
         self.gem_edit.setText(getattr(m, "_gemini_gem_url", "") or "")
-        required = (getattr(m, "_gemini_required_model", "pro") or "pro").lower()
+        required = (getattr(m, "_gemini_required_model", "neon") or "neon").lower()
         idx = next((i for i, (_, v) in enumerate(_MODEL_OPTIONS) if v == required),
                    0)
         self.model_combo.setCurrentIndex(idx)

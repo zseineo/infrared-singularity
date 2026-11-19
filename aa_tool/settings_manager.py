@@ -299,9 +299,10 @@ class AppCache:
     # （只控制 gemini_api_system_prompt 那一段；gemini_api_only_prompt 在瀏覽器模式一律不送）。
     # 預設 True（多數使用者用 Gem）。
     browser_use_gem: bool = True
-    # 要求的 Gemini 模型：pro / hydrogen / flash-lite / any（v3.24 起 hydrogen 取代 flash）。
+    # 要求的 Gemini 模型：neon / hydrogen / flash-lite / any（v3.24 起 hydrogen 取代 flash、
+    # v3.35 起 neon 取代 pro）。
     # 翻譯中若偵測到模型與此不符，整批自動中止（讀不到模型字串時不阻擋，會在 Log 警告）。
-    gemini_required_model: str = "pro"
+    gemini_required_model: str = "neon"
 
 
 # 已廢除的 Gemini API 型號（v3.07：3.5／3.7 系列）。設定檔存著它們時讀取改成預設型號，
@@ -629,9 +630,11 @@ class SettingsManager:
                 'auto_translate_auto_number',
                 cache.auto_translate_auto_number))
             cache.gemini_required_model = str(data.get(
-                'gemini_required_model', cache.gemini_required_model) or "pro")
+                'gemini_required_model', cache.gemini_required_model) or "neon")
             if cache.gemini_required_model == "flash":   # v3.24：Gemini 以 4 Hydrogen 取代 3.6 Flash
                 cache.gemini_required_model = "hydrogen"
+            if cache.gemini_required_model == "pro":     # v3.35：Gemini 以 4 Neon 取代 3.1 Pro
+                cache.gemini_required_model = "neon"
             cache.translate_backend = str(data.get(
                 'translate_backend', cache.translate_backend) or "browser")
             cache.api_provider = str(data.get(

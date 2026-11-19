@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.34"
+APP_VERSION = "3.35"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -793,7 +793,7 @@ class MainWindow(QMainWindow):
         self._gemini_human_direct: bool = False   # 擬人操作滑鼠直接移動（不閒晃、較快）
         self._gemini_thinking_level: str = ""   # 瀏覽器模式思考程度 low／medium／high；空＝不調整
         self._gemini_send_method: str = "program"  # 瀏覽器模式送出方式（gemini_web.SEND_METHODS）
-        self._gemini_required_model: str = "pro"
+        self._gemini_required_model: str = "neon"
         self._gemini_selectors: dict = {}
         self._auto_translate_out_dir: str = ""
         # 手動網址清單（原始文字，一行一個）；非空時自動翻譯照清單跑
@@ -2042,7 +2042,7 @@ class MainWindow(QMainWindow):
         if "gem_url" in params:
             self._gemini_gem_url = params.get("gem_url", "") or ""
         if "required_model" in params:
-            self._gemini_required_model = params.get("required_model") or "pro"
+            self._gemini_required_model = params.get("required_model") or "neon"
         if "max_per_session" in params:
             self._gemini_max_per_session = max(
                 1, int(params.get("max_per_session") or 3))
@@ -2102,7 +2102,7 @@ class MainWindow(QMainWindow):
         self._auto_translate_loop_ratio = int(params.get("loop_ratio", 100) or 100)
         self._auto_translate_loop_idle_rounds = int(params.get("loop_idle_rounds", 3))
         self._gemini_max_per_session = params["max_per_session"]
-        self._gemini_required_model = params["required_model"] or "pro"
+        self._gemini_required_model = params["required_model"] or "neon"
         # 手動模式下也把使用者填的作品名稱同步回首頁（保持兩邊一致）
         try:
             if not self._fetch_auto_fill_title and params.get("doc_title"):
@@ -3041,7 +3041,7 @@ class MainWindow(QMainWindow):
         self._gemini_send_method = str(
             getattr(cache, "gemini_send_method", "program") or "program")
         self._gemini_required_model = (
-            str(cache.gemini_required_model or "pro").lower() or "pro")
+            str(cache.gemini_required_model or "neon").lower() or "neon")
         self._gemini_selectors = dict(cache.gemini_selectors or {})
         self._auto_translate_out_dir = str(cache.auto_translate_out_dir or "")
         self._auto_translate_url_list = str(

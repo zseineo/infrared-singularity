@@ -77,16 +77,33 @@ class HybridSession:
                 self._to_api(e)
         try:
             return self._api.translate(prompt_text)
-        except GeminiQuotaExceeded:
-            wait = self._web_retry_at - time.time()
-            if not 0 < wait <= _MAX_WAIT_FOR_WEB:
-                raise
-            self._log(f"⏸️ API 額度也用完了，等瀏覽器恢復（{_fmt(self._web_retry_at)}）再切回瀏覽器…")
-            self._sleep(wait)
+        except GeminiQuotaExceeded as e:
+            return self._wait_either(prompt_text, e)
+
+    def _wait_either(self, prompt_text: str, api_exc: GeminiQuotaExceeded) -> str:
+        """API 也用完：每到瀏覽器預定恢復的時間就試瀏覽器，不行再順便試一次 API，
+        輪流等到其中一邊恢復；超過 _MAX_WAIT_FOR_WEB 才往外拋（協調器暫停整批）。
+
+        v3.34 只等一次——讀不到恢復時間（20 分鐘後試）或瀏覽器實際比標示的晚恢復時，
+        第一次試失敗就整批暫停。
+        """
+        deadline = time.time() + _MAX_WAIT_FOR_WEB
+        while True:
+            if self._web_retry_at > deadline:
+                raise api_exc
+            self._log(f"⏸️ API 額度也用完了（{api_exc}），等到 {_fmt(self._web_retry_at)} "
+                      "再試瀏覽器（可按停止中斷）…")
+            self._sleep(self._web_retry_at - time.time())
             self._try_back_to_web()
-            if self.mode != "web":
-                raise
-            return self._web.translate(prompt_text)
+            if self.mode == "web":
+                try:
+                    return self._web.translate(prompt_text)
+                except GeminiQuotaExceeded as e:
+                    self._to_api(e)
+            try:   # 瀏覽器還不行：API 可能已經恢復了（每日配額重置、冷卻結束）
+                return self._api.translate(prompt_text)
+            except GeminiQuotaExceeded as e:
+                api_exc = e
 
     def _to_api(self, e: GeminiQuotaExceeded) -> None:
         now = time.time()

@@ -488,7 +488,27 @@ def _strip_tags_keep_color(text: str) -> str:
     text = _BLACK_SPAN_RE.sub(r'\1', text)
     text = _drop_plain_span_closes(text)
     text = re.sub(r'<(?!span\s+style="color:|/span>)[^>]+>', '', text)
+    text = _collapse_same_color_nest(text)
     return _BIDI_RE.sub('', text)
+
+
+# 同色 span 直接包同色 span：`<span 藍><span 藍>X</span></span>`（中間沒有其他文字）。
+_SAME_COLOR_NEST_RE = re.compile(
+    r'<span style="color:([^"]*)">\s*<span style="color:\1">'
+    r'((?:(?!<span\b|</span>).)*)</span>\s*</span>', re.DOTALL)
+
+
+def _collapse_same_color_nest(text: str) -> str:
+    """同色重複巢狀合併成一層（yaruobook.com ?p=75223：安價引用 `>>9429` 被包三層同色藍）。
+
+    編輯器上色預覽只認單層 span（一個開頭配到第一個結尾），三層巢狀會讓裡面的開頭與
+    多出來的結尾當成文字露出來。內層不是同色或中間夾著其他文字的不動（上色意義不同）。
+    """
+    while True:
+        new = _SAME_COLOR_NEST_RE.sub(r'<span style="color:\1">\2</span>', text)
+        if new == text:
+            return text
+        text = new
 
 
 def _drop_plain_span_closes(text: str) -> str:

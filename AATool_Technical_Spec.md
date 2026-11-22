@@ -248,17 +248,25 @@
     *   **消空白 (`strip_spaces()`)**: 刪除選取文字內所有半形/全形空白。
     *   **補空白 (`_pad_spaces()`)**: 在選取文字的每個字元之間插入 N 個全形空白；N 由按鈕右側的 `QComboBox`（選項 1/2/3，預設 2）決定。設定值持久化到 `aa_settings_cache.json` 的 `pad_space_count` 欄位，透過 `MainWindow._pad_space_count` 與 `EditWindow.init_pad_count` / `on_pad_count_change` callback 串接。
     *   **補／消空白切換 (`Alt+A`, `_toggle_spaces()`)**: 單一快捷鍵自動判斷方向 —— 選取範圍含半形 ` ` 或全形 `　` 空白 → 呼叫 `_strip_spaces()`（消空白）；否則 → `_pad_spaces()`（補空白）。**編輯模式（Alt+1）與 WYSIWYG（Alt+3）皆可用**，比對模式（Alt+2）會提示先離開。WYSIWYG 下因 `_strip_spaces`／`_pad_spaces` 以 plain text `insertText` 取代選區會洗掉上色，故先以 `_selection_has_color(cursor)`（沿用 `_apply_color_wysiwyg` 的 fragment 走訪，非黑 `#000000` 前景色 fragment 即視為上色標籤）判定，含上色標籤即拒絕並提示「請避開上色文字」；通過後執行，並補呼叫 `_apply_line_height()` 維持固定行高（比照其他 WYSIWYG 編輯路徑）。工具列「消空白／補空白」按鈕本身仍屬 `_edit_buttons`，在比對／WYSIWYG 模式 disabled，Alt+A 是 WYSIWYG 下使用此功能的唯一入口。
-    *   **自動對話框 (`adjust_bubble()`)**: 選取行後進行智慧邊框對齊，支援五種對話框格式：
-        1. **普通對話框** (`´￣￣￣｀ヽ` / `乂＿＿＿ノ`)：動態計算上下框長度，對齊右側角落符號。
-        2. **吶喊框** (`､__人_人_...` / `⌒Y⌒Y...⌒Ｙ`)：識別 `）...（` 等內容分隔符，重建上下框與內容至統一目標寬度。
-        3. **斜線框** (`＼─|──|─／` / `／─|──|─＼`)：與吶喊框邏輯類似，辨識 `│` 或 `─` 作為內容分隔符重建邊框。
-        4. **方框** (`┌─┐` / `│…│` / `└─┘`，亦支援粗體 `┏━┓` / `┃…┃` / `┗━┛`)：邏輯同上。`_BOX_*_RE` 正規式同時接受細線與粗線兩套字元，`_parse_box_lines()` 記錄各行實際使用的角落／邊線字元，`process_box()` 重建時沿用該行原字元，故細線與粗線方框（含混用）皆可正確對齊。**橫線與右角落間允許夾雜空白**（`([─━]+)\s*([┐┓])`，`\s` 涵蓋 hair space U+200A、全形空白）—— 有些框右側轉角前留空格（如「┌──　┐」），若不容忍會 fallback 成普通框只對齊內容列、上下角落不齊；重建時橫線重算至內容寬，原空格不保留。
-        5. **漢字框** (`ミ川+彡` / `三…三` / `彡川+ミ`，`kanji_box`)：以漢字字元當邊框 —— 上下角落 ミ／彡 互換（top=ミ…彡、bot=彡…ミ）、橫線用 `川`、內容列用 `三…三`。常見於 AA 中表達「煙霧／流動」感的對話。`_KANJI_BOX_*_RE` 與 `_parse_kanji_box_lines` / `process_kanji_box` 結構鏡射方框；右角落前也容忍空白（`(川+)\s*(彡)`）。**重建時 prefix 沿用各行自身**（不像 `process_normal` 用 border_left_w 統一），故當不同行有不同 AA 前綴（如左側帶臉部）時，框體（角落到角落）等寬，絕對欄位不齊 —— 符合 AA 慣例（左圖右框）。
-        * **Padding 字元定義**：半形空白 ` `、全形空白 `　`、半形點 `.` 三者統一視為對齊填白（常數 `_PAD_CHARS`）。`.` 等價於空白是為了相容 AA 作者以點代替空白避免瀏覽器壓縮的慣用寫法。
-        * **統一寬度公式**：四種框型一律以「內容寬」為目標寬。方框/吶喊/斜線 `tw = 內容最大寬 + 一個全形空白寬`（其量測時已含一個全形邊距，加總後等同視覺上多 1 格）。普通框 `tw = border 左側錨點寬 + 對話框內側最大寬 + border 右側錨點寬`，**不額外加全形空白餘裕**——因為「對話框內側最大寬」量測自 content 行最右邊 `|`/`│`/`｜` 之後到末尾非 padding，這段已自然包含框內 leading pad（如 `　 ` ≈ 1.5 fw），就是視覺餘裕本身；若再加會多出 1-2 個 ￣ 不必要延伸。**會依內容縮減**：原邊框比內容寬時也會被壓縮回內容寬度。**普通框 ref_n 對稱重建**：上下邊框 (`f´…￣` / `乂…＿`) 用 top border 算出的 ￣ 數量套到所有 border，維持視覺對稱；各 border 自身的 right (`｀ヽ` 2 fw vs `ノ` 1 fw) 不同會讓總寬差 1 fw，符合手寫慣例。**選 content 行最右邊 `|`/`│`/`｜` 而不是用 content.left 整段**，是為避開 content 行 AA 前綴與 border 行 AA 前綴在字寬量測上的差異（例 `,,..-＜` 累積寬度與 `（＿ノ--'　　ﾉ` 累積寬度可能差 ~3 fw），否則本應縮減的對話框會被誤判延伸。「內容寬度」透過 `_content_width()`（`m.measure(text.rstrip(_PAD_CHARS))`）量測。不再使用 `VALID_TEXT_RE` 的特殊字元白名單。
-        * **浮點量測**：`QtFontMeasurer.measure()` 回傳 `QFontMetricsF.horizontalAdvance()` 的浮點值，避免多次 snap 累積 ±0.5px 誤差。`_pad_to_width()` 內建最終 snap，無需另外的 `_pad_to_width_snap`。
-    *   **對話框(全) (`adjust_all_bubbles()`)**: 掃描全文，自動偵測並對齊所有獨立對話框（普通/吶喊/斜線/方框/漢字框），由下而上逐框處理以避免行號偏移。與單選修正共用同一組 `process_*` 函式與 padding/寬度規則。
-    *   **Testcase 維護**：對話框演算法的基準案例存於 `testcase/bubble_base.txt`（依框型分節），fail case 存於 `testcase/bubble_failcase.txt`（`未偵測` / `誤偵測` 兩類）。修復 failcase 後依 `bubble-testcase-maintenance` skill 歸檔。驗證使用固定等寬量測器（CJK=2, ASCII=1），可在無 PyQt6 環境下驗證偵測邏輯。
+    *   **自動對話框 (`adjust_bubble()`)**（v3.40 重寫）: 選取行後進行智慧邊框對齊，支援五種對話框格式，樣式表在 `_STYLES`：
+        1. **普通對話框** (`f´￣￣￣｀ヽ` / `乂＿＿＿ノ`)：角落變體太多，由 `_find_normal_border()` 判斷（「對話框(全)」時另過 `_is_safe_normal_border()`）。上下框用相同的 ￣／＿ 個數，各自的角落字元與其前方空白原樣保留。
+        2. **吶喊框** (`､__人_人_` / `⌒Y⌒Y⌒Ｙ`，含 `＼_人_／`＋`≫ ≪` 鋸齒型)：沿用作者自己的節距（`_人` 或 `__人`）與頭尾字元；下框節距不同，取最接近上框寬度的個數。
+        3. **斜線框** (`＼─|──|─／` / `／─|──|─＼`)：內容列 `│…│` 與 `―…―`（**U+2015**，亦接受 ─━—）交錯，左右必同類、左右內縮量鏡射。
+        4. **方框** (`┌─┐` / `│…│` / `└─┘`，亦支援粗體 `┏━┓` / `┃…┃` / `┗━┛` 及混用)：右角落前容忍空白（含 hair space）。選取模式另支援沒有左右邊線的旁白框（`_is_open_frame()`，只放寬橫線）。
+        5. **漢字框** (`ミ川+彡` / `三…三` / `彡川+ミ`，`kanji_box`)：上下角落 ミ／彡 互換，右角落前容忍空白。
+        * **流程（五種框共用，勿再各寫一份）**：
+            1. `detect_all_boxes(lines, m, strict)`：以**上框左角的 x 座標**為錨點，找左角落在同位置的下框（≤30 行）與各列左邊線（`_find_left`）。**不可改回「行內第一個／最後一個同字元」**：左側 AA 與台詞裡都有同樣的字元，舊版因此把框縮成一截、刪掉台詞。
+            2. `_find_right()`：右邊線須前接填白或位於行尾；排除成對括號與緊接台詞者；多個候選時取接近右角者，緊貼 AA 牆（`| |`）時取內側。
+            3. `_rebuild_box()`：目標右緣＝最長台詞右端＋2 個全形空白＋右邊線寬（扣除該列偏移），橫線個數無條件進位；各列只替換「台詞右端～右邊線」的填白，右邊線放到**同一個絕對 x**（`_right_offsets()`：吶喊 -1、普通 -2、方框／漢字 0、斜線與 ≫≪ 鏡射左側；值取自 5000 篇作者手排原文）。
+        * **不變式**：除了邊框橫線與填白，不刪不改任何可見字元；行數不變；再按一次結果不變。
+        * **何時不縮窄**：一般會依內容縮放；但框右側還有 AA／另一個框、或整個框沒有右邊線時只放寬不縮窄，無台詞時維持原寬。
+        * **填白**：空白含半形、全形、NBSP、U+2000–U+200B；半形點**只有前面已有空白時**才算填白（「好吧...」的點是台詞）；緊貼右邊線的半形逗號視為填白。補白用 `_make_padding()`（誤差通常 < 1px、半形穿插於全形之間）；`_pad_to_width()` 只剩「對齊上一行」使用。
+        * **標記**：`<span style="color:…">`／`display:none` 不計寬度，以 `_visible()` 量測、`_replace_visible()` 寫回（標記原樣保留）。
+        * **容差**：常數皆為 12pt 下的 px，使用時乘 `_scale(m)` 換算字級。
+        * **選取模式**：先用嚴格規則（選取夾帶 AA 時才不會認錯框），找不到才放寬（角落變體、空框、左線歪 56px 內、普通框可只選到上框）；積木字／巢狀方框仍拒修。找不到回傳 ⚠️ 字串。
+        * **UI 寫回 (`_replace_changed_parts()`)**：逐行只改寫有變動的區段並併為一筆 undo，位置以 UTF-16 計。**不可改回整段 `insertText`**（WYSIWYG 顏色會被洗掉）；結果無變化時不動文件。
+    *   **對話框(全) (`adjust_all_bubbles()`)**: 以嚴格規則掃描全文（`_is_dialogue_box()`：每列都有左邊線、右邊線足夠、上下框寬相近、框內有台詞且不是 AA 圖、方框須在行尾且無巢狀），**沒把握就不動，寧可漏修也不改壞 AA**；漏掉的框可選取後 Alt+Q。`_adjust_boxes()` 逐框就地修正（行數不變，無行號偏移）：並排框必須**由左到右**、每輪修完重新偵測，因為左框修好後右框的 x 才會歸位。與單選修正共用同一套流程。
+    *   **Testcase 維護**：對話框演算法的基準案例存於 `testcase/bubble_base.txt`（依框型分節），fail case 存於 `testcase/bubble_failcase.txt`（`未偵測` / `誤偵測` 兩類）。修復 failcase 後依 `bubble-testcase-maintenance` skill 歸檔。驗證使用固定等寬量測器（CJK=2, ASCII=1），可在無 PyQt6 環境下驗證偵測邏輯；對齊精度須用 MS PGothic 實測。
     *   **對齊上一行 (`align_to_prev_line()`)**: 於游標處往前補足空白，將游標後第一個非空白字元對齊到上一行末端。演算法：① 找游標後第一個非空白字元 (`target_col`)；② 先以 `_PAD_CHARS` 剝除上一行尾端 padding 得 `prev_content`，再取 `m.measure(prev_content[:-1])` 作為目標寬（若 `prev_content` 僅 1 字元則取全寬，避免 `[:-1]` 產生 0 的 bug）；③ 以 `_pad_to_width()` 補空白至目標；④ 回傳 `res_prefix + ' ' + selected_text`。UI 端（`_align_to_prev`）對 `QTextBlock.text()` 加入 `\u2029` 防禦，與 `_adjust_bubble` 一致。
     *   **智慧判斷 (`_smart_action()`)**: (Hotkey: `Alt+Q`) 自動判斷：選取多行 → `_adjust_bubble()`；選取單行區塊 → `_apply_color()`；僅有游標 → `_align_to_prev()`。**注意**：對話框修正、對齊上一行、自動判斷三個按鈕已從工具列移除，僅保留 `Alt+Q` 快捷鍵觸發（依選取狀態 dispatch）。
 
@@ -320,7 +328,7 @@
         6. **上色雙路徑** (`_apply_color`)：偵測 `_preview_active`，True → `_apply_color_wysiwyg()` 用 `cursor.mergeCharFormat(QTextCharFormat).setForeground` 直接改 fragment 顏色；若選取範圍中已有非黑顏色，再次按下會 merge 成黑色（移除顏色）。False → 既有的字面 `<span>` markup 包覆/拆除路徑。
         7. **Round-trip 注意**：既有 markup 中的 CSS 命名色（`color:red`）會被序列化正規化為 `#rrggbb`（`QColor.name()` 格式）。`<` `>` `&` 等字元保持原樣不做 HTML escape。
         8. **工具列功能對等**：WYSIWYG 模式下所有編輯工具與既有編輯模式對等，由各 handler 透過 `_active_edit_widget()` helper 路由到 preview_view（WYSIWYG）或 editor（一般）。具體分流：
-            - **Selection-based 工具直接作用於 preview_view**（`_strip_spaces` / `_pad_spaces` / `_adjust_bubble` / `_align_to_prev` / `_smart_action` / `_reverse_glossary_replace` / `_restore_from_original`）。`_extend_selection_to_full_lines(target)` 改為帶 widget 參數。代價：被 `cursor.insertText()` 替換掉的選取範圍會以 cursor 預設 charFormat 寫入（顏色可能歸零），使用者可重新上色。`_extract_jp_from_selection`（Alt+C）不在此列：其資料來源固定為 Alt+4 面板的 `side_extracted` / `side_ai`，不讀主編輯器內容。
+            - **Selection-based 工具直接作用於 preview_view**（`_strip_spaces` / `_pad_spaces` / `_adjust_bubble` / `_align_to_prev` / `_smart_action` / `_reverse_glossary_replace` / `_restore_from_original`）。`_extend_selection_to_full_lines(target)` 改為帶 widget 參數。代價（`_adjust_bubble` 除外，v3.40 起只改寫有變動的區段、保留顏色）：被 `cursor.insertText()` 替換掉的選取範圍會以 cursor 預設 charFormat 寫入（顏色可能歸零），使用者可重新上色。`_extract_jp_from_selection`（Alt+C）不在此列：其資料來源固定為 Alt+4 面板的 `side_extracted` / `side_ai`，不讀主編輯器內容。
             - **Whole-doc 工具走 sync→run-on-editor→re-render**（`_replace_all` / `_on_glossary_received` / `_adjust_all_bubbles` / `_reapply_below_visible`）：`_sync_preview_to_editor()` 把 markup 還原回 editor → 在 editor 上跑既有邏輯（`_replace_document` 觸發 editor.textChanged → dirty）→ `_wysiwyg_rerender_after_editor_change()` 重建 preview。期間 `_preview_suppress_dirty=True` 避免 preview.textChanged 重複標 dirty。**這條路徑能完整保留顏色**，因為運算發生在帶字面 `<span>` markup 的 editor plain text 上。四個呼叫端都把 `_sync_preview_to_editor()` 的回傳值傳給自己那次 `_replace_document(new_text, merge=synced)`，讓「sync + 工具取代」在 editor 上只留一筆 undo entry（見前述「Undo / Redo」小節 2b）。
             - **搜尋 Ctrl+F**（`_find_next` / `_hide_search`）改為作用於 `_active_edit_widget()`，WYSIWYG 中可直接搜尋彩色檢視。
             - **Alt+4 局部重套用**：解除 WYSIWYG 阻擋；面板開啟用 `_get_selection_block_number()`（WYSIWYG 下透過 `_active_edit_widget()` 走 `preview_view`）取選取起點所在行對齊；reapply 採 baseline vs. 編輯後逐行 diff 套用（見 4.4 節「重新套用」），完成後走 `_wysiwyg_rerender_after_editor_change()` 即時更新彩色檢視。自動捲動 checkbox 的 selection / scroll 事件對 `editor` 與 `preview_view` 都掛了訊號，因此 WYSIWYG 中也能用。
@@ -712,7 +720,7 @@ UI widget 屬於 `TranslatePanel`（除特別註明外）：
 *   `EditWindow.editor` (`aa_edit_qt.py`): 編輯器主要 `QTextEdit`，所有後處理動作（對齊、上色、搜尋等）皆作用於此。
 
 ## 6. 給後續開發維護 AI 的系統提示 (For AI Agents)
-1.  **確保對齊機制的字體計算**: 所有對話框對齊與補空白演算法（`bubble_alignment.py`、`QtFontMeasurer`）都以 **MS PGothic** 的字寬 metrics 為基準，這是整個專案 AA 對齊的核心假設。**切勿改變預設字體設定**（含 `DEFAULT_EDITOR_FONT` 常數、`aa_settings_cache.json` 的 `editor_font_family`），否則所有自動對齊功能會失準。若使用者透過編輯器搜尋列切換字體，那是使用者暫時預覽行為，不應把新字體寫回預設值。
+1.  **確保對齊機制的字體計算**: 所有對話框對齊與補空白演算法（`bubble_alignment.py`、`QtFontMeasurer`）都以 **MS PGothic** 的字寬 metrics 為基準，這是整個專案 AA 對齊的核心假設。**切勿改變預設字體設定**（含 `DEFAULT_EDITOR_FONT` 常數、`aa_settings_cache.json` 的 `editor_font_family`），否則所有自動對齊功能會失準。若使用者透過編輯器搜尋列切換字體，那是使用者暫時預覽行為，不應把新字體寫回預設值。**已知限制（v3.40 查明，未修）**：Windows 縮放非 100% 時 Qt 預設用未 hinting 的小數字寬（全形空白 10.625、半形 4.875、點 3.25），瀏覽器與 AA 作者用的是整數字寬（11／5／3），所以在編輯器裡對齊的框存成 HTML 後仍會偏移；`QFont.HintingPreference.PreferFullHinting` 可讓兩者一致，但會改變整個編輯器的顯示與所有補空白計算，須由使用者決定。
 2.  **效能考量**: 處理長文本時 `re.sub` 或大量 `QTextEdit` 修改 (`setPlainText`, 逐行 insert) 會造成一定延遲。必要時請以 string method 替代，或一次性取出大量 list 再 `'\n'.join()` 放回，減少 GUI 卡頓。
 3.  **保持替換長度優先排序規矩**: 修改 `apply_translation()` 邏輯時，必須延續「由原文長度遞減排序 (`valid_ids.sort`) 後再 replace」，否則疊加翻譯文將互相破壞（如先替「あ」再替「あはは」）。
 4.  **術語表有兩張（臨時 UI 已隱藏）**: 一般術語表 (`glossary_text`) 與臨時術語表 (`glossary_text_temp`)。臨時術語表的 UI 在主視窗已被隱藏（不加入 layout、無 tab 切換），但物件保留供 cache / `AA_Settings.json` I/O 使用；資料載入後仍會合併到 `get_combined_glossary()`。所有需要套用術語的地方仍應呼叫 `get_combined_glossary()` 合併後使用。
@@ -730,5 +738,5 @@ UI widget 屬於 `TranslatePanel`（除特別註明外）：
     - **拆分標記 `\X`**：術語行中若在某個分隔字元前加上反斜線 `\`，該條目會被展開成多條子條目。規則：偵測 key 中最前面的 `\X`（X 為任意字元），以 `\X` 為標記將 key 與 value 各自切割，切割數量須一致才展開，否則視為普通條目。對應 Function: `expand_glossary_entry(key, value)` in `aa_tool/translation_engine.py`。作用範圍：`parse_glossary`（術語表）、編輯器全文替換 `_replace_all`、批次搜尋快捷搜尋 `_parse_glossary_entries`。例：
         - `ライザリン\・シュタウト=萊莎琳\・斯托特` → `ライザリン=萊莎琳`、`シュタウト=斯托特`
         - 拆分後各部分執行 `strip()` 去除外圍空白。
-5.  **批次操作的行號偏移**: `batch_replace_all()` 和 `adjust_all_bubbles()` 都採用「由下而上」或「由行尾至行首」逐筆替換策略，以避免替換後行號/字元位置偏移。新增類似功能時請維持此慣例。
+5.  **批次操作的行號偏移**: `batch_replace_all()` 採用「由下而上」或「由行尾至行首」逐筆替換策略，以避免替換後行號/字元位置偏移。新增類似功能時請維持此慣例（`adjust_all_bubbles()` 例外：不增減行數，且並排框必須由左到右）。
 6.  **URL 讀取功能**: `parse_page_html()`（於 `aa_tool/url_fetcher.py`）以 `_DOMAIN_PARSERS` 對應表分派到各網域專屬解析器 (`_parse_default` / `_parse_himanatokiniyaruo` / `_parse_fc2blog` / `_parse_yaruobook`)。新增網站支援時，需撰寫新的 `_parse_XXX` 函式並註冊至該對應表；若作者標頭格式不同，亦需擴充 `_is_author_post()` 的匹配規則。**未知網域**會自動依序嘗試所有解析器（預設優先），回傳第一個非空內文的結果；因此新網站若與既有格式類似，即使尚未註冊也可能直接可用。

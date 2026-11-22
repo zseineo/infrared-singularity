@@ -1550,9 +1550,42 @@ class EditWindow(QMainWindow):
         if result.startswith('⚠️'):
             self._set_status(result, "#ffc107")
             return
-        cursor.insertText(result)
+        if result == selected:
+            # 不動文件：否則 _apply_line_height 會併進使用者前一筆不相干的 undo
+            self._set_status("✅ 對話框已是對齊狀態", "#0f0")
+            return
+        self._replace_changed_parts(target, cursor, selected, result)
         self._apply_line_height()
         self._set_status("✅ 對話框已修正", "#0f0")
+
+    def _replace_changed_parts(self, target: QTextEdit, cursor: QTextCursor,
+                               old: str, new: str) -> None:
+        """逐行只改寫 old → new 有變動的那一段（行數須相同），併成一筆 undo。
+
+        不可整段 insertText：WYSIWYG 的顏色存在字元格式裡，整段取代會全部洗掉。
+        """
+        # QTextCursor 的位置以 UTF-16 計，emoji 等字元佔兩格
+        def units(text: str) -> int:
+            return len(text.encode('utf-16-le')) // 2
+
+        pos = cursor.selectionStart()
+        cursor.beginEditBlock()
+        for before, after in zip(old.split('\n'), new.split('\n')):
+            if before != after:
+                head, limit = 0, min(len(before), len(after))
+                while head < limit and before[head] == after[head]:
+                    head += 1
+                tail = 0
+                while tail < limit - head and before[-1 - tail] == after[-1 - tail]:
+                    tail += 1
+                cursor.setPosition(pos + units(before[:head]))
+                cursor.setPosition(pos + units(before[:len(before) - tail]),
+                                   QTextCursor.MoveMode.KeepAnchor)
+                cursor.insertText(after[head:len(after) - tail])
+            pos += units(after) + 1
+        cursor.endEditBlock()
+        cursor.setPosition(pos - 1)  # 游標停在修正範圍末端、取消選取
+        target.setTextCursor(cursor)
 
     def _align_to_prev(self) -> None:
         target = self._active_edit_widget()
@@ -1615,7 +1648,7 @@ class EditWindow(QMainWindow):
     def _adjust_all_bubbles(self) -> None:
         # WYSIWYG：先 sync 把 markup 還原回 editor，運算後再重建 preview。
         # 對話框邏輯本身仍然以 editor 的字面 markup-laden 文字為輸入；
-        # `<span>` 標記不會干擾 bubble_alignment 的偵測（裡面只看 ￣/＿/| 等字元）。
+        # `<span>` 標記由 bubble_alignment 自行略過（不計寬度、原樣保留）。
         synced = False
         if self._preview_active:
             synced = self._sync_preview_to_editor()

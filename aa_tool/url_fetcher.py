@@ -4,6 +4,7 @@
   - 預設格式（article div + relate_dl；含無 dt/dd 的平面 <br> 變體，例 man001.blog.2nt.com。
     平面變體的換行完全比照瀏覽器：只有 <br>/<hr> 換行、字面換行折成空白，**作者刻意留的
     連續空行原樣保留**）
+  - yaruo-manyoshu.com（預設格式的平面變體：AA 每一行包成 <div>，`</div><div>` 大量出現時區塊邊界＝換行）
   - himanatokiniyaruo.com（dt / dd 結構 + related-entries；舊 <dt id="N"> 與新 <dt><span>N</span> 兩種模板）
   - blog.fc2.com（ently_text / entry_text div + relate_dl，含 web.archive.org 封存版、res_h/res_b 變體、
     yarucha 類 <a name/num> + <dd> 無容器模板）
@@ -903,6 +904,16 @@ def _parse_default(page_html: str, base_url: str, *, author_name: str = "", auth
         # 原樣保留**，不能用「連續 N 行以上就壓掉」這種規則猜（v2.53；v2.52 前
         # 以 `\n{3,}→\n\n` 壓掉，man001.blog.2nt.com 一話就少了 900 多行空白）。
         _NL = '\x00'
+        # 每行一個 <div>（yaruo-manyoshu.com：AA 每一行包成 `<div>…</div>`，段落間的空行
+        # 是 `</div><br><div>`，整頁幾乎不用 <br> 分行）。只看 <br> 會把整張 AA 串成一行。
+        # 比照瀏覽器：區塊邊界＝換行（已在行首就不再換）、區塊內最後的 <br> 不另起一行、
+        # 區塊頭尾的半形空白／字面換行是排版縮排（不是 U+3000，不能用 \s）。
+        # 只在大量出現 `</div><div>` 時啟用，其他站的外框 <div> 不受影響。
+        _BLK = '\x01'
+        blocky = len(re.findall(r'</div>[ \t\r\n]*<div>', flat)) >= 20
+        if blocky:
+            flat = re.sub(r'<br\s*/?>[ \t\r\n]*</div>', '</div>', flat)
+            flat = re.sub(r'[ \t\r\n]*</?div\b[^>]*>[ \t\r\n]*', _BLK, flat)
         flat = re.sub(r'<hr\b[^>]*/?>', _NL, flat, flags=re.IGNORECASE)
         flat = re.sub(r'<br\s*/?>', _NL, flat)
         # 緊貼換行標籤的字面換行是排版用的（`LINE<br>\r\n`），直接丟掉——折成
@@ -911,6 +922,9 @@ def _parse_default(page_html: str, base_url: str, *, author_name: str = "", auth
         flat = re.sub(r'[\r\n]*' + _NL + r'[\r\n]*', _NL, flat)
         flat = re.sub(r'[\r\n]+', ' ', flat)
         flat = flat.replace(_NL, '\n')
+        if blocky:
+            flat = re.sub('(^|\n)' + _BLK + '+', r'\1', flat)   # 已在行首：不再換行
+            flat = re.sub(_BLK + '+', '\n', flat)
         flat = _strip_tags_keep_color(flat)
         flat = html.unescape(flat)
         if author_name or author_only:

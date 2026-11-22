@@ -49,11 +49,12 @@ from aa_tool.translation_engine import (
 LINE_HEIGHT_PERCENT = 120  # 對應 CSS line-height: 1.2，與瀏覽器顯示一致
 DEFAULT_BG = "#ffffff"
 DEFAULT_COLOR = "#ff0000"
-DEFAULT_EDITOR_FONT = "MS PGothic"  # ⚠️ 請勿改動：AA 對齊計算依賴此字體的 metrics
+DEFAULT_EDITOR_FONT = "MS PGothic"  # ⚠️ 請勿改動：與存檔 HTML 的字型相同
 DEFAULT_EDITOR_FONT_SIZE = 12
 # 同樣是 MS PGothic，但強制整數字寬：12pt 時與存檔 HTML（16px）在瀏覽器的顯示相同。
 # 這是選項名稱而不是字型家族名，建立 QFont／CSS 時一律經 _editor_qfont()／_qt_family()
 FULL_HINTING_FONT = "MS PGothic (FullHinting)"
+SAVED_HTML_FONT_PX = 16  # 須與 html_io.write_html_file 樣板的 pre font-size 相同
 EDITOR_FONT_CHOICES = ["MS PGothic", FULL_HINTING_FONT, "Monapo", "Textar", "Saitamaar"]
 
 # 專案內建字體（fonts/ 資料夾），Qt 啟動後呼叫一次
@@ -104,6 +105,17 @@ def _editor_qfont(choice: str, size: int) -> QFont:
     font = QFont(_qt_family(choice), size)
     if choice == FULL_HINTING_FONT:
         font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
+    return font
+
+
+def _saved_html_qfont() -> QFont:
+    """存檔 HTML 在瀏覽器中的字型（MS PGothic 16px、整數字寬）。
+
+    所有會把補白寫進檔案的對齊功能一律用它量測，與看稿用的字體／字級無關。
+    用 px 而非 pt 指定，才不會隨系統 DPI 變動。
+    """
+    font = _editor_qfont(FULL_HINTING_FONT, DEFAULT_EDITOR_FONT_SIZE)
+    font.setPixelSize(SAVED_HTML_FONT_PX)
     return font
 
 
@@ -476,7 +488,8 @@ class EditWindow(QMainWindow):
         # ── 編輯區（主要 + 原文，以 QStackedWidget 切換） ──
         aa_font = _editor_qfont(self._font_family, self._font_size)
         aa_font.setStyleHint(QFont.StyleHint.TypeWriter)
-        self._measurer = QtFontMeasurer(aa_font)
+        # 固定用存檔字寬，切換看稿字體時也不跟著變（見 _saved_html_qfont）
+        self._measurer = QtFontMeasurer(_saved_html_qfont())
 
         self.editor = CustomTextEdit()
         self.editor.setAcceptRichText(False)
@@ -1025,7 +1038,6 @@ class EditWindow(QMainWindow):
             self.preview_view.setFont(new_font)
             self.preview_view.document().setDefaultFont(new_font)
             self._force_font_on_document(self.preview_view, new_font)
-        self._measurer = QtFontMeasurer(new_font)
         self._apply_editor_colors()
         self._apply_line_height()
         self._apply_line_height_to(self.orig_view)

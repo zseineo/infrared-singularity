@@ -45,7 +45,7 @@ _TRAILING_PAD_RE = re.compile(f'(?<![{_SPACE}])[{_SPACE}][{_SPACE}.]*$')
 
 _MAX_BOX_LINES = 30     # 上框到下框最多相隔幾行
 
-# 以下距離都是 MS PGothic 12pt 下的 px，使用時乘上 _scale(m) 換算到目前的字級
+# 以下距離都是 MS PGothic 12pt 下的 px，使用時乘上 _scale(m) 換算到量測器的字級
 _REFERENCE_SPACE = 10.625  # 該字級下全形空白的寬度
 _LEFT_TOLERANCE = 24.0  # 同一個框各列左邊線的 x 容許誤差
 _RIGHT_TOLERANCE = 32.0
@@ -170,7 +170,7 @@ class _Box:
 # ════════════════════════════════════════════════════════════════
 
 def _scale(m: FontMeasurer) -> float:
-    """目前字級相對於 12pt 的倍率。"""
+    """量測器的字級相對於 12pt 的倍率。"""
     return m.measure('　') / _REFERENCE_SPACE
 
 
@@ -729,6 +729,8 @@ def align_to_prev_line(
 ) -> tuple[str, int] | None:
     """將目前行游標後方的符號對齊到上一行末端。
 
+    上色／隱藏標記在存檔後不佔寬度，量測一律以 _visible() 後的文字為準。
+
     Args:
         prev_line_text: 上一行文字（已去除尾部空白）
         current_line_text: 目前行完整文字
@@ -751,7 +753,10 @@ def align_to_prev_line(
         return None
 
     selected_text = current_line_text[target_col:]
-    prev_content = prev_line_text.rstrip(_PAD_CHARS) or prev_line_text
+    prev_visible = _visible(prev_line_text)
+    prev_content = prev_visible.rstrip(_PAD_CHARS) or prev_visible
+    if not prev_content:
+        return None
     if len(prev_content) > 1:
         target_width = m.measure(prev_content[:-1])
     else:
@@ -760,10 +765,11 @@ def align_to_prev_line(
     text_before = current_line_text[:target_col]
     stripped_before = text_before.rstrip(' \u3000')
 
-    if m.measure(stripped_before) >= target_width:
-        res_prefix = stripped_before
-    else:
-        res_prefix = _pad_to_width(stripped_before, target_width, m)
+    visible_before = _visible(stripped_before)
+    res_prefix = stripped_before
+    if m.measure(visible_before) < target_width:
+        padded = _pad_to_width(visible_before, target_width, m)
+        res_prefix += padded[len(visible_before):]
 
     new_col = len(res_prefix) + 1
     return res_prefix + ' ' + selected_text, new_col

@@ -51,7 +51,10 @@ DEFAULT_BG = "#ffffff"
 DEFAULT_COLOR = "#ff0000"
 DEFAULT_EDITOR_FONT = "MS PGothic"  # ⚠️ 請勿改動：AA 對齊計算依賴此字體的 metrics
 DEFAULT_EDITOR_FONT_SIZE = 12
-EDITOR_FONT_CHOICES = ["MS PGothic", "Monapo", "Textar", "Saitamaar"]
+# 同樣是 MS PGothic，但強制整數字寬：12pt 時與存檔 HTML（16px）在瀏覽器的顯示相同。
+# 這是選項名稱而不是字型家族名，建立 QFont／CSS 時一律經 _editor_qfont()／_qt_family()
+FULL_HINTING_FONT = "MS PGothic (FullHinting)"
+EDITOR_FONT_CHOICES = ["MS PGothic", FULL_HINTING_FONT, "Monapo", "Textar", "Saitamaar"]
 
 # 專案內建字體（fonts/ 資料夾），Qt 啟動後呼叫一次
 _BUNDLED_FONTS_LOADED = False
@@ -89,6 +92,19 @@ def load_bundled_fonts() -> None:
             log_info(f"[font] 載入成功：{loaded}")
         if failed:
             log_info(f"[font] 載入失敗（addApplicationFont 回傳 -1）：{failed}")
+
+
+def _qt_family(choice: str) -> str:
+    """字體下拉的選項名稱 → Qt 認得的字型家族名。"""
+    return "MS PGothic" if choice == FULL_HINTING_FONT else choice
+
+
+def _editor_qfont(choice: str, size: int) -> QFont:
+    """依字體下拉的選項建立 QFont。"""
+    font = QFont(_qt_family(choice), size)
+    if choice == FULL_HINTING_FONT:
+        font.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
+    return font
 
 
 class QtFontMeasurer:
@@ -458,7 +474,7 @@ class EditWindow(QMainWindow):
         root.addWidget(self.search_bar)
 
         # ── 編輯區（主要 + 原文，以 QStackedWidget 切換） ──
-        aa_font = QFont(self._font_family, self._font_size)
+        aa_font = _editor_qfont(self._font_family, self._font_size)
         aa_font.setStyleHint(QFont.StyleHint.TypeWriter)
         self._measurer = QtFontMeasurer(aa_font)
 
@@ -768,7 +784,7 @@ class EditWindow(QMainWindow):
         if self._font_family not in EDITOR_FONT_CHOICES:
             self.font_combo.addItem(self._font_family)
         self.font_combo.setCurrentText(self._font_family)
-        self.font_combo.setFixedWidth(140)
+        self.font_combo.setFixedWidth(200)
         self.font_combo.setStyleSheet(
             "QComboBox { background:#343638; color:#dce4ee;"
             " border:1px solid #555; padding:2px 4px; }")
@@ -819,7 +835,7 @@ class EditWindow(QMainWindow):
     # ════════════════════════════════════════════════════════════
 
     def _apply_editor_colors(self) -> None:
-        fam = self._font_family
+        fam = _qt_family(self._font_family)
         sz = self._font_size
         self.editor.setStyleSheet(
             f"QTextEdit {{ background:{self._bg_color};"
@@ -978,7 +994,7 @@ class EditWindow(QMainWindow):
                 pass
 
     def _apply_editor_font(self) -> None:
-        new_font = QFont(self._font_family, self._font_size)
+        new_font = _editor_qfont(self._font_family, self._font_size)
         new_font.setStyleHint(QFont.StyleHint.TypeWriter)
 
         # 診斷：記錄 Qt 實際套用的字型（若與要求不符代表 fallback）
@@ -986,7 +1002,7 @@ class EditWindow(QMainWindow):
             from PyQt6.QtGui import QFontInfo
             from aa_tool.crash_logger import log_info
             resolved = QFontInfo(new_font).family()
-            if resolved.lower() != self._font_family.lower():
+            if resolved.lower() != _qt_family(self._font_family).lower():
                 log_info(
                     f"[font] 字型 fallback：要求 '{self._font_family}' "
                     f"→ Qt 實際套用 '{resolved}'（該字型可能未載入）"
@@ -1825,7 +1841,7 @@ class EditWindow(QMainWindow):
         # 套用與編輯器相同的 FixedHeight 行高，使捲動位置能對齊
         self._apply_line_height_to(self.preview_view)
         # 沿用編輯器底色與字型樣式
-        fam = self._font_family
+        fam = _qt_family(self._font_family)
         sz = self._font_size
         self.preview_view.setStyleSheet(
             f"QTextEdit {{ background:{self._bg_color};"
@@ -2071,7 +2087,7 @@ class EditWindow(QMainWindow):
         self.side_extracted.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.side_extracted.setAcceptRichText(False)
         self.side_extracted.setStyleSheet("background:#1e1e1e; color:#ddd;")
-        self.side_extracted.setFont(QFont(self._font_family, self._font_size))
+        self.side_extracted.setFont(_editor_qfont(self._font_family, self._font_size))
         vl.addWidget(self.side_extracted, 1)
 
         # 「填入翻譯（可編輯）」
@@ -2084,7 +2100,7 @@ class EditWindow(QMainWindow):
         self.side_ai.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.side_ai.setAcceptRichText(False)
         self.side_ai.setStyleSheet("background:#1e1e1e; color:#ddd;")
-        self.side_ai.setFont(QFont(self._font_family, self._font_size))
+        self.side_ai.setFont(_editor_qfont(self._font_family, self._font_size))
         vl.addWidget(self.side_ai, 1)
 
         # 右鍵選單：標準選單＋Debug 模式的「加入誤抓」（兩欄皆可，以 ID 對回原文行）
@@ -2210,7 +2226,7 @@ class EditWindow(QMainWindow):
         self.glossary_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.glossary_edit.setAcceptRichText(False)
         self.glossary_edit.setStyleSheet("background:#2a3b4c; color:#ddd;")
-        self.glossary_edit.setFont(QFont(self._font_family, self._font_size))
+        self.glossary_edit.setFont(_editor_qfont(self._font_family, self._font_size))
         self.glossary_edit.textChanged.connect(self._on_glossary_panel_changed)
         vl.addWidget(self.glossary_edit, 1)
 
@@ -2251,7 +2267,7 @@ class EditWindow(QMainWindow):
         self.filter_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.filter_edit.setAcceptRichText(False)
         self.filter_edit.setStyleSheet("background:#3c3836; color:#ddd;")
-        self.filter_edit.setFont(QFont(self._font_family, self._font_size))
+        self.filter_edit.setFont(_editor_qfont(self._font_family, self._font_size))
         self.filter_edit.textChanged.connect(self._on_filter_panel_changed)
         vl.addWidget(self.filter_edit, 1)
         return w

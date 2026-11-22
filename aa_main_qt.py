@@ -14,7 +14,6 @@ Entry point: python aa_main_qt.py
 from __future__ import annotations
 
 import hashlib
-import html as _html
 import json
 import math
 import os
@@ -73,7 +72,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.44"
+APP_VERSION = "3.45"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -1179,6 +1178,9 @@ class MainWindow(QMainWindow):
         ⚠️ 會直接取代編輯器內容。**呼叫端必須先過 `_confirm_editor_unsaved()`**，
         且要在改動提取／翻譯欄、寫暫存檔等任何狀態之前（原因見 EditWindow.confirm_unsaved）。
         """
+        text = self._read_for_editor(file_path)
+        if text is None:
+            return
         on_back = back_callback or self.show_translate_panel
         # 記錄最後開啟過的檔案路徑（供「📂 檔案列表」浮層列出相鄰檔案）
         if file_path and not is_temp_file:
@@ -1260,10 +1262,6 @@ class MainWindow(QMainWindow):
             self.stack.insertWidget(1, self._edit_window)
         else:
             # 重新載入檔案
-            try:
-                text = read_html_pre_content(file_path) or ""
-            except OSError:
-                text = ""
             self._edit_window._html_file = file_path
             self._edit_window._display_title = display_title
             self._edit_window._is_temp_file = is_temp_file
@@ -1345,6 +1343,22 @@ class MainWindow(QMainWindow):
         # 離開期間可能被批次替換、自動翻譯改過
         self._edit_window.reload_if_changed_on_disk()
 
+    def _read_for_editor(self, file_path: str) -> str | None:
+        """讀出要給編輯器的 `<pre>` 內容；不能編輯的檔顯示原因並回傳 None。
+
+        沒有 `<pre>`（index.html 等）或讀不到時**絕不可當成空白開啟**：一存檔，整個檔就被清空。
+        """
+        try:
+            text = read_html_pre_content(file_path)
+        except (OSError, UnicodeDecodeError) as e:
+            self.show_status(f"❌ 讀取 HTML 失敗！{e}", "#dc3545")
+            return None
+        if text is None:
+            self.show_status(
+                f"❌ 「{os.path.basename(file_path)}」沒有 <pre> 內文，不是可編輯的 AA 檔，未開啟",
+                "#dc3545", 5000)
+        return text
+
     def _confirm_editor_unsaved(self) -> bool:
         """編輯器有未存修改時詢問；回傳是否可以繼續（換檔／關閉）。"""
         return self._edit_window is None or self._edit_window.confirm_unsaved()
@@ -1373,6 +1387,8 @@ class MainWindow(QMainWindow):
         self._action_bar.hide()
 
     def _on_batch_open_file(self, file_path: str, line: int, folder: str) -> None:
+        if self._read_for_editor(file_path) is None:
+            return
         if not self._confirm_editor_unsaved():
             return
         self._batch_folder = folder
@@ -1762,15 +1778,7 @@ class MainWindow(QMainWindow):
             "HTML files (*.html);;All files (*.*)")
         if not file_path:
             return
-        try:
-            extracted = read_html_pre_content(file_path)
-            if extracted is None:
-                self.show_status(
-                    "⚠️ 無法找到標準的 <pre> 標籤，讀取可能不完整。", "#f39c12")
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    extracted = _html.unescape(f.read())
-        except OSError as e:
-            self.show_status(f"❌ 讀取 HTML 失敗！{e}", "#dc3545")
+        if self._read_for_editor(file_path) is None:
             return
         if not self._confirm_editor_unsaved():
             return
@@ -3452,14 +3460,29 @@ class MainWindow(QMainWindow):
             self._file_list_prev_btn.setEnabled(current_pos > 0)
             self._file_list_next_btn.setEnabled(current_pos < len(names) - 1)
 
-    def _open_adjacent_file(self, delta: int) -> None:
-        """「上一話／下一話」：開啟清單中目前檔案的前（-1）／後（+1）一個檔案。"""
+    def _open_adjacent_file(self, delta: int) -> bool:
+        """「上一話／下一話」：開啟清單中往前（-1）／後（+1）第一個可編輯的檔案。
+
+        沒有 `<pre>` 的檔（index.html 等）一律跳過，否則會卡在那裡過不去。
+        回傳是否找到檔案。
+        """
         listw = self._file_list_widget
         if listw is None or self._file_list_current_pos < 0:
-            return
-        item = listw.item(self._file_list_current_pos + delta)
-        if item is not None:
-            self._on_file_list_item_activated(item)
+            return False
+        pos = self._file_list_current_pos + delta
+        while 0 <= pos < listw.count():
+            item = listw.item(pos)
+            try:
+                editable = read_html_pre_content(
+                    item.data(Qt.ItemDataRole.UserRole)) is not None
+            except (OSError, UnicodeDecodeError):
+                editable = False
+            if editable:
+                self._on_file_list_item_activated(item)
+                return True
+            pos += delta
+        self.show_status("⚠️ 沒有下一話" if delta > 0 else "⚠️ 沒有上一話", "#f39c12")
+        return False
 
     def open_next_file(self) -> bool:
         """不開浮層直接開啟下一話（編輯器「📂 檔案列表」鈕右鍵）。沒有下一話回傳 False。"""
@@ -3467,8 +3490,7 @@ class MainWindow(QMainWindow):
         self._refresh_file_list_panel()
         if not self._file_list_next_btn.isEnabled():
             return False
-        self._open_adjacent_file(1)
-        return True
+        return self._open_adjacent_file(1)
 
     def _on_file_list_item_activated(self, item: QListWidgetItem) -> None:
         target = item.data(Qt.ItemDataRole.UserRole)
@@ -3482,13 +3504,7 @@ class MainWindow(QMainWindow):
 
     def _open_html_path(self, file_path: str) -> None:
         """以指定路徑載入 HTML 並進入編輯面板（內部共用：檔案列表點擊等）。"""
-        try:
-            extracted = read_html_pre_content(file_path)
-            if extracted is None:
-                self.show_status(
-                    "⚠️ 無法找到標準的 <pre> 標籤，讀取可能不完整。", "#f39c12")
-        except OSError as e:
-            self.show_status(f"❌ 讀取 HTML 失敗！{e}", "#dc3545")
+        if self._read_for_editor(file_path) is None:
             return
         if not self._confirm_editor_unsaved():
             return

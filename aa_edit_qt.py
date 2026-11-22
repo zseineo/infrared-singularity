@@ -1447,7 +1447,7 @@ class EditWindow(QMainWindow):
         """Alt+A：選取範圍含空白 → 消空白；否則 → 補空白。
 
         編輯模式（Alt+1）與 WYSIWYG（Alt+3）皆可用；比對模式（Alt+2）不可用。
-        WYSIWYG 下以 plain text 取代會洗掉上色，故選取範圍若含上色標籤即拒絕執行。
+        兩者都只改寫空白、保留顏色（見 _replace_spans），選取範圍含上色也可用。
         """
         if self._compare_active:
             self._set_status("⚠️ 請先離開比對模式（Alt+1／Alt+3）", "#ffc107")
@@ -1456,10 +1456,6 @@ class EditWindow(QMainWindow):
         if not cursor.hasSelection():
             self._set_status("⚠️ 請先選取要補／消空白的文字", "#ffc107")
             return
-        if self._preview_active and self._selection_has_color(cursor):
-            self._set_status(
-                "⚠️ 選取範圍含上色標籤，無法補／消空白（請避開上色文字）", "#ffc107")
-            return
         _, masked = self._selection_masked(cursor)
         if ' ' in masked or '　' in masked:
             self._strip_spaces()
@@ -1467,33 +1463,6 @@ class EditWindow(QMainWindow):
             self._pad_spaces()
         if self._preview_active:
             self._apply_line_height()  # WYSIWYG 下 insertText 後補回固定行高
-
-    def _selection_has_color(self, cursor: QTextCursor) -> bool:
-        """WYSIWYG：選取範圍是否含「上色標籤」（非黑 `#000000` 前景色的 fragment）。
-
-        判定法與 `_apply_color_wysiwyg` 一致（黑色視為未上色）。
-        """
-        doc = self.preview_view.document()
-        start = cursor.selectionStart()
-        end = cursor.selectionEnd()
-        block = doc.findBlock(start)
-        while block.isValid() and block.position() < end:
-            it = block.begin()
-            while not it.atEnd():
-                frag = it.fragment()
-                if frag.isValid():
-                    f_start = frag.position()
-                    f_end = f_start + frag.length()
-                    if f_end > start and f_start < end:
-                        fmt = frag.charFormat()
-                        if fmt.hasProperty(
-                                QTextFormat.Property.ForegroundBrush):
-                            if fmt.foreground().color().name().lower() \
-                                    != '#000000':
-                                return True
-                it += 1
-            block = block.next()
-        return False
 
     def _selection_masked(self, cursor: QTextCursor) -> tuple[str, str]:
         """回傳 (選取文字, 同長度但標記已遮成 NUL 的選取文字)。
@@ -1932,7 +1901,9 @@ class EditWindow(QMainWindow):
                 enter_line = 0
                 enter_scroll = 0
             self._compare_active = not self._compare_active
-            self._compare_from_preview = False
+            if self._compare_active:
+                # 只在「進入」時記錄；離開時要靠它決定回到哪個模式
+                self._compare_from_preview = False
 
         if self._compare_active:
             # ── 進入比對模式：游標 + 捲軸同步到 orig_view ──
@@ -1951,9 +1922,12 @@ class EditWindow(QMainWindow):
                 self._compare_from_preview = False
                 self._preview_suppress_dirty = True
                 self._render_preview_doc()
+                # 比照 _toggle_preview：重繪不可復原（比對中換檔時會叫出上一份檔）
+                self.preview_view.document().clearUndoRedoStacks()
                 self._preview_active = True
                 self.preview_view.setReadOnly(False)
                 self.stack.setCurrentIndex(2)
+                self.preview_view.setFocus()
                 self._move_cursor_to_block(self.preview_view, leave_line)
                 self.preview_view.verticalScrollBar().setValue(leave_scroll)
                 self._set_preview_ui(True)
@@ -3119,6 +3093,8 @@ class EditWindow(QMainWindow):
     def _return_to_editor(self) -> None:
         """Alt+1：從比對/預覽模式回到編輯模式；已在編輯模式則僅 focus。"""
         if self._compare_active:
+            # Alt+1 一律回編輯模式，不回到進入比對之前的 WYSIWYG
+            self._compare_from_preview = False
             self._toggle_compare()
         elif self._preview_active:
             self._toggle_preview()
@@ -4017,6 +3993,15 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     load_bundled_fonts()
+    try:
+        editable = read_html_pre_content(args.html_file) is not None
+    except (OSError, UnicodeDecodeError):
+        editable = False
+    if not editable:
+        QMessageBox.critical(
+            None, "無法開啟",
+            "這個檔沒有 <pre> 內文或無法讀取，不是可編輯的 AA 檔：" + args.html_file)
+        sys.exit(1)
     win = EditWindow(
         args.html_file, args.scroll_to_line,
         cmd_file=args.cmd_file, reply_file=args.reply_file,

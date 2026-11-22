@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from aa_tool.html_io import read_html_head, read_html_pre_content, write_html_file
+from aa_tool.text_merge import map_lines, map_span, revert_changes
 from aa_tool.qt_helpers import make_button, show_toast
 from aa_tool.translation_engine import expand_glossary_entry
 
@@ -74,7 +75,7 @@ def _load_qss() -> str:
 class BatchSearchWindow(QMainWindow):
     # 背景執行緒 → 主執行緒的信號
     _sig_progress = pyqtSignal(str)
-    _sig_done = pyqtSignal(list, int)
+    _sig_done = pyqtSignal(object, int)  # 不可用 list：Qt 會深複製每筆命中（含檔案全文）
 
     def __init__(self, *, folder: str = "", cmd_file: str = "",
                  reverse_cmd_file: str = "",
@@ -109,9 +110,15 @@ class BatchSearchWindow(QMainWindow):
         # 背景預讀（v3.36）：面板顯示／換資料夾時先把 HTML 讀進系統快取
         self._prefetch_gen = 0
         self._prefetched: tuple[str, float] = ("", 0.0)
-        # 復原用：{file_path: original_text_content}
-        self._undo_backups: dict[str, str] = {}
+        # 復原用：{file_path: (沒有替換的內容, 有替換的內容, 替換進去的文字)}，
+        # 復原時只撤銷兩者的差異，之後在別處做的修改會保留（見 text_merge）
+        self._undo_backups: dict[str, tuple[str, str, frozenset[str]]] = {}
         self._undo_items: list[dict] = []
+        # 本次搜尋的所有命中（含已排除、已替換）。它們的行、欄一律相對於 `_known` 裡
+        # 該檔最後已知的內容：寫入前先 `_sync_positions` 追上別處的修改，寫入後跟著平移。
+        # ⚠️ 不可改成靠「行內容／上下行」猜位置：AA 常有一模一樣的行，會改到別筆命中。
+        self._results: list[dict] = []
+        self._known: dict[str, str] = {}
         # 本次「全部替換」快照（僅保留最近一次）
         self._batch_undo: dict | None = None
         # 操作互斥鎖：避免替換/復原過程中快速連點造成 widget 存取崩潰
@@ -500,6 +507,11 @@ class BatchSearchWindow(QMainWindow):
 
         self._clear_results()
         self.batch_matches.clear()
+        # 舊結果列已不在畫面上，復原時不可再放回「待替換」（否則全部替換會改到看不見的項目）。
+        # 各檔的復原備份照留。
+        self._undo_items.clear()
+        self._results = []
+        self._known = {}
         # 新搜尋：隱藏上一次的「全部復原」按鈕
         self._batch_undo = None
         self.btn_undo_all.hide()
@@ -539,6 +551,9 @@ class BatchSearchWindow(QMainWindow):
 
                         matches.append({
                             'file_path': fpath,
+                            'file_text': text,  # 交給 _search_done 放進 _known
+                            'origin': (line, match_start),
+                            'stale': False,
                             'file_name': fname,
                             'line_idx': line_idx,
                             'match_start': match_start,
@@ -576,6 +591,8 @@ class BatchSearchWindow(QMainWindow):
 
     def _search_done(self, matches: list[dict], file_count: int):
         self.batch_matches = matches
+        self._results = list(matches)
+        self._known = {mi['file_path']: mi.pop('file_text') for mi in matches}
         self.search_btn.setEnabled(True)
         total = len(matches)
 
@@ -785,8 +802,13 @@ class BatchSearchWindow(QMainWindow):
         finally:
             self._busy = False
 
-    def _render_row_as_dismissed(self, row: QWidget, mi: dict) -> None:
-        """將 row 重建為「已排除」狀態（實際 widget 操作）。"""
+    def _render_row_as_dismissed(self, row: QWidget, mi: dict,
+                                 status: str = "已排除",
+                                 restorable: bool = True) -> None:
+        """將 row 重建為灰色的「不會被替換」狀態（實際 widget 操作）。
+
+        已排除可以恢復；復原時有修改被保留的列（「需重搜」）不可恢復。
+        """
         row_layout = row.layout()
         while row_layout.count():
             item = row_layout.takeAt(0)
@@ -797,7 +819,7 @@ class BatchSearchWindow(QMainWindow):
         lbl_name.setStyleSheet("color: #6c757d;")
         row_layout.addWidget(lbl_name)
 
-        lbl_status = QLabel("已排除")
+        lbl_status = QLabel(status)
         lbl_status.setFont(self.ui_small_font)
         lbl_status.setFixedWidth(self._LEADING_COL_WIDTH)
         lbl_status.setAlignment(
@@ -811,6 +833,7 @@ class BatchSearchWindow(QMainWindow):
         btn_restore.setFixedHeight(26)
         btn_restore.clicked.connect(
             lambda checked=False, m=mi: self._restore_dismissed(m))
+        btn_restore.setEnabled(restorable)
         row_layout.addWidget(btn_restore)
         # 已排除狀態沒有第二顆按鈕；用空 placeholder 填滿第三欄，
         # 讓「搜尋結果」內文欄起點與其他狀態一致。
@@ -888,6 +911,87 @@ class BatchSearchWindow(QMainWindow):
     #  單筆替換
     # ────────────────────────────────────────────────────────
 
+    def _sync_positions(self, fpath: str, current: str) -> None:
+        """讀到檔案目前內容時呼叫：把命中位置從最後已知內容平移過來。
+
+        對不回去（該行被刪、命中的字被改掉）的標成 `stale`，不再替換。
+        """
+        known = self._known.get(fpath)
+        if known is None or known == current:
+            return
+        old, new = known.split('\n'), current.split('\n')
+        new_index = {i: j for j, i in map_lines(old, new).items()}
+        replaced = {id(m) for m in self._undo_items}
+        for mi in self._results:
+            if mi['file_path'] != fpath or mi['stale']:
+                continue
+            li = mi['line_idx']
+            j = new_index.get(li)
+            if j is None:
+                mi['stale'] = True
+                continue
+            if id(mi) not in replaced:  # 已替換的只需追行號
+                start, end = mi['match_start'], mi['match_end']
+                col = map_span(old[li], new[j], start, end)
+                if col is None:
+                    mi['stale'] = True
+                    continue
+                mi.update(match_start=col, match_end=col + (end - start))
+            mi['line_idx'] = j
+        self._known[fpath] = current
+
+    def _shift_after_replace(self, fpath: str, hit: tuple[int, int, int],
+                             length: int) -> None:
+        """一筆替換寫入後，平移同一行其他待替換命中的欄位。"""
+        li, start, end = hit
+        replaced = {id(m) for m in self._undo_items}
+        for mi in self._results:
+            if (mi['file_path'] != fpath or mi['line_idx'] != li or mi['stale']
+                    or id(mi) in replaced):
+                continue
+            if mi['match_start'] >= end:
+                delta = length - (end - start)
+                mi['match_start'] += delta
+                mi['match_end'] += delta
+            elif mi['match_end'] > start:
+                mi['stale'] = True  # 與被替換的範圍重疊
+
+    def _restore_positions(self, fpath: str, result: str,
+                           saved: dict[int, tuple[str, int]]) -> None:
+        """撤銷替換後，把未替換命中的欄位換回 *saved* 那時的位置（行號不變）。
+
+        saved：{id(命中): (當時整行, 當時起點)}。不用「復原前 → 復原後」逐字比對，
+        因為同一行有重複的字時會對到另一筆。
+        """
+        lines = result.split('\n')
+        replaced = {id(m) for m in self._undo_items}
+        for mi in self._results:
+            if (mi['file_path'] != fpath or mi['stale'] or id(mi) in replaced
+                    or id(mi) not in saved):
+                continue
+            line, start = saved[id(mi)]
+            length = mi['match_end'] - mi['match_start']
+            col = map_span(line, lines[mi['line_idx']], start, start + length)
+            if col is None:
+                mi['stale'] = True
+            else:
+                mi.update(match_start=col, match_end=col + length)
+        if fpath in self._known:
+            self._known[fpath] = result
+
+    def _record_replacement(self, fpath: str, before: str, after: str,
+                            replacement: str) -> None:
+        """記下一次已寫入的替換，供單檔復原。"""
+        words = frozenset([replacement] if replacement else [])
+        backup = self._undo_backups.get(fpath)
+        if backup is None:
+            self._undo_backups[fpath] = (before, after, words)
+            return
+        base, last, old_words = backup
+        # 上次替換之後在別處做的修改併入備份，復原時才不會消失
+        base, _ = revert_changes(base, last, before, old_words)
+        self._undo_backups[fpath] = (base, after, old_words | words)
+
     def _replace_single(self, mi: dict):
         if self._busy:
             return
@@ -896,23 +1000,20 @@ class BatchSearchWindow(QMainWindow):
             replacement = self.replace_entry.text()
             fpath = mi['file_path']
 
-            text = read_html_pre_content(fpath)
+            text = _read_pre_safe(fpath)
             if text is None:
                 self._toast("無法讀取檔案", color="#dc3545")
                 return
 
-            # 備份原始內容（每個檔案只備份一次）
-            if fpath not in self._undo_backups:
-                self._undo_backups[fpath] = text
-            self._undo_items.append(mi)
-
+            self._sync_positions(fpath, text)
+            if mi['stale']:
+                self._toast("這一筆在搜尋之後被改過，請重新搜尋", color="#f39c12")
+                return
             lines = text.split('\n')
-            li = mi['line_idx']
-            if li < len(lines):
-                line = lines[li]
-                lines[li] = line[:mi['match_start']] + replacement + line[mi['match_end']:]
-
-            new_text = '\n'.join(lines)
+            hit = li, start, end = mi['line_idx'], mi['match_start'], mi['match_end']
+            new_lines = list(lines)
+            new_lines[li] = lines[li][:start] + replacement + lines[li][end:]
+            new_text = '\n'.join(new_lines)
             try:
                 write_html_file(fpath, new_text,
                                 head_html=read_html_head(fpath))
@@ -920,6 +1021,11 @@ class BatchSearchWindow(QMainWindow):
                 self._toast(f"儲存失敗: {e}", color="#dc3545")
                 return
 
+            # 寫入成功才記錄
+            self._record_replacement(fpath, text, new_text, replacement)
+            self._undo_items.append(mi)
+            self._shift_after_replace(fpath, hit, len(replacement))
+            self._known[fpath] = new_text
             self.batch_matches = [m for m in self.batch_matches if m is not mi]
 
             old_row = mi.get('_row')
@@ -957,65 +1063,74 @@ class BatchSearchWindow(QMainWindow):
         for mi in self.batch_matches:
             by_file.setdefault(mi['file_path'], []).append(mi)
 
-        # 本批次快照：用於「全部復原」（以替換前的當下內容為基準）
-        batch_pre: dict[str, str] = {}
-        new_backup_files: set[str] = set()
-
-        replaced_count = 0
-        file_count = 0
+        # 本批次快照：用於「全部復原」（只撤銷本次替換）
+        batch_files: dict[str, tuple[str, str, frozenset[str]]] = {}
+        batch_items: list[dict] = []
+        positions: dict[int, tuple[str, int]] = {}
         for fpath, matches in by_file.items():
-            text = read_html_pre_content(fpath)
+            text = _read_pre_safe(fpath)
             if text is None:
                 continue
 
-            batch_pre[fpath] = text
-            # 備份原始內容（單筆復原用）
-            if fpath not in self._undo_backups:
-                self._undo_backups[fpath] = text
-                new_backup_files.add(fpath)
-
+            self._sync_positions(fpath, text)
             lines = text.split('\n')
-            matches.sort(key=lambda m: (m['line_idx'], -m['match_start']))
+            hits = [((mi['line_idx'], mi['match_start'], mi['match_end']), mi)
+                    for mi in matches if not mi['stale']]
+            # 替換前的位置：「全部復原」後照這份放回去
+            before_positions = {
+                id(mi): (lines[mi['line_idx']], mi['match_start'])
+                for mi in self._results
+                if mi['file_path'] == fpath and not mi['stale']}
+            # 同一行由右往左改，左邊命中的位置才不會位移
+            hits.sort(key=lambda h: h[0], reverse=True)
+            new_lines = list(lines)
+            done: list[dict] = []
+            written: list[tuple[int, int, int]] = []
+            last: tuple[int, int, int] | None = None
+            for found, mi in hits:
+                li, start, end = found
+                if last and li == last[0] and (found == last or end > last[1]):
+                    continue  # 與右邊那筆重疊
+                line = new_lines[li]
+                new_lines[li] = line[:start] + replacement + line[end:]
+                done.append(mi)
+                written.append(found)
+                last = found
+            if not done:
+                continue
 
-            for mi in matches:
-                li = mi['line_idx']
-                if li < len(lines):
-                    line = lines[li]
-                    lines[li] = line[:mi['match_start']] + replacement + line[mi['match_end']:]
-                    replaced_count += 1
-
-            new_text = '\n'.join(lines)
+            new_text = '\n'.join(new_lines)
             try:
                 write_html_file(fpath, new_text,
                                 head_html=read_html_head(fpath))
-                file_count += 1
             except Exception:
-                pass
+                continue
+            batch_files[fpath] = (
+                text, new_text, frozenset([replacement] if replacement else []))
+            self._record_replacement(fpath, text, new_text, replacement)
+            self._undo_items.extend(done)
+            for hit in written:  # 已是由右往左
+                self._shift_after_replace(fpath, hit, len(replacement))
+            self._known[fpath] = new_text
+            positions.update(before_positions)
+            batch_items.extend(done)
 
-        batch_items = list(self.batch_matches)
         for mi in batch_items:
-            self._undo_items.append(mi)
             old_row = mi.get('_row')
             if old_row:
                 self._rebuild_row_as_replaced(old_row, mi, replacement)
 
-        self._batch_undo = {
-            'backups': batch_pre,
-            'items': batch_items,
-            'new_backup_files': new_backup_files,
-        }
-        self.btn_undo_all.show()
+        if batch_items:
+            self._batch_undo = {'backups': batch_files, 'items': batch_items,
+                                'positions': positions}
+            self.btn_undo_all.show()
 
-        self.batch_matches.clear()
-        self.status_label.setText(f"已替換 {replaced_count} 筆，涉及 {file_count} 個檔案")
-        self.status_label.setStyleSheet("color: #28a745;")
-        self._toast(f"全部替換完成！共 {replaced_count} 筆")
-
-    # ────────────────────────────────────────────────────────
-    #  附註檔名
-    # ────────────────────────────────────────────────────────
-
-    _INVALID_FN_CHARS = set('\\/:*?"<>|')
+        done_ids = {id(mi) for mi in batch_items}
+        self.batch_matches = [m for m in self.batch_matches if id(m) not in done_ids]
+        status = f"已替換 {len(batch_items)} 筆，涉及 {len(batch_files)} 個檔案"
+        if self.batch_matches:
+            status += f"；{len(self.batch_matches)} 筆未替換（檔案已被改過或無法寫入，請重新搜尋）"
+        self.status_label.setText(status)
 
     def _append_filename_suffix(self):
         """「附註檔名」：搜尋到的所有檔案，檔名（副檔名前）後面加上替換欄的文字。"""
@@ -1086,24 +1201,24 @@ class BatchSearchWindow(QMainWindow):
         """改名後把搜尋結果與復原備份裡的舊路徑換成新路徑（復原才寫得回正確的檔案）。"""
         if not renamed:
             return
-        for mi in list(self.batch_matches) + list(self._undo_items):
+        for mi in self._results + self.batch_matches + self._undo_items:
             new = renamed.get(mi.get('file_path'))
             if new:
                 mi['file_path'] = new
                 mi['file_name'] = os.path.basename(new)
                 mi['stem'] = os.path.splitext(mi['file_name'])[0]
         self._undo_backups = {renamed.get(k, k): v for k, v in self._undo_backups.items()}
+        self._known = {renamed.get(k, k): v for k, v in self._known.items()}
         if self._batch_undo:
             b = self._batch_undo
             b['backups'] = {renamed.get(k, k): v for k, v in b['backups'].items()}
-            b['new_backup_files'] = {renamed.get(k, k) for k in b['new_backup_files']}
 
     # ────────────────────────────────────────────────────────
     #  復原
     # ────────────────────────────────────────────────────────
 
     def _undo_single(self, mi: dict):
-        """復原單筆替換：從備份還原該檔案的原始內容。"""
+        """復原這個檔案的所有替換；之後在別處做的修改保留。"""
         if self._busy:
             return
         self._busy = True
@@ -1113,18 +1228,29 @@ class BatchSearchWindow(QMainWindow):
             if backup is None:
                 self._toast("無備份可復原", color="#dc3545")
                 return
+            current = _read_pre_safe(fpath)
+            if current is None:
+                self._toast("無法讀取檔案，未復原", color="#dc3545")
+                return
 
+            base, after, words = backup
+            result, kept = revert_changes(base, after, current, words)
             try:
-                write_html_file(fpath, backup,
-                                head_html=read_html_head(fpath))
+                if result != current:
+                    write_html_file(fpath, result,
+                                    head_html=read_html_head(fpath))
             except Exception as e:
                 self._toast(f"復原失敗: {e}", color="#dc3545")
                 return
 
+            self._sync_positions(fpath, current)
             # 移除此檔案所有相關的 undo 項目並恢復成可操作狀態
             restored = [item for item in self._undo_items if item['file_path'] == fpath]
             self._undo_items = [item for item in self._undo_items if item['file_path'] != fpath]
             del self._undo_backups[fpath]
+            # 這個檔的替換全部撤銷了 → 各命中回到搜尋當時那一行裡的位置
+            self._restore_positions(fpath, result, {
+                id(m): m['origin'] for m in self._results if m['file_path'] == fpath})
 
             for item in restored:
                 row = item.get('_row')
@@ -1134,17 +1260,30 @@ class BatchSearchWindow(QMainWindow):
                     # 刪除該按鈕，Qt 會在信號分派過程中訪問已被釋放的
                     # widget 而崩潰。
                     QTimer.singleShot(
-                        0, lambda r=row, it=item: self._rebuild_row_as_active(r, it))
-                self.batch_matches.append(item)
+                        0, lambda r=row, it=item, k=kept: self._rebuild_row_after_undo(r, it, k))
+                if not kept:
+                    self.batch_matches.append(item)
 
             # 單筆復原已動過此檔案，使批次快照失效
             if self._batch_undo and fpath in self._batch_undo['backups']:
                 self._batch_undo = None
                 self.btn_undo_all.hide()
 
-            self._toast(f"已復原 {len(restored)} 筆（{os.path.basename(fpath)}）")
+            name = os.path.basename(fpath)
+            if kept:
+                self._toast(f"已復原（{name}）；{kept} 行在替換後又被改過，保留現狀",
+                            color="#f39c12", duration=6000)
+            else:
+                self._toast(f"已復原替換，其他修改保留（{name}）")
         finally:
             self._busy = False
+
+    def _rebuild_row_after_undo(self, row: QWidget, mi: dict, kept: int) -> None:
+        if kept:
+            # 有替換留在檔案裡，這個檔的命中不再可靠，不放回「待替換」
+            self._render_row_as_dismissed(row, mi, status="需重搜", restorable=False)
+        else:
+            self._rebuild_row_as_active(row, mi)
 
     def _undo_all_batch(self):
         """復原最近一次「全部替換」：將所有相關檔案還原至替換前狀態。"""
@@ -1160,39 +1299,69 @@ class BatchSearchWindow(QMainWindow):
             self._busy = False
 
     def _undo_all_batch_impl(self):
-        backups: dict[str, str] = self._batch_undo['backups']
+        """撤銷最近一次「全部替換」；之後在別處做的修改、其他次的替換都保留。"""
+        backups: dict[str, tuple[str, str, frozenset[str]]] = self._batch_undo['backups']
         items: list[dict] = self._batch_undo['items']
-        new_backup_files: set[str] = self._batch_undo['new_backup_files']
+        positions: dict[int, tuple[str, int]] = self._batch_undo['positions']
 
-        restored_files = 0
-        for fpath, content in backups.items():
+        failed: dict[str, tuple[str, str, frozenset[str]]] = {}
+        kept_by_file: dict[str, int] = {}
+        for fpath, (before, after, words) in backups.items():
+            current = _read_pre_safe(fpath)
+            if current is None:
+                failed[fpath] = (before, after, words)
+                continue
+            result, kept = revert_changes(before, after, current, words)
             try:
-                write_html_file(fpath, content,
-                                head_html=read_html_head(fpath))
-                restored_files += 1
+                if result != current:
+                    write_html_file(fpath, result,
+                                    head_html=read_html_head(fpath))
             except Exception:
-                pass
+                failed[fpath] = (before, after, words)
+                continue
+            kept_by_file[fpath] = kept
+            self._sync_positions(fpath, current)
+            # 從單筆 undo 追蹤中移除已撤銷的項目
+            undone_ids = {id(m) for m in items if m['file_path'] == fpath}
+            self._undo_items = [m for m in self._undo_items if id(m) not in undone_ids]
+            self._restore_positions(fpath, result, positions)
+            # 單檔備份扣掉本次替換；已沒有替換可復原就移除
+            if fpath in self._undo_backups:
+                base, last, all_words = self._undo_backups[fpath]
+                base, _ = revert_changes(base, last, current, all_words)
+                if base == result:
+                    del self._undo_backups[fpath]
+                else:
+                    self._undo_backups[fpath] = (base, result, all_words)
 
-        # 從單筆 undo 追蹤中移除本批次的項目
-        item_ids = {id(mi) for mi in items}
-        self._undo_items = [m for m in self._undo_items if id(m) not in item_ids]
-        for fpath in new_backup_files:
-            self._undo_backups.pop(fpath, None)
+        undone = [m for m in items if m['file_path'] in kept_by_file]
 
-        for mi in items:
+        for mi in undone:
+            kept = kept_by_file[mi['file_path']]
             row = mi.get('_row')
             if row:
-                self._rebuild_row_as_active(row, mi)
-            self.batch_matches.append(mi)
+                self._rebuild_row_after_undo(row, mi, kept)
+            if not kept:
+                self.batch_matches.append(mi)
 
-        self._batch_undo = None
-        self.btn_undo_all.hide()
+        if failed:
+            # 寫不進去的檔留著，之後可以再按一次
+            self._batch_undo = {'backups': failed, 'positions': positions,
+                                'items': [m for m in items if m['file_path'] in failed]}
+        else:
+            self._batch_undo = None
+            self.btn_undo_all.hide()
 
-        self.status_label.setText(
-            f"已復原本次全部替換（{len(items)} 筆，{restored_files} 個檔案）"
-        )
-        self.status_label.setStyleSheet("color: #17a2b8;")
-        self._toast(f"已復原本次全部替換！共 {len(items)} 筆")
+        text = f"已復原本次全部替換（{len(undone)} 筆，{len(kept_by_file)} 個檔案）"
+        kept_total = sum(kept_by_file.values())
+        if kept_total:
+            text += f"；{kept_total} 行在替換後又被改過，保留現狀"
+        if failed:
+            text += f"；{len(failed)} 個檔案無法讀寫，可再按一次"
+        warn = bool(kept_total or failed)
+        self.status_label.setText(text)
+        self.status_label.setStyleSheet("color: #f39c12;" if warn else "color: #17a2b8;")
+        self._toast(text, color="#f39c12" if warn else "#28a745")
 
     def _rebuild_row_as_active(self, row: QWidget, mi: dict):
         """將已替換的行恢復為可操作狀態（替換＋開啟按鈕）。"""

@@ -8,6 +8,7 @@
 #   text_extraction   - 文本提取演算法
 #   translation_engine- 翻譯替換引擎（含 Auto-Padding）
 #   bubble_alignment  - 對話框對齊演算法（五種框型）
+#   text_merge        - 逐行三方合併（批次搜尋的復原／位置追蹤）
 #   url_fetcher       - HTTP 抓取 + 頁面 HTML 解析
 #
 # UI 模組（PyQt6）：

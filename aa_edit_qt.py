@@ -494,6 +494,9 @@ class EditWindow(QMainWindow):
         self.editor = CustomTextEdit()
         self.editor.setAcceptRichText(False)
         self.editor.setPlainText(text)
+        # 「未儲存」的比較基準（見 _mark_clean）
+        self._clean_text = self.editor.toPlainText()
+        self._clean_markup = ""  # WYSIWYG 用，於 _render_preview_doc 記錄
         # 清除「空 → 初始內容」這條 undo entry，避免使用者一打開檔案按 Ctrl+Z
         # 整份文字被還原成空白。從這之後使用者的編輯才開始記錄。
         self.editor.document().clearUndoRedoStacks()
@@ -1648,8 +1651,11 @@ class EditWindow(QMainWindow):
             QTextCursor.MoveOperation.EndOfBlock,
             QTextCursor.MoveMode.KeepAnchor,
         )
-        line_cursor.insertText(new_line)
-        self._apply_line_height()
+        old_line = line_cursor.selectedText()
+        # 沒變就不動文件（否則會併進前一筆 undo）；有變只改寫那一段，才不會洗掉顏色
+        if new_line != old_line:
+            self._replace_changed_parts(target, line_cursor, old_line, new_line)
+            self._apply_line_height()
 
         # 移到新游標位置
         new_block = target.document().findBlockByLineNumber(line_idx)
@@ -1862,6 +1868,7 @@ class EditWindow(QMainWindow):
             f" font-family:'{fam}';"
             f" font-size:{sz}pt; }}"
         )
+        self._clean_markup = self._serialize_preview_to_markup()
 
     def _toggle_preview(self) -> None:
         # ── 即將「離開」WYSIWYG ──
@@ -1973,7 +1980,9 @@ class EditWindow(QMainWindow):
             return
         # 與 _on_changed 同樣強制重繪 viewport，避免刪除繁中 fallback 字元後殘影
         self.preview_view.viewport().update()
-        if self._preview_active and not self._dirty:
+        # 上色不改純文字，所以要比序列化後的 markup
+        if (self._preview_active and not self._dirty
+                and self._serialize_preview_to_markup() != self._clean_markup):
             self._dirty = True
             self.setWindowTitle("* " + self.windowTitle().lstrip("* "))
 
@@ -3544,9 +3553,21 @@ class EditWindow(QMainWindow):
         # 強制重繪 viewport：刪除繁中 fallback 字元後 Qt 有時會殘留上一次
         # 渲染痕跡（因字身超出該行的 FixedHeight 邊界），手動觸發清除。
         self.editor.viewport().update()
-        if not self._dirty:
+        # textChanged 連「只改格式」（行高、字型、復原格式）也會發，所以要比內容；
+        # 一旦 dirty 就不再比，長文打字不會每個字都掃整份文件
+        if not self._dirty and self.editor.toPlainText() != self._clean_text:
             self._dirty = True
             self.setWindowTitle("* " + self.windowTitle().lstrip("* "))
+
+    def _mark_clean(self) -> None:
+        """以目前內容作為「已儲存」的基準（載入、存檔成功後呼叫）。
+
+        不可只設 `_dirty = False`：比較基準會停在舊內容。
+        """
+        self._dirty = False
+        self._clean_text = self.editor.toPlainText()
+        if self._preview_active:
+            self._clean_markup = self._serialize_preview_to_markup()
 
     def _write_current(self, file_path: str, *, embed: bool = True) -> bool:
         # 若目前在 WYSIWYG（Alt+3 編輯預覽）模式，先把編輯成果序列化回 editor，
@@ -3636,7 +3657,7 @@ class EditWindow(QMainWindow):
 
     def _after_save_success(self, file_path: str,
                             is_save_as: bool = False) -> None:
-        self._dirty = False
+        self._mark_clean()
         base = os.path.basename(file_path)
         title = self._display_title or base
         self.setWindowTitle(f"AA 編輯器 (PyQt6) — {title}")

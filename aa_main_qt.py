@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.42"
+APP_VERSION = "3.43"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -1270,7 +1270,6 @@ class MainWindow(QMainWindow):
                 self._edit_window._bg_color = bg
             else:
                 self._edit_window._bg_color = self._editor_bg_color
-            self._edit_window._dirty = False
             self._edit_window._replace_document(text)
             self._edit_window._apply_editor_colors()
             header = display_title or os.path.basename(file_path)
@@ -1296,6 +1295,8 @@ class MainWindow(QMainWindow):
             # 必須在 _scroll_to_line 之前執行，這樣後續捲動才能套用到全新的 preview。
             if self._edit_window._preview_active:
                 self._edit_window._wysiwyg_rerender_after_editor_change()
+            # 必須在新內容（含預覽）都載入之後：它會記下「已儲存」的比較基準
+            self._edit_window._mark_clean()
             if scroll_to_line:
                 self._edit_window._scroll_to_line(scroll_to_line)
             else:

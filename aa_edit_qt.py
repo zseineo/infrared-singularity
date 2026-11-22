@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -36,7 +37,8 @@ from aa_tool.bubble_alignment import (
     align_to_prev_line as _align_to_prev_line,
 )
 from aa_tool.html_io import (
-    read_html_bg_color, read_html_head, read_html_pre_content, write_html_file,
+    _PRESERVED_SPAN_OPEN_RE, read_html_bg_color, read_html_head,
+    read_html_pre_content, write_html_file,
 )
 from aa_tool.qt_helpers import show_toast
 from aa_tool.text_extraction import extract_text as _extract_text
@@ -117,6 +119,66 @@ def _saved_html_qfont() -> QFont:
     font = _editor_qfont(FULL_HINTING_FONT, DEFAULT_EDITOR_FONT_SIZE)
     font.setPixelSize(SAVED_HTML_FONT_PX)
     return font
+
+
+# 存檔時會原樣保留成標籤的標記（上色／隱藏）。選取範圍的工具一律不得改到它們
+_MARKUP_TAG_RE = re.compile(_PRESERVED_SPAN_OPEN_RE + '|</span>')
+
+
+def _utf16_len(text: str) -> int:
+    """文字佔幾個 QTextCursor 位置（Qt 以 UTF-16 計，emoji 等字元佔兩格）。"""
+    return len(text.encode('utf-16-le')) // 2
+
+
+def _utf16_to_index(text: str, units: int) -> int:
+    """QTextCursor 在 *text* 內的位置 → Python 字串索引。"""
+    return len(text.encode('utf-16-le')[:units * 2].decode('utf-16-le', 'ignore'))
+
+
+def _mask_tags(text: str) -> str:
+    """把標記換成等長的 NUL：位置不變，但不會被當成空白、術語或邊框字元。"""
+    return _MARKUP_TAG_RE.sub(lambda m: '\x00' * len(m.group()), text)
+
+
+def _visible_with_colors(markup: str) -> list[tuple[str, list[str]]]:
+    """逐行回傳 (去掉標記的文字, 每個字元的 CSS 顏色；未上色為空字串)。"""
+    lines: list[tuple[str, list[str]]] = []
+    chars: list[str] = []
+    colors: list[str] = []
+    stack: list[str] = []
+
+    def feed(text: str) -> None:
+        nonlocal chars, colors
+        for i, part in enumerate(text.split('\n')):
+            if i:
+                lines.append((''.join(chars), colors))
+                chars, colors = [], []
+            chars.extend(part)
+            colors.extend([stack[-1] if stack else ''] * len(part))
+
+    pos = 0
+    for tag in _MARKUP_TAG_RE.finditer(markup):
+        feed(markup[pos:tag.start()])
+        if tag.group() == '</span>':
+            if stack:
+                stack.pop()
+        else:
+            found = re.search(r'color:([^";]+)', tag.group())
+            stack.append(found.group(1).strip() if found
+                         else (stack[-1] if stack else ''))
+        pos = tag.end()
+    feed(markup[pos:])
+    lines.append((''.join(chars), colors))
+    return lines
+
+
+def _file_digest(path: str) -> bytes | None:
+    """檔案內容的指紋；讀不到回傳 None。"""
+    try:
+        with open(path, 'rb') as f:
+            return hashlib.sha1(f.read()).digest()
+    except OSError:
+        return None
 
 
 class QtFontMeasurer:
@@ -458,6 +520,8 @@ class EditWindow(QMainWindow):
             QMessageBox.critical(self, "讀取失敗", f"無法讀取檔案：\n{e}")
             text = ""
         self._custom_head = read_html_head(html_file) if html_file else None
+        # 載入／存檔當下的檔案指紋，用來發現檔案被別處（批次替換等）改過
+        self._disk_digest = _file_digest(html_file) if html_file else None
         # init_bg（使用者上次調整的顯示底色）優先，
         # 找不到時再嘗試從 HTML 讀取（舊版相容）
         if init_bg:
@@ -496,7 +560,8 @@ class EditWindow(QMainWindow):
         self.editor.setPlainText(text)
         # 「未儲存」的比較基準（見 _mark_clean）
         self._clean_text = self.editor.toPlainText()
-        self._clean_markup = ""  # WYSIWYG 用，於 _render_preview_doc 記錄
+        # 與 editor 目前內容等價的預覽序列化結果（見 _sync_preview_to_editor）
+        self._synced_markup = ""
         # 清除「空 → 初始內容」這條 undo entry，避免使用者一打開檔案按 Ctrl+Z
         # 整份文字被還原成空白。從這之後使用者的編輯才開始記錄。
         self.editor.document().clearUndoRedoStacks()
@@ -1395,8 +1460,8 @@ class EditWindow(QMainWindow):
             self._set_status(
                 "⚠️ 選取範圍含上色標籤，無法補／消空白（請避開上色文字）", "#ffc107")
             return
-        selected = cursor.selectedText()
-        if ' ' in selected or '　' in selected:
+        _, masked = self._selection_masked(cursor)
+        if ' ' in masked or '　' in masked:
             self._strip_spaces()
         else:
             self._pad_spaces()
@@ -1430,15 +1495,92 @@ class EditWindow(QMainWindow):
             block = block.next()
         return False
 
+    def _selection_masked(self, cursor: QTextCursor) -> tuple[str, str]:
+        """回傳 (選取文字, 同長度但標記已遮成 NUL 的選取文字)。
+
+        以整行為單位找標記，選取範圍只切到半個標記時也遮得掉。
+        """
+        selected = cursor.selectedText().replace('\u2029', '\n')
+        doc = cursor.document()
+        first = doc.findBlock(cursor.selectionStart())
+        last = doc.findBlock(cursor.selectionEnd())
+        lines = []
+        block = first
+        while block.isValid():
+            lines.append(block.text())
+            if block == last:
+                break
+            block = block.next()
+        offset = _utf16_to_index(
+            first.text(), cursor.selectionStart() - first.position())
+        masked = _mask_tags('\n'.join(lines))[offset:offset + len(selected)]
+        return selected, masked
+
+    def _replace_spans(self, target: QTextEdit, base: int, text: str,
+                       spans: list[tuple[int, int, list[tuple[str, str | None]]]],
+                       end: int) -> None:
+        """只改寫 *spans* 指定的片段、併成一筆 undo；其餘字元的顏色與標記原封不動。
+
+        Args:
+            base: *text* 在文件中的起點（QTextCursor 位置）
+            spans: (起, 迄, [(新文字, 顏色)])，起迄是 *text* 的 Python 索引。顏色 None＝
+                沿用被取代的第一個字；純插入時沿用前一字，但前後顏色不同就不上色，
+                以免上色範圍往外長
+            end: 原選取終點，改完後游標停在該處（會隨修改平移）
+        """
+        end_cursor = QTextCursor(target.document())
+        end_cursor.setPosition(end)
+        if spans:
+            in_preview = target is self.preview_view
+            offsets = [0]
+            for char in text:
+                offsets.append(offsets[-1] + (2 if ord(char) > 0xFFFF else 1))
+
+            def format_of(index: int) -> QTextCharFormat:
+                probe = QTextCursor(target.document())
+                probe.setPosition(base + offsets[index + 1])  # 取得的是前一個字元的格式
+                return probe.charFormat()
+
+            cursor = QTextCursor(target.document())
+            cursor.beginEditBlock()
+            # 由後往前改，前面片段的位置才不會位移；同一起點時先刪、後插入
+            for start, stop, runs in sorted(spans, key=lambda s: s[:2], reverse=True):
+                fmt = None
+                if in_preview and runs:
+                    if stop > start:
+                        fmt = format_of(start)
+                    elif start > 0:
+                        fmt = format_of(start - 1)
+                        if start < len(text) and text[start] != '\n':
+                            after = format_of(start)
+                            if after.foreground() != fmt.foreground():
+                                fmt.setForeground(QColor("#000000"))
+                cursor.setPosition(base + offsets[start])
+                cursor.setPosition(base + offsets[stop],
+                                   QTextCursor.MoveMode.KeepAnchor)
+                if not runs:
+                    cursor.removeSelectedText()
+                for new, color in runs:
+                    if fmt is None:
+                        cursor.insertText(new)
+                        continue
+                    run_fmt = QTextCharFormat(fmt)
+                    if color is not None:
+                        run_fmt.setForeground(_css_color_to_qcolor(color or "#000000"))
+                    cursor.insertText(new, run_fmt)
+            cursor.endEditBlock()
+        target.setTextCursor(end_cursor)
+
     def _strip_spaces(self) -> None:
         target = self._active_edit_widget()
         cursor = target.textCursor()
         if not cursor.hasSelection():
             self._set_status("⚠️ 請先選取要消空白的文字", "#ffc107")
             return
-        selected = cursor.selectedText().replace('\u2029', '\n')
-        stripped = selected.replace(" ", "").replace("　", "")
-        cursor.insertText(stripped)
+        selected, masked = self._selection_masked(cursor)
+        spans = [(m.start(), m.end(), []) for m in re.finditer('[ 　]+', masked)]
+        self._replace_spans(target, cursor.selectionStart(), selected, spans,
+                            cursor.selectionEnd())
         self._set_status("已消除選取範圍的空白", "#0f0")
 
     def _reverse_glossary_replace(self) -> None:
@@ -1449,7 +1591,7 @@ class EditWindow(QMainWindow):
           剛好是其他術語的替代文字、而被反向規則誤搶（修正 Alt+E 回報 bug）。
         - 否則（多詞／句子選取）：以子字串掃描，還原優先（替代→原文），
           沒有可還原內容才套用（原文→替代）。
-        兩個方向擇一執行。
+        兩個方向擇一執行。只改寫命中的片段（保留顏色），標記內的字不參與比對。
         """
         if self._glossary_provider is None:
             self._set_status("⚠️ 無法取得術語表", "#ffc107")
@@ -1465,8 +1607,20 @@ class EditWindow(QMainWindow):
         if not glossary:
             self._set_status("⚠️ 術語表為空", "#ffc107")
             return
-        selected = cursor.selectedText().replace('\u2029', '\n')
-        stripped = selected.strip()
+        selected, masked = self._selection_masked(cursor)
+        stripped = masked.strip('\x00').strip().strip('\x00')
+
+        def apply(spans: list[tuple[int, int, str]], message: str) -> None:
+            self._replace_spans(
+                target, cursor.selectionStart(), selected,
+                [(a, b, [(new, None)] if new else [])
+                 for a, b, new in spans if selected[a:b] != new],
+                cursor.selectionEnd())
+            self._apply_line_height()
+            self._set_status(message, "#0f0")
+
+        applied = "✅ 已套用術語（原文 → 替代文字）"
+        restored = "✅ 已還原術語（替代文字 → 原文）"
 
         # 反向 map（替代文字 → 原文），衝突時取最長原文
         rev_map: dict[str, str] = {}
@@ -1479,29 +1633,22 @@ class EditWindow(QMainWindow):
         # A. 整段選取剛好等於單一術語 → 以「精確 dict 查找」決定方向。
         #    「原文」判定優先：選取的原文若同時是別條術語的替代文字，
         #    仍視為原文做正向替換（修正反向規則用子字串誤搶的 bug）。
-        if stripped and stripped in glossary:
-            cursor.insertText(selected.replace(stripped, glossary[stripped]))
-            self._apply_line_height()
-            self._set_status("✅ 已套用術語（原文 → 替代文字）", "#0f0")
-            return
-        if stripped and stripped in rev_map:
-            cursor.insertText(selected.replace(stripped, rev_map[stripped]))
-            self._apply_line_height()
-            self._set_status("✅ 已還原術語（替代文字 → 原文）", "#0f0")
+        if stripped and (stripped in glossary or stripped in rev_map):
+            forward = stripped in glossary
+            at = masked.index(stripped)
+            apply([(at, at + len(stripped),
+                    glossary[stripped] if forward else rev_map[stripped])],
+                  applied if forward else restored)
             return
 
         # B. 多詞／句子選取 → 子字串掃描，還原優先
-        new_text = apply_reverse_glossary_to_text(selected, glossary)
-        if new_text != selected:
-            cursor.insertText(new_text)
-            self._apply_line_height()
-            self._set_status("✅ 已還原術語（替代文字 → 原文）", "#0f0")
+        spans: list[tuple[int, int, str]] = []
+        if apply_reverse_glossary_to_text(masked, glossary, spans=spans) != masked:
+            apply(spans, restored)
             return
-        new_text = apply_glossary_to_text(selected, glossary)
-        if new_text != selected:
-            cursor.insertText(new_text)
-            self._apply_line_height()
-            self._set_status("✅ 已套用術語（原文 → 替代文字）", "#0f0")
+        spans = []
+        if apply_glossary_to_text(masked, glossary, spans=spans) != masked:
+            apply(spans, applied)
             return
         self._set_status("ℹ️ 選取範圍中沒有可替換的術語", "#17a2b8")
 
@@ -1511,12 +1658,25 @@ class EditWindow(QMainWindow):
         if not cursor.hasSelection():
             self._set_status("⚠️ 請先選取要補空白的文字", "#ffc107")
             return
-        selected = cursor.selectedText().replace('\u2029', '\n')
-        lines = selected.split('\n')
+        selected, masked = self._selection_masked(cursor)
         sep = "　" * self._pad_space_count
-        padded_lines = [sep.join(list(line)) for line in lines]
-        padded = '\n'.join(padded_lines)
-        cursor.insertText(padded)
+        spans = []
+        previous = -1  # 同一行前一個非標記字元
+        for i, char in enumerate(masked):
+            if char == '\x00':
+                continue
+            if char == '\n':
+                previous = -1
+                continue
+            if previous >= 0:
+                # 隔著標記時補在標籤外側（</span> 之後、<span> 之前），上色範圍才不會往外長
+                gap = selected[previous + 1:i]
+                close = gap.rfind('</span>')
+                at = previous + 1 + (close + len('</span>') if close >= 0 else 0)
+                spans.append((at, at, [(sep, None)]))
+            previous = i
+        self._replace_spans(target, cursor.selectionStart(), selected, spans,
+                            cursor.selectionEnd())
         self._set_status(f"已補入全形空白 × {self._pad_space_count}", "#0f0")
 
     def _on_pad_count_changed(self, text: str) -> None:
@@ -1595,10 +1755,6 @@ class EditWindow(QMainWindow):
 
         不可整段 insertText：WYSIWYG 的顏色存在字元格式裡，整段取代會全部洗掉。
         """
-        # QTextCursor 的位置以 UTF-16 計，emoji 等字元佔兩格
-        def units(text: str) -> int:
-            return len(text.encode('utf-16-le')) // 2
-
         pos = cursor.selectionStart()
         cursor.beginEditBlock()
         for before, after in zip(old.split('\n'), new.split('\n')):
@@ -1609,11 +1765,11 @@ class EditWindow(QMainWindow):
                 tail = 0
                 while tail < limit - head and before[-1 - tail] == after[-1 - tail]:
                     tail += 1
-                cursor.setPosition(pos + units(before[:head]))
-                cursor.setPosition(pos + units(before[:len(before) - tail]),
+                cursor.setPosition(pos + _utf16_len(before[:head]))
+                cursor.setPosition(pos + _utf16_len(before[:len(before) - tail]),
                                    QTextCursor.MoveMode.KeepAnchor)
                 cursor.insertText(after[head:len(after) - tail])
-            pos += units(after) + 1
+            pos += _utf16_len(after) + 1
         cursor.endEditBlock()
         cursor.setPosition(pos - 1)  # 游標停在修正範圍末端、取消選取
         target.setTextCursor(cursor)
@@ -1636,6 +1792,7 @@ class EditWindow(QMainWindow):
             self._set_status("⚠️ 上一行為空，無法對齊", "#ffc107")
             return
         curr_text = curr_block.text().rstrip('\u2029')
+        col_idx = _utf16_to_index(curr_text, col_idx)
 
         result = _align_to_prev_line(
             prev_text, curr_text, col_idx, self._measurer)
@@ -1662,7 +1819,8 @@ class EditWindow(QMainWindow):
         if new_block.isValid():
             cursor = target.textCursor()
             cursor.setPosition(new_block.position()
-                               + min(new_col, new_block.length() - 1))
+                               + min(_utf16_len(new_line[:new_col]),
+                                     new_block.length() - 1))
             target.setTextCursor(cursor)
         self._set_status("✅ 已對齊上一行", "#0f0")
 
@@ -1868,7 +2026,7 @@ class EditWindow(QMainWindow):
             f" font-family:'{fam}';"
             f" font-size:{sz}pt; }}"
         )
-        self._clean_markup = self._serialize_preview_to_markup()
+        self._synced_markup = self._serialize_preview_to_markup()
 
     def _toggle_preview(self) -> None:
         # ── 即將「離開」WYSIWYG ──
@@ -1982,7 +2140,7 @@ class EditWindow(QMainWindow):
         self.preview_view.viewport().update()
         # 上色不改純文字，所以要比序列化後的 markup
         if (self._preview_active and not self._dirty
-                and self._serialize_preview_to_markup() != self._clean_markup):
+                and self._serialize_preview_to_markup() != self._synced_markup):
             self._dirty = True
             self.setWindowTitle("* " + self.windowTitle().lstrip("* "))
 
@@ -2033,6 +2191,11 @@ class EditWindow(QMainWindow):
         if not self._preview_active:
             return False
         new_text = self._serialize_preview_to_markup()
+        # 預覽沒動過就不寫回：序列化會正規化標記（跨行 span 拆成每行一個、顏色名
+        # 轉 #rrggbb），否則光是進出 WYSIWYG 就會變成「已修改」
+        if new_text == self._synced_markup:
+            return False
+        self._synced_markup = new_text
         if new_text != self.editor.toPlainText():
             scroll_val = self.editor.verticalScrollBar().value()
             self._replace_document(new_text)
@@ -3000,8 +3163,8 @@ class EditWindow(QMainWindow):
         """Alt+W：將編輯器選取範圍以原文同一 (行, 欄) 區間的內容覆蓋。
         用於翻譯時想局部還原回日文原文的情境。
 
-        WYSIWYG 也支援：以 preview_view 的 (行, 欄) 為座標查原文，
-        覆蓋進來的文字以 cursor 預設 charFormat 寫入（亦即無顏色）。
+        欄位一律以「去掉標記後的可見字元」計，標記本身不動，編輯模式與 WYSIWYG 共用。
+        顏色：WYSIWYG 下原文該段有上色就用原文的顏色；否則沿用原位置字元的顏色。
         """
         if self._compare_active:
             self._set_status("⚠️ 請先回到編輯模式（Alt+1）", "#ffc107")
@@ -3014,35 +3177,93 @@ class EditWindow(QMainWindow):
         if not cursor.hasSelection():
             self._set_status("⚠️ 請先選取要以原文覆蓋的範圍", "#ffc107")
             return
-        start_pos = cursor.selectionStart()
-        end_pos = cursor.selectionEnd()
         doc = target.document()
-        sc = QTextCursor(doc)
-        sc.setPosition(start_pos)
-        start_line = sc.blockNumber()
-        start_col = sc.positionInBlock()
-        ec = QTextCursor(doc)
-        ec.setPosition(end_pos)
-        end_line = ec.blockNumber()
-        end_col = ec.positionInBlock()
+        start_pos, end_pos = cursor.selectionStart(), cursor.selectionEnd()
+        start_block, end_block = doc.findBlock(start_pos), doc.findBlock(end_pos)
+        first, end_line = start_block.blockNumber(), end_block.blockNumber()
 
-        orig_lines = self._original_text.split('\n')
-        if start_line >= len(orig_lines):
+        original = _visible_with_colors(self._original_text)
+        if first >= len(original):
             self._set_status("⚠️ 選取範圍超出原文行數", "#ffc107")
             return
-        last_line = min(end_line, len(orig_lines) - 1)
+        last = min(end_line, len(original) - 1)
 
-        if start_line == last_line:
-            line = orig_lines[start_line]
-            extracted = line[min(start_col, len(line)):min(end_col, len(line))]
-        else:
-            first = orig_lines[start_line][min(start_col, len(orig_lines[start_line])):]
-            middle = orig_lines[start_line + 1:last_line]
-            last = orig_lines[last_line][:min(end_col, len(orig_lines[last_line]))]
-            extracted = '\n'.join([first, *middle, last])
+        lines = [doc.findBlockByNumber(n).text() for n in range(first, end_line + 1)]
+        text = '\n'.join(lines)
+        masked = _mask_tags(text).split('\n')
+        sel_start = _utf16_to_index(lines[0], start_pos - start_block.position())
+        sel_end = _utf16_to_index(lines[-1], end_pos - end_block.position())
+        end_col = sum(char != '\x00' for char in masked[-1][:sel_end])
+        use_original_color = target is self.preview_view
 
-        cursor.insertText(extracted)
-        self._set_status(f"↩️ 已以原文覆蓋（{len(extracted)} 字）", "#0f0")
+        spans: list[tuple[int, int, list[tuple[str, str | None]]]] = []
+        written = 0
+        base = 0  # 目前這行在 text 中的起點
+        for n in range(first, last + 1):
+            line = masked[n - first]
+            visible = [i for i, char in enumerate(line) if char != '\x00']
+            low = sel_start if n == first else 0
+            high = sel_end if n == end_line else len(line)
+            old = [i for i in visible if low <= i < high]
+            col = sum(i < low for i in visible)
+            orig_text, orig_colors = original[n]
+            stop = end_col if n == last else len(orig_text)
+            new, colors = orig_text[col:stop], orig_colors[col:stop]
+            written += len(new)
+            spans.extend(self._restore_line_spans(
+                line, base, low, old, new,
+                colors if use_original_color and any(colors) else None))
+            base += len(line) + 1
+        if last < end_line:
+            # 超出原文行數的選取行一併刪除
+            tail = sum(len(x) + 1 for x in lines[:-1]) + sel_end
+            spans.append((base - 1, tail, []))
+
+        self._replace_spans(target, start_block.position(), text, spans, end_pos)
+        self._set_status(f"↩️ 已以原文覆蓋（{written} 字）", "#0f0")
+
+    @staticmethod
+    def _restore_line_spans(
+        line: str, base: int, low: int, old: list[int], new: str,
+        colors: list[str] | None,
+    ) -> list[tuple[int, int, list[tuple[str, str | None]]]]:
+        """Alt+W 單行：把 *old* 這些位置的可見字元換成 *new* 所需的片段。"""
+        if colors is not None:
+            runs: list[tuple[str, str | None]] = []
+            for char, color in zip(new, colors):
+                if runs and runs[-1][1] == color:
+                    runs[-1] = (runs[-1][0] + char, color)
+                else:
+                    runs.append((char, color))
+            at = base + (old[0] if old else low)
+            spans = [(base + i, base + i + 1, []) for i in old]
+            if spans:
+                spans[0] = (spans[0][0], spans[0][1], runs)
+            elif runs:
+                spans = [(at, at, runs)]
+            return spans
+
+        # 沒有原文顏色：頭尾相同的字不動，中間逐字對位取代，各自沿用原位置的顏色
+        head, limit = 0, min(len(old), len(new))
+        while head < limit and line[old[head]] == new[head]:
+            head += 1
+        tail = 0
+        while tail < limit - head and line[old[-1 - tail]] == new[-1 - tail]:
+            tail += 1
+        middle = old[head:len(old) - tail]
+        repl = new[head:len(new) - tail]
+        if not middle:
+            if not repl:
+                return []
+            at = base + (old[head - 1] + 1 if head else (old[0] if old else low))
+            return [(at, at, [(repl, None)])]
+        spans = []
+        for k, i in enumerate(middle):
+            # 原文較長時，多出來的字接在最後一個位置
+            char = repl[k:] if k == len(middle) - 1 else repl[k:k + 1]
+            if char != line[i]:
+                spans.append((base + i, base + i + 1, [(char, None)] if char else []))
+        return spans
 
     # ════════════════════════════════════════════════════════════
     #  從 Alt+4 面板選取範圍複製（去掉流水號）（Alt+C）
@@ -3560,20 +3781,122 @@ class EditWindow(QMainWindow):
             self.setWindowTitle("* " + self.windowTitle().lstrip("* "))
 
     def _mark_clean(self) -> None:
-        """以目前內容作為「已儲存」的基準（載入、存檔成功後呼叫）。
+        """以目前內容與磁碟上的檔案作為「已儲存」的基準（載入、存檔成功後呼叫）。
 
-        不可只設 `_dirty = False`：比較基準會停在舊內容。
+        不可只設 `_dirty = False`：比較基準會停在舊內容。`<head>` 也在這裡跟著
+        目前的檔案更新，否則換檔／另存後會把別份檔的 head 寫進來。
         """
         self._dirty = False
         self._clean_text = self.editor.toPlainText()
+        self._disk_digest = _file_digest(self._html_file) if self._html_file else None
+        self._custom_head = (read_html_head(self._html_file)
+                             if self._html_file else None)
+
+    def _on_file_loaded(self) -> None:
+        """同一個視窗載入了一份檔案（換檔、重讀）之後呼叫。"""
+        self._mark_clean()
+        # 復原紀錄不可跨檔：否則 Ctrl+Z 會叫出上一份檔的內容，存檔就整份蓋掉這個檔
+        self.editor.document().clearUndoRedoStacks()
+        self.preview_view.document().clearUndoRedoStacks()
+
+    def _has_unsaved_changes(self) -> bool:
+        """內容是否真的和上次載入／存檔時不同（改了又復原回來不算）。"""
+        if not self._dirty:
+            return False
         if self._preview_active:
-            self._clean_markup = self._serialize_preview_to_markup()
+            markup = self._serialize_preview_to_markup()
+            if markup != self._synced_markup:
+                return markup != self._clean_text
+        return self.editor.toPlainText() != self._clean_text
+
+    def confirm_unsaved(self) -> bool:
+        """有未存的修改時詢問「儲存／不儲存／取消」。回傳是否可以丟掉目前內容。
+
+        呼叫端必須在**改動任何狀態之前**呼叫：儲存的 callback 會讀主畫面的提取／
+        翻譯欄，先換成下一份檔的內容就會寫進這一份的原文暫存。
+        """
+        if not self._has_unsaved_changes():
+            return True
+        name = self._display_title or os.path.basename(self._html_file or "")
+        box = QMessageBox(self.window())
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("未儲存的變更")
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setText(f"「{name}」有尚未儲存的修改，要先儲存嗎？")
+        btn_save = box.addButton("儲存", QMessageBox.ButtonRole.AcceptRole)
+        btn_discard = box.addButton("不儲存", QMessageBox.ButtonRole.DestructiveRole)
+        btn_cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(btn_save)
+        box.setEscapeButton(btn_cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_discard:
+            return True
+        if clicked is not btn_save:
+            return False
+        self._save_overwrite()
+        return not self._dirty  # 另存被取消、寫入失敗時仍是 dirty → 視同取消
+
+    def _changed_on_disk(self) -> bool:
+        """檔案是否在載入／存檔之後被別處改過（被刪掉、暫存檔不算）。"""
+        if not self._html_file or self._is_temp_file:
+            return False
+        current = _file_digest(self._html_file)
+        return current is not None and current != self._disk_digest
+
+    def _confirm_overwrite(self, file_path: str) -> bool:
+        """要寫回的檔被別處改過時，詢問是否覆蓋。回傳是否可以寫入。"""
+        if not self._changed_on_disk():
+            return True
+        if (os.path.normcase(os.path.abspath(file_path))
+                != os.path.normcase(os.path.abspath(self._html_file))):
+            return True
+        box = QMessageBox(self.window())
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("檔案已被修改")
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setText(
+            f"「{os.path.basename(file_path)}」在開啟之後被改過（例如批次替換）。\n"
+            "現在儲存會蓋掉那些變更，確定要覆蓋嗎？")
+        btn_overwrite = box.addButton("覆蓋", QMessageBox.ButtonRole.DestructiveRole)
+        btn_cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(btn_cancel)
+        box.setEscapeButton(btn_cancel)
+        box.exec()
+        return box.clickedButton() is btn_overwrite
+
+    def reload_if_changed_on_disk(self) -> None:
+        """回到編輯器時：檔案被別處改過且沒有未存修改 → 重讀（保留捲動位置）。"""
+        if not self._changed_on_disk():
+            return
+        if self._has_unsaved_changes():
+            self._set_status("⚠️ 檔案已被別處修改，儲存時會先詢問是否覆蓋", "#ffc107")
+            return
+        try:
+            text = read_html_pre_content(self._html_file)
+        except (OSError, UnicodeDecodeError):
+            text = None
+        if text is None:
+            self._set_status("⚠️ 檔案已被別處修改，但無法重新讀取", "#ffc107")
+            return
+        view = self._active_edit_widget()
+        line = view.textCursor().blockNumber()
+        scroll = view.verticalScrollBar().value()
+        self._replace_document(text)
+        self._wysiwyg_rerender_after_editor_change()
+        self._on_file_loaded()
+        self._move_cursor_to_block(view, line)
+        view.verticalScrollBar().setValue(scroll)
+        self.setWindowTitle(self.windowTitle().lstrip("* "))
+        self._set_status("🔄 檔案已被別處修改，已載入新內容", "#17a2b8")
 
     def _write_current(self, file_path: str, *, embed: bool = True) -> bool:
         # 若目前在 WYSIWYG（Alt+3 編輯預覽）模式，先把編輯成果序列化回 editor，
         # 再從 editor 取 plain text 寫檔，避免 WYSIWYG 中的編輯遺漏。
         if self._preview_active:
             self._sync_preview_to_editor()
+        if not self._confirm_overwrite(file_path):
+            return False
         text = self.editor.toPlainText()
         # 內嵌字型僅在「另存新檔」時寫入；覆蓋現有檔案時跳過（embed=False）
         embed_font_path = None
@@ -3676,20 +3999,10 @@ class EditWindow(QMainWindow):
         self._save_overwrite()
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        if self._dirty:
-            reply = QMessageBox.question(
-                self, "未儲存的變更",
-                "有未儲存的變更，要儲存後再關閉嗎？",
-                QMessageBox.StandardButton.Save
-                | QMessageBox.StandardButton.Discard
-                | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Save,
-            )
-            if reply == QMessageBox.StandardButton.Cancel:
-                event.ignore()
-                return
-            if reply == QMessageBox.StandardButton.Save:
-                self._save()
+        # 獨立執行時走這裡；內嵌於主程式時不會觸發，由 MainWindow.closeEvent 詢問
+        if not self.confirm_unsaved():
+            event.ignore()
+            return
         event.accept()
 
 

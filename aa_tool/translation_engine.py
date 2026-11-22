@@ -475,7 +475,8 @@ def _glossary_hit_on_aa(line: str, start: int, end: int, key: str,
 
 def apply_glossary_to_text(text: str, glossary: dict[str, str], *,
                            avoid_aa: bool = False,
-                           symbol_regex: 're.Pattern | None' = None) -> str:
+                           symbol_regex: 're.Pattern | None' = None,
+                           spans: 'list[tuple[int, int, str]] | None' = None) -> str:
     """對任意文本套用術語表（含 Auto-Padding 與邊框判定）。
 
     使用單輪掃描：把所有術語組成一條交替正則（長度遞減），
@@ -485,6 +486,9 @@ def apply_glossary_to_text(text: str, glossary: dict[str, str], *,
     `avoid_aa=True`（實驗性）時，略過 `_glossary_hit_on_aa` 判定為「疑似落在
     AA 圖上」的命中，保留原文不替換；`symbol_regex` 供該判定使用，None 時退回
     `DEFAULT_SYMBOL_REGEX`。
+
+    `spans` 傳入 list 時，會附上每個替換片段 (起, 迄, 新文字)（*text* 中的索引），
+    供編輯器只改寫命中處、保留顏色。
     """
     if not glossary:
         return text
@@ -498,6 +502,7 @@ def apply_glossary_to_text(text: str, glossary: dict[str, str], *,
         sym = symbol_regex or re.compile(DEFAULT_SYMBOL_REGEX)
 
     lines = text.split('\n')
+    base = 0  # 目前這行在 text 中的起點
     for i, line in enumerate(lines):
         # avoid_aa 時預先蒐集本行所有術語命中範圍，供 Rule B 判定
         # 「相鄰片假名是否也被同輪另一術語覆蓋」（如 ハクタイ＋ジム 連排）。
@@ -508,7 +513,7 @@ def apply_glossary_to_text(text: str, glossary: dict[str, str], *,
                 covered_set.update(range(m.start(), m.end()))
             covered = frozenset(covered_set)
 
-        def repl(m, _line=line, _covered=covered):
+        def repl(m, _line=line, _covered=covered, _base=base):
             jp = m.group(0)
             tw = term_map[jp]
             if avoid_aa and _glossary_hit_on_aa(
@@ -516,21 +521,28 @@ def apply_glossary_to_text(text: str, glossary: dict[str, str], *,
                 return jp  # 疑似 AA 圖，保留原文不套用
             len_diff = len(jp) - len(tw)
             rest = _line[m.end():]
+            out = tw
             if len_diff > 0 and any(c in rest for c in BORDER_CHARS):
-                return tw + ('　' * len_diff)
-            return tw
+                out += '　' * len_diff
+            if spans is not None:
+                spans.append((_base + m.start(), _base + m.end(), out))
+            return out
         lines[i] = pattern.sub(repl, line)
+        base += len(line) + 1
 
     return '\n'.join(lines)
 
 
-def apply_reverse_glossary_to_text(text: str, glossary: dict[str, str]) -> str:
+def apply_reverse_glossary_to_text(
+        text: str, glossary: dict[str, str], *,
+        spans: 'list[tuple[int, int, str]] | None' = None) -> str:
     """對任意文本套用反向術語表：把「替代文字」還原為「原文」。
 
     與 apply_glossary_to_text 互為反向操作。為抵銷 Auto-Padding 的全形空白，
     匹配後若緊接 '\u3000' 會吃掉最多 (len(原文) - len(替代文字)) 個。
 
     同一個替代文字若對應多個原文（反向 map 會衝突），以最長原文為優先。
+    `spans` 同 apply_glossary_to_text。
     """
     if not glossary:
         return text
@@ -550,6 +562,7 @@ def apply_reverse_glossary_to_text(text: str, glossary: dict[str, str]) -> str:
     pattern = re.compile('|'.join(re.escape(k) for k, _ in sorted_items))
 
     lines = text.split('\n')
+    base = 0  # 目前這行在 text 中的起點
     for i, line in enumerate(lines):
         result_parts: list[str] = []
         pos = 0
@@ -566,8 +579,11 @@ def apply_reverse_glossary_to_text(text: str, glossary: dict[str, str]) -> str:
                     eat += 1
             result_parts.append(orig)
             pos = end + eat
+            if spans is not None:
+                spans.append((base + m.start(), base + pos, orig))
         result_parts.append(line[pos:])
         lines[i] = ''.join(result_parts)
+        base += len(line) + 1
 
     return '\n'.join(lines)
 

@@ -73,7 +73,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.43"
+APP_VERSION = "3.44"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -1175,6 +1175,9 @@ class MainWindow(QMainWindow):
 
         back_callback: 編輯器「返回」按鈕的目標面板。預設回翻譯面板；
         從批次搜尋開啟時可傳入 `show_batch_panel` 以回到批次搜尋。
+
+        ⚠️ 會直接取代編輯器內容。**呼叫端必須先過 `_confirm_editor_unsaved()`**，
+        且要在改動提取／翻譯欄、寫暫存檔等任何狀態之前（原因見 EditWindow.confirm_unsaved）。
         """
         on_back = back_callback or self.show_translate_panel
         # 記錄最後開啟過的檔案路徑（供「📂 檔案列表」浮層列出相鄰檔案）
@@ -1295,8 +1298,9 @@ class MainWindow(QMainWindow):
             # 必須在 _scroll_to_line 之前執行，這樣後續捲動才能套用到全新的 preview。
             if self._edit_window._preview_active:
                 self._edit_window._wysiwyg_rerender_after_editor_change()
-            # 必須在新內容（含預覽）都載入之後：它會記下「已儲存」的比較基準
-            self._edit_window._mark_clean()
+            # 必須在新內容（含預覽）都載入之後：它會記下「已儲存」的基準、該檔的 head，
+            # 並清掉上一份檔的復原紀錄
+            self._edit_window._on_file_loaded()
             if scroll_to_line:
                 self._edit_window._scroll_to_line(scroll_to_line)
             else:
@@ -1338,6 +1342,12 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(1)
         self._nav_bar.hide()
         self._action_bar.hide()
+        # 離開期間可能被批次替換、自動翻譯改過
+        self._edit_window.reload_if_changed_on_disk()
+
+    def _confirm_editor_unsaved(self) -> bool:
+        """編輯器有未存修改時詢問；回傳是否可以繼續（換檔／關閉）。"""
+        return self._edit_window is None or self._edit_window.confirm_unsaved()
 
     def show_batch_panel(self) -> None:
         """切換到批次搜尋面板。"""
@@ -1363,6 +1373,8 @@ class MainWindow(QMainWindow):
         self._action_bar.hide()
 
     def _on_batch_open_file(self, file_path: str, line: int, folder: str) -> None:
+        if not self._confirm_editor_unsaved():
+            return
         self._batch_folder = folder
         entry = self._load_cache_entry_for_file(file_path)
         cached_original = entry['text'] if entry else None
@@ -1653,6 +1665,8 @@ class MainWindow(QMainWindow):
         if prepared is None:
             return
         result_text, source, name_base, display_title = prepared
+        if not self._confirm_editor_unsaved():
+            return
         tmp = os.path.join(tempfile.gettempdir(), f"{name_base}.html")
         try:
             write_html_file(tmp, result_text)
@@ -1757,6 +1771,8 @@ class MainWindow(QMainWindow):
                     extracted = _html.unescape(f.read())
         except OSError as e:
             self.show_status(f"❌ 讀取 HTML 失敗！{e}", "#dc3545")
+            return
+        if not self._confirm_editor_unsaved():
             return
         # 若暫存原文中有此檔名，載入作為比對原文
         self._last_dir = os.path.dirname(file_path)
@@ -3474,6 +3490,8 @@ class MainWindow(QMainWindow):
         except OSError as e:
             self.show_status(f"❌ 讀取 HTML 失敗！{e}", "#dc3545")
             return
+        if not self._confirm_editor_unsaved():
+            return
         self._last_dir = os.path.dirname(file_path)
         self.schedule_save()
         entry = self._load_cache_entry_for_file(file_path)
@@ -4059,6 +4077,10 @@ class MainWindow(QMainWindow):
     # ════════════════════════════════════════════════════════════
 
     def closeEvent(self, event) -> None:
+        # 編輯器是內嵌的，它自己的 closeEvent 不會觸發，必須在這裡問
+        if not self._confirm_editor_unsaved():
+            event.ignore()
+            return
         self.save_cache()
         p = self._translate_panel
         cur_g = self._count_nonempty(p.get_glossary_text())

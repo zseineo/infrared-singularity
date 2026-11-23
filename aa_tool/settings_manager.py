@@ -196,6 +196,10 @@ class AppCache:
     remote_enabled: bool = False
     remote_port: int = 8765
     remote_token: str = ""
+    # 追更清單（v3.46，aa_tool/watch_list.py）：[{url, title, new, checked_at, error}]；
+    # watch_checked_date＝最後一次自動檢查的日期（YYYY-MM-DD），每天第一次開程式才自動檢查
+    watch_list: list = field(default_factory=list)
+    watch_checked_date: str = ""
     # 主畫面「填入翻譯」旁的核取框：讀取新的一話（上一話／下一話／網址讀取）
     # 成功後自動清空「填入翻譯」欄，避免舊譯文殘留被誤用。預設關閉。
     fetch_clear_ai_text: bool = False
@@ -530,6 +534,10 @@ class SettingsManager:
             except (TypeError, ValueError):
                 pass
             cache.remote_token = str(data.get('remote_token', cache.remote_token) or "")
+            wl = data.get('watch_list', cache.watch_list)
+            cache.watch_list = [e for e in wl if isinstance(e, dict) and e.get('url')] \
+                if isinstance(wl, list) else []
+            cache.watch_checked_date = str(data.get('watch_checked_date', '') or '')
             try:
                 cache.api_timeout = max(0, int(data.get(
                     'api_timeout', cache.api_timeout)))
@@ -763,6 +771,8 @@ class SettingsManager:
                 'remote_enabled': cache.remote_enabled,
                 'remote_port': cache.remote_port,
                 'remote_token': cache.remote_token,
+                'watch_list': cache.watch_list,
+                'watch_checked_date': cache.watch_checked_date,
                 'api_timeout': cache.api_timeout,
                 'gemini_gem_url': cache.gemini_gem_url,
                 'gemini_profile_dir': cache.gemini_profile_dir,

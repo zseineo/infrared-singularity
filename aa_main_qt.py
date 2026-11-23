@@ -72,7 +72,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.45"
+APP_VERSION = "3.46"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -272,6 +272,14 @@ class TranslatePanel(QWidget):
         btn_auto.setToolTip("連續多話全自動翻譯（操控網頁版 Gemini）")
         btn_auto.clicked.connect(self._main.show_auto_translate_panel)
         row.addWidget(btn_auto)
+
+        # 追更清單（v3.46）：有更新時按鈕上顯示幾部（MainWindow._watch_update_badge）
+        btn_watch = _make_btn("📚 追更", "#fd7e14", "#e8590c",
+                              font=_ui_font(11), width=90)
+        btn_watch.setToolTip("追蹤連載中的作品有沒有新的一話（每天第一次開程式自動檢查）")
+        btn_watch.clicked.connect(self._main.open_watch_list)
+        row.addWidget(btn_watch)
+        self._main._watch_btn = btn_watch
 
         right = QWidget()
         row = QHBoxLayout(right)
@@ -774,6 +782,12 @@ class MainWindow(QMainWindow):
         self._remote_enabled: bool = False
         self._remote_port: int = 8765
         self._remote_token: str = ""
+        # 追更清單（v3.46）
+        self._watch_list: list[dict] = []
+        self._watch_checked_date: str = ""
+        self._watch_checking = False
+        self._watch_dialog = None
+        self._watch_btn = None
         self._remote_server = None
         self._remote_read: dict = {}      # 手機「讀取網址」的結果（seq 遞增，手機據此重畫清單）
         self._last_status_msg: str = ""   # 最後一則狀態訊息（遠端開始失敗時回報原因）
@@ -2914,6 +2928,8 @@ class MainWindow(QMainWindow):
             remote_enabled=self._remote_enabled,
             remote_port=self._remote_port,
             remote_token=self._remote_token,
+            watch_list=self._watch_list,
+            watch_checked_date=self._watch_checked_date,
             gemini_gem_url=self._gemini_gem_url,
             gemini_profile_dir=self._gemini_profile_dir,
             gemini_max_per_session=self._gemini_max_per_session,
@@ -3047,6 +3063,9 @@ class MainWindow(QMainWindow):
         self._remote_enabled = bool(getattr(cache, "remote_enabled", False))
         self._remote_port = int(getattr(cache, "remote_port", 8765) or 8765)
         self._remote_token = str(getattr(cache, "remote_token", "") or "")
+        self._watch_list = [dict(e) for e in (getattr(cache, "watch_list", []) or [])]
+        self._watch_checked_date = str(getattr(cache, "watch_checked_date", "") or "")
+        self._watch_update_badge()
         # 抓網頁代理是 url_fetcher 的模組狀態，載入設定後立即套用
         _url_fetcher.set_fetch_proxy(self._fetch_proxy_url)
         cb = getattr(p, "clear_ai_cb", None)
@@ -4467,6 +4486,118 @@ class MainWindow(QMainWindow):
 
     # ── 自動更新（v3.28，⚙ 設定「檢查更新」）──
 
+    # ── 追更清單（v3.46，aa_tool/watch_list.py＋aa_watch_list_qt.py）──
+
+    def open_watch_list(self) -> None:
+        from aa_watch_list_qt import WatchListDialog
+        if self._watch_dialog is None:
+            self._watch_dialog = WatchListDialog(self)
+        self._watch_dialog.refresh()
+        self._watch_dialog.show()
+        self._watch_dialog.raise_()
+        self._watch_dialog.activateWindow()
+
+    def _watch_refresh_ui(self) -> None:
+        self._watch_update_badge()
+        if self._watch_dialog is not None:
+            self._watch_dialog.refresh()
+
+    def _watch_update_badge(self) -> None:
+        if self._watch_btn is None:
+            return
+        n = sum(1 for e in self._watch_list if e.get("new"))
+        self._watch_btn.setText(f"📚 追更 ({n})" if n else "📚 追更")
+
+    def add_watch_entry(self, url: str) -> bool:
+        from aa_tool import watch_list as wl
+        if any(wl.norm_url(e["url"]) == wl.norm_url(url) for e in self._watch_list):
+            return False
+        self._watch_list.append(wl.new_entry(url))
+        self.schedule_save()
+        self.check_watch_list(indices=[len(self._watch_list) - 1], manual=True)
+        return True
+
+    def remove_watch_entry(self, i: int) -> None:
+        if 0 <= i < len(self._watch_list) and not self._watch_checking:
+            del self._watch_list[i]
+            self.schedule_save()
+            self._watch_refresh_ui()
+
+    def mark_watch_read(self, i: int) -> None:
+        from aa_tool import watch_list as wl
+        if 0 <= i < len(self._watch_list) and not self._watch_checking:
+            self._watch_list[i] = wl.mark_read(self._watch_list[i])
+            self.schedule_save()
+            self._watch_refresh_ui()
+
+    def open_url_in_fetch(self, url: str) -> None:
+        """切到網址讀取並讀這個網址。"""
+        self.open_url_fetch_qt()
+        self._url_fetch_win._fetch_url(url)
+
+    def start_watch_auto_translate(self, url: str) -> None:
+        """切到自動翻譯：起始網址＝新的一話、勾「翻譯到最後一話」，由使用者確認後按開始。"""
+        if self._auto_translate_running:
+            self.show_status("⚠️ 自動翻譯正在執行中", "#f39c12")
+            return
+        self.show_auto_translate_panel()
+        p = self._auto_window
+        p.set_start_url(url)
+        p.until_last.setChecked(True)
+        self.show_status("已帶入新的一話，確認設定後按「開始自動翻譯」", "#17a2b8", 5000)
+
+    def _watch_auto_check(self) -> None:
+        """啟動時：今天還沒檢查過就在背景檢查全部。"""
+        from aa_tool import watch_list as wl
+        if self._watch_list and self._watch_checked_date != wl.today():
+            self.check_watch_list()
+
+    def check_watch_list(self, indices: list[int] | None = None, manual: bool = False) -> None:
+        """背景逐部檢查（一定重新上網抓，不讀網頁暫存）；結果回主執行緒更新清單並存檔。"""
+        from aa_tool import watch_list as wl
+        if self._watch_checking or not self._watch_list:
+            return
+        targets = list(range(len(self._watch_list))) if indices is None else list(indices)
+        snapshot = [(i, dict(self._watch_list[i])) for i in targets
+                    if 0 <= i < len(self._watch_list)]
+        self._watch_checking = True
+        self._watch_refresh_ui()
+
+        def _fetch_parse(url: str):
+            return _parse_page_html(_fetch_url(url), url)
+
+        def _bg() -> None:
+            results = []
+            for k, (i, e) in enumerate(snapshot, 1):
+                name = e.get("title") or e["url"]
+                self._invoke_on_main.emit(
+                    lambda t=f"檢查中 {k}/{len(snapshot)}：{name}": (
+                        self._watch_dialog.set_progress(t) if self._watch_dialog else None))
+                results.append((i, e["url"], wl.check_entry(e, _fetch_parse)))
+            self._invoke_on_main.emit(lambda: self._watch_check_done(results, indices is None))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _watch_check_done(self, results: list, full: bool) -> None:
+        from aa_tool import watch_list as wl
+        self._watch_checking = False
+        for i, base_url, e in results:
+            # 檢查期間清單被改過（不會發生：檢查中禁止刪除／標記已讀），仍以網址核對保險
+            if 0 <= i < len(self._watch_list) and self._watch_list[i]["url"] == base_url:
+                self._watch_list[i] = e
+        if full:
+            self._watch_checked_date = wl.today()
+        self.schedule_save()
+        self._watch_refresh_ui()
+        n = sum(1 for _i, _u, e in results if e.get("new"))
+        errs = sum(1 for _i, _u, e in results if e.get("error"))
+        msg = (f"📚 追更：{n} 部作品有新的一話" if n else "📚 追更：檢查完畢，沒有新的一話")
+        if errs:
+            msg += f"（{errs} 部檢查失敗）"
+        self.show_status(msg, "#fd7e14" if n else "#28a745", 6000)
+        if self._watch_dialog is not None:
+            self._watch_dialog.set_progress(msg)
+
     def check_for_updates(self) -> None:
         """到 GitHub 查最新版；有新版就問要不要下載更新（見 aa_tool.updater）。"""
         from aa_tool import updater
@@ -4615,6 +4746,7 @@ def main() -> None:
     win.showMaximized()
     QTimer.singleShot(800, win.show_update_result)
     QTimer.singleShot(0, win._apply_remote_server)
+    QTimer.singleShot(2000, win._watch_auto_check)
     sys.exit(app.exec())
 
 

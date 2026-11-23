@@ -864,6 +864,23 @@ def _is_nav_ascending_by_date(items: list[dict]) -> bool:
     return asc > desc
 
 
+_ENTRY_NO_RE = re.compile(r'blog-entry-(\d+)\.html')
+
+
+def _is_nav_ascending_by_entry_no(items: list[dict]) -> bool:
+    """依網址裡的 FC2 文章編號（`blog-entry-N.html`，發文越晚越大）判斷清單是否已是「舊 → 新」。
+
+    遞增多於遞減才回 True；編號少於 3 個回 False（退回呼叫端既有的 reverse 預設行為）。
+    """
+    nums = [int(m.group(1)) for it in items
+            if (m := _ENTRY_NO_RE.search(it.get('url') or ''))]
+    if len(nums) < 3:
+        return False
+    asc = sum(1 for i in range(len(nums) - 1) if nums[i] < nums[i + 1])
+    desc = sum(1 for i in range(len(nums) - 1) if nums[i] > nums[i + 1])
+    return asc > desc
+
+
 # ════════════════════════════════════════════════════════════════
 #  解析器：預設格式
 # ════════════════════════════════════════════════════════════════
@@ -979,7 +996,11 @@ def _parse_default(page_html: str, base_url: str, *, author_name: str = "", auth
             else:
                 title = html.unescape(re.sub(r'<[^>]+>', '', li_inner)).strip()
                 nav_links.append({'title': title, 'url': None, 'is_current': True})
-        nav_links.reverse()
+        # 多數模板的 relate_dl 是「新 → 舊」→ 反轉；yaruo-manyoshu.com 本來就是
+        # 「舊 → 新」，再反轉會讓「下一話」走到上一話（標題沒日期，改看文章編號）
+        if not (_is_nav_ascending_by_date(nav_links)
+                or _is_nav_ascending_by_entry_no(nav_links)):
+            nav_links.reverse()
 
     # 無 relate_dl（部分 FC2 模板未掛「関連記事」外掛）→ 改由全記事一覽
     # （archives.html サイトマップ）取同分類文章清單當關聯記事。

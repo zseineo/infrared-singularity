@@ -72,7 +72,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.46"
+APP_VERSION = "3.47"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -2727,7 +2727,7 @@ class MainWindow(QMainWindow):
                 self._apply_url_history_meta(raw_url)
                 self.schedule_save()
                 line_count = text_content.count('\n') + 1
-                self.show_status(f"✅ 網址讀取成功！共 {line_count} 行", "#0f0")
+                self._show_fetch_success(f"✅ 網址讀取成功！共 {line_count} 行", full_text)
                 if self._url_fetch_win_visible():
                     self._url_fetch_win.on_fetch_done(
                         success=True,
@@ -2741,6 +2741,16 @@ class MainWindow(QMainWindow):
             self._invoke_on_main.emit(_apply)
 
         threading.Thread(target=_bg, daemon=True).start()
+
+    def _show_fetch_success(self, message: str, full_text: str) -> None:
+        """讀取成功的浮動提示；上色標籤會外露時改成橘色並附上行號（行號＝原文框行號）。"""
+        leaks = _url_fetcher.leaked_color_tag_lines(full_text)
+        if leaks:
+            self.show_status(
+                message + chr(10) + "⚠️ " + _url_fetcher.leaked_color_tag_message(leaks),
+                "#f39c12", duration=8000)
+        else:
+            self.show_status(message, "#0f0")
 
     def fetch_prev_chapter(self) -> None:
         self._fetch_adjacent_chapter(direction=-1)
@@ -2845,9 +2855,9 @@ class MainWindow(QMainWindow):
                     # 套用戳印 meta（若有）：work_title → doc_title、author → 作者欄
                     self._apply_url_history_meta(next_url)
                     self.schedule_save()
-                    self.show_status(
+                    self._show_fetch_success(
                         f"✅ 讀取成功！共 {text_content.count(chr(10)) + 1} 行",
-                        "#0f0")
+                        full_text)
                 self._invoke_on_main.emit(_apply)
             except Exception as ex:
                 self._invoke_on_main.emit(

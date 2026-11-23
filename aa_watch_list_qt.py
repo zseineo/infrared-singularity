@@ -53,6 +53,12 @@ class WatchListDialog(QDialog):
         self.tree.setHeaderLabels(["作品（基準話）", "新話", "最後檢查", "狀態"])
         self.tree.setRootIsDecorated(False)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # 深色主題（dark_theme.qss）沒有表頭規則，原生表頭會變成白底淺灰字看不清
+        # → 與自動翻譯關鍵字表同樣明確指定表頭配色
+        self.tree.setStyleSheet(
+            "QHeaderView::section { background:#3c3f41; color:#dce4ee;"
+            " font-weight:bold; padding:4px; border:none;"
+            " border-right:1px solid #555555; border-bottom:1px solid #555555; }")
         h = self.tree.header()
         h.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for c in (1, 2, 3):

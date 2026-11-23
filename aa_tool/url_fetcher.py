@@ -26,6 +26,10 @@
   - touhouyaruosure.com（東方やる夫スレ纏め；HonoX SSR，內文由前端 JS 另從
     /api/chapters/N/content 載入 → `fetch_url` 抓頁面後順手抓 API 並嵌進 #c-chapter-content，
     暫存的就是完整頁面；內文為 dl.thread 的 dt/dd；關聯記事取頁面「目次」ul（已是舊→新））
+  - moremoreyaruo.blog.fc2.com（_parse_fc2blog：無常見容器時以 <div class="aa"> 為容器；
+    上下話取內文前 <div class="entry-more"> 的話次清單，目前這話為純文字）
+  - yanchor.blog.fc2.com 封存頁（_parse_fc2blog：封存頁缺関連記事時，用 <link rel="prev/next">
+    湊前後一話，只留標題開頭與本頁相同的同系列項目）
   - yaruocheck.jp（FC2 獨立網域；內文走 _parse_fc2blog。頁面上的「カテゴリ[…] 内一覧」由
     前端 JS 讀分類 RSS（/?xml&category=N）產生，HTML 裡是空的 → 從頁面腳本取 catno 與
     yrmcategoryGroup（同一作品的多個分類），逐一抓 RSS 組成關聯記事，跨分類接續）
@@ -1241,6 +1245,69 @@ def _fetch_fc2_sitemap_nav(page_html: str, base_url: str) -> list[dict]:
     return nav_links
 
 
+def _extract_entry_more_nav(page_html: str, base_url: str) -> list[dict]:
+    """`<div class="entry-more">` 開頭的話次清單（moremoreyaruo.blog.fc2.com）。
+
+    內文 `<div class="aa">` 之前列出同系列各話：`<a>` 連結以 `<br>` 分隔，目前這一話是
+    沒有連結的純文字，清單結束於 `<hr>`。沒有找到「目前這一話」就回空清單。
+    """
+    m = re.search(r'<div\s+class="entry-more">(.*?)(?:<hr\b|<div\s+class="aa")',
+                  page_html, re.DOTALL)
+    if not m:
+        return []
+    items: list[dict] = []
+    for seg in re.split(r'<br\s*/?>', m.group(1)):
+        a_m = re.search(r'<a\s[^>]*?href="([^"]+)"[^>]*>(.*?)</a>', seg, re.DOTALL)
+        if a_m:
+            title = html.unescape(re.sub(r'<[^>]+>', '', a_m.group(2))).strip()
+            if title:
+                items.append({'title': title, 'url': urljoin(base_url, a_m.group(1)),
+                              'is_current': False})
+        else:
+            title = html.unescape(re.sub(r'<[^>]+>', '', seg)).strip()
+            if title:
+                items.append({'title': title, 'url': None, 'is_current': True})
+    if not any(x['is_current'] for x in items) or len(items) < 2:
+        return []
+    if _is_nav_ascending_by_entry_no(items) or _is_nav_ascending_by_date(items):
+        return items
+    return items[::-1] if len([x for x in items if x['url']]) >= 3 else items
+
+
+def _extract_link_rel_nav(page_html: str, base_url: str, page_title: str) -> list[dict]:
+    """沒有関連記事清單時，用 `<head>` 的 `<link rel="prev/next">` 湊出前後一話。
+
+    FC2 的 rel="prev" 是**較新**的一篇、rel="next" 是較舊的一篇，而且照全站發文順序，
+    會跨到別的作品（yanchor.blog.fc2.com 封存頁的 next 是另一部作品）→ 只保留標題前
+    6 個字出現在本頁標題裡的（同系列標題開頭相同）。
+    """
+    def _link(rel: str) -> dict | None:
+        m = re.search(r'<link\s+rel="' + rel + r'"\s+href="([^"]+)"\s+title="([^"]*)"',
+                      page_html)
+        if not m:
+            return None
+        title = html.unescape(m.group(2)).strip()
+        key = re.sub(r'\s+', '', title)[:6]
+        if not key or key not in re.sub(r'\s+', '', page_title):
+            return None
+        return {'title': title, 'url': urljoin(base_url, m.group(1)), 'is_current': False}
+
+    older, newer = _link('next'), _link('prev')
+    if older is None and newer is None:
+        return []
+    items = [x for x in (older,) if x]
+    items.append({'title': page_title, 'url': None, 'is_current': True})
+    items += [x for x in (newer,) if x]
+    return items
+
+
+def _fc2_nav(page_html: str, base_url: str, page_title: str) -> list[dict]:
+    """FC2 的上下話：関連記事 → entry-more 話次清單 → <link rel="prev/next">，取第一個有的。"""
+    return (_extract_fc2_relate_nav(page_html, base_url)
+            or _extract_entry_more_nav(page_html, base_url)
+            or _extract_link_rel_nav(page_html, base_url, page_title))
+
+
 def _extract_fc2_relate_nav(page_html: str, base_url: str) -> list[dict]:
     """抽取 FC2 `<dl class="relate_dl">` 關聯記事清單。
 
@@ -1381,7 +1448,13 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
         # <div class="article"><span class="aa"> 內的 <a name/num> + <dd> 結構。
         text_content = _extract_fc2_num_dd_posts(
             page_html, author_name=author_name, author_only=author_only)
-        return text_content, _extract_fc2_relate_nav(page_html, base_url), page_title
+        # moremoreyaruo.blog.fc2.com：也沒有上述容器，內文是 entry-more 話次清單之後的
+        # <div class="aa">（<br> 分行、內含「N 名前：」標頭）→ 改用它當容器走下面的流程
+        aa_divs = ([] if text_content else
+                   list(re.finditer(r'<div\s+class="aa"[^>]*>', page_html)))
+        if not aa_divs:
+            return text_content, _fc2_nav(page_html, base_url, page_title), page_title
+        containers = aa_divs
 
     # 兩步策略：
     # Step 1. 以「下一個容器起點」為上限 bounded 掃描，找出第一個含貼文標頭的容器
@@ -1437,7 +1510,7 @@ def _parse_fc2blog(page_html: str, base_url: str, *, author_name: str = "", auth
     text_content = '\n'.join(lines) if lines else None
 
     # ── 關聯連結 ──
-    nav_links = _extract_fc2_relate_nav(page_html, base_url)
+    nav_links = _fc2_nav(page_html, base_url, page_title)
 
     return text_content or None, nav_links, page_title
 
@@ -2288,6 +2361,42 @@ def too_short_message(n_lines: int) -> str:
     """內文太短時給使用者的提示（網址讀取與自動翻譯共用）。"""
     return (f"只讀到 {n_lines} 行（少於 {MIN_CONTENT_LINES} 行），這個網站可能目前不支援；"
             "若有勾「忽略留言」，請取消後再試")
+
+
+# 編輯器上色預覽（aa_edit_qt `_COLOR_SPAN_RUN_RE`）的配對方式：一個開頭配到「第一個」
+# 結尾，不認巢狀。配不到的標籤會以字面文字露在畫面上。
+_PREVIEW_SPAN_RUN_RE = re.compile(r'<span style="color:[^"]+">(.*?)</span>', re.DOTALL)
+_ANY_COLOR_TAG_RE = re.compile(r'<span\s+style="color:[^"]*">|</span>')
+
+
+def leaked_color_tag_lines(text: str | None) -> list[int]:
+    """上色標籤會外露的行號（1 起算、不重複、遞增）。
+
+    照編輯器上色預覽的配對方式掃一遍：配對成功的 run 內文裡還有標籤（巢狀），或 run
+    之外落單的開頭／結尾，都會被當成文字顯示（例：yaruobook 三層同色巢狀露出
+    `<span…>>>9429</span></span>`）。網址讀取／自動翻譯讀完後提示用，不改內文。
+    """
+    if not text or '<span' not in text and '</span>' not in text:
+        return []
+    leaked: list[int] = []   # 外露標籤在 text 中的位置
+
+    def _scan(seg_start: int, seg: str) -> None:
+        leaked.extend(seg_start + m.start() for m in _ANY_COLOR_TAG_RE.finditer(seg))
+
+    pos = 0
+    for m in _PREVIEW_SPAN_RUN_RE.finditer(text):
+        _scan(pos, text[pos:m.start()])
+        _scan(m.start(1), m.group(1))
+        pos = m.end()
+    _scan(pos, text[pos:])
+    return sorted({text.count('\n', 0, p) + 1 for p in leaked})
+
+
+def leaked_color_tag_message(lines: list[int]) -> str:
+    """外露提示文字（網址讀取浮動提示與自動翻譯 Log 共用）。"""
+    shown = "、".join(str(n) for n in lines[:5]) + ("…" if len(lines) > 5 else "")
+    return (f"有 {len(lines)} 行的上色標籤會外露成文字（第 {shown} 行），"
+            "請檢查顏色是否正確")
 
 
 _YC_CATNO_RE = re.compile(r"var\s+catno\s*=\s*'(\d+)'")

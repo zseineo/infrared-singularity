@@ -1592,6 +1592,11 @@ def run_auto_translate(
                     url = next_url
                     continue
 
+                # 1.25) 上色標籤會外露（編輯器預覽配不到對）→ 只留一句 Log 提醒，照常翻譯
+                leaks = url_fetcher.leaked_color_tag_lines(source)
+                if leaks:
+                    log("  ⚠️ " + url_fetcher.leaked_color_tag_message(leaks))
+
                 # 1.3) 標題過濾：標題不含過濾文字 → 跳過、讀下一話，不計話數。
                 #      放在決定作品資料夾之前，別的作品的標題才不會被拿去當資料夾名。
                 if not title_matches(page_title, title_filter):

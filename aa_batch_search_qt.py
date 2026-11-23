@@ -1132,6 +1132,8 @@ class BatchSearchWindow(QMainWindow):
             status += f"；{len(self.batch_matches)} 筆未替換（檔案已被改過或無法寫入，請重新搜尋）"
         self.status_label.setText(status)
 
+    _INVALID_FN_CHARS = set('\\/:*?"<>|')
+
     def _append_filename_suffix(self):
         """「附註檔名」：搜尋到的所有檔案，檔名（副檔名前）後面加上替換欄的文字。"""
         if self._busy:

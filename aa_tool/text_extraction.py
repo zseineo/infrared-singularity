@@ -99,6 +99,12 @@ _DICE_NOTATION_FW_RE = re.compile(r'(【\d+D\d+)：(\d+】)')
 # 整項只有一個骰值（可帶加減值）：「【1D5:2】」「【1D6:5】+6」
 _DICE_ONLY_RE = re.compile(r'【\d+[DdＤｄ]\d+[:：]\d+(?:\([^)]*\))?】[+\-＋－\d]*')
 # 候選後方 1~2 個空白接骰子（評分用的強脈絡，見 `_score_candidate`）
+# 數字比較選項（骰值結果表「50<= 配慮ナシ」）：只認帶等號的比較號、且後面隔著
+# 空白 — 單獨的 <> 在 AA 與「>>854」錨點裡太常見，≦≧ 是 AA 筆畫（「7≦三三」）
+_COMPARE_OPTION_RE = re.compile(
+    r'[0-9０-９]+[ 　]*(?:<=|>=|＜＝|＞＝)[ 　]+(\S+)')
+_COMPARE_OPTION_PREFIX_RE = re.compile(
+    r'[0-9０-９]+[ 　]*(?:<=|>=|＜＝|＞＝)[ 　]+$')
 _DICE_SUFFIX_RE = re.compile(r'[ 　]{1,2}【\d+[DdＤｄ]\d+[:：]')
 
 
@@ -348,7 +354,7 @@ _REPEAT_HIRA_RE = re.compile(r'([ぁ-゜ゟ])\1{2,}')
 _VALID_CHAR_RE = re.compile(
     r'[：＋+a-zA-ZＡ-Ｚａ-ｚ0-9０-９①-⑳'
     r'぀-ゟ゠-ヿ一-鿿'
-    r'々〆〤○〇★☆←→↑↓＆【】（）「」『』《》〚〛！？、。…，．？！,.\-―ーッ%％"“”‘’～〜'
+    r'々〆〤○〇★☆※←→↑↓＆【】（）「」『』《》〚〛！？、。…，．？！,.\-―ーッ%％"“”‘’～〜'
     r"'"
     r']')
 
@@ -709,6 +715,10 @@ def _find_anchors(line: str, in_text_block: bool = False) -> list[tuple[int, int
         anchors.append((m.start(), m.end()))
     for m in _KATA_UTT_RE.finditer(line):
         anchors.append((m.start(), m.end()))
+    # 數字比較選項（「50<= 配慮ナシ」）：比較號後面那一段是選項內容
+    for m in _COMPARE_OPTION_RE.finditer(line):
+        if _LETTER_RE.search(m.group(1)):
+            anchors.append((m.start(1), m.end(1)))
     # 單一平假名＋刪節號（「…ですわ だ……」的「だ……」）：語尾被空白隔開的一拍。
     # 刪節號 `…` AA 不用；能否保留仍看分數與同側伴隨。
     for m in _HIRA_ELLIPSIS_RE.finditer(line):
@@ -1037,7 +1047,8 @@ def _score_candidate(text: str, line: str, start: int, end: int,
     # 候選後方緊接骰子（「尚シュナイゼル　【1D2:2】」「ゴブの躍進　【1D100:2】」）
     # 同樣是強脈絡：骰子前面的就是判定項目名。
     has_name_tag = bool(_NAME_TAG_PREFIX_RE.search(line[:start])
-                        or _DICE_SUFFIX_RE.match(line[end:]))
+                        or _DICE_SUFFIX_RE.match(line[end:])
+                        or _COMPARE_OPTION_PREFIX_RE.search(line[:start]))
     if has_name_tag:
         s += w('name_tag')
     # 成對術語括號 bonus + 密度/無平假名豁免：候選整體是「【…】《…》〔…〕『…』」
@@ -1210,7 +1221,9 @@ def _score_candidate(text: str, line: str, start: int, end: int,
         in_multi_seg_region = (
             reg is not None and reg[2] and reg[0] <= start and end <= reg[1]
             and any(ch.isspace() for ch in line[reg[0]:reg[1]]))
+        # 相異小字母音相連（「ぷぅぃぷぴく」的 ぅぃ）不是正常的書寫，不給豁免
         long_hira = any(len(set(m.group(0))) >= 4
+                        and not _MIXED_SMALL_VOWELS_RE.search(m.group(0))
                         for m in _LONG_HIRA_RUN_RE.finditer(text))
         # 成對術語括號也不殺（「【２年後】」：２/年/後 全是單字元詞）
         if (not in_multi_seg_region and not long_hira
@@ -1290,8 +1303,10 @@ def _trim_candidate(text: str, s: int, e: int) -> 'tuple[str, int, int]':
     - 開頭 1~2 個半形／全形點點：對齊用的填充（「..ヴィーシャ大佐」
       「.【ヴィーシャ准将」「.ギガデイン！！」）。3 個以上是刪節號
       （「...そして」），保留。
+    - 開頭落單的右括號（「】※被った場合」）：前一個括號組的尾巴。〔〕 除外 —
+      狀態表的「〔盾　〕Rank4/…」以「〕」開頭是既定粒度。
     """
-    while text and text[0] in 'ゝゞ':
+    while text and text[0] in 'ゝゞ】」』）)》〛':
         text = text[1:]
         s += 1
     if text.count("''") % 2 == 1 and "'''" not in text:
@@ -1325,6 +1340,16 @@ def _trim_candidate(text: str, s: int, e: int) -> 'tuple[str, int, int]':
             text = text[:-tail]
             e -= tail
     return text, s, e
+
+
+def _aa_eye_glued(text: str, line: str, start: int) -> bool:
+    """候選緊貼在半形片假名之後、實字 ≤4、且含小字母音（ぁぃぅぇぉ）：AA 眼睛
+    （「ｨうてぅ」「ｨぅ示」）。64 篇原文中這種形狀 129 處，看到的全是 AA；
+    台詞緊貼半形片假名的（「ﾗﾄﾃｯﾌﾟやで（小声）」）不含小字母音。
+    """
+    return (start > 0 and line[start - 1] in _HALFWIDTH_KANA_CHARS
+            and len(_LETTER_RE.findall(text)) <= 4
+            and bool(_SMALL_VOWEL_RE.search(text)))
 
 
 def _aa_veto(text: str) -> 'str | None':
@@ -1425,7 +1450,9 @@ _KANA_LETTER_RE = re.compile(r'[ぁ-ゖァ-ヺ]')
 # 「爻爻爻」）。正常日文不存在這種組合 — 笑聲（ハハハ／ふふふ）與拉長音
 # （あああ／ぉぉぉ）用的是別的字。含此組合的候選整個否決，不看分數、
 # 不受行尾／文字區塊豁免（47 篇實測：含此組合的 28 筆提取全是 AA 碎片）。
-_AA_WALL_RUN_RE = re.compile(r'([ニ二三ミ彡爻从乂工ﾆﾐ])\1\1')
+_AA_WALL_RUN_RE = re.compile(r'([ニ二三ミ彡爻从乂工ﾆﾐソノ])\1\1')
+_SMALL_VOWEL_RE = re.compile(r'[ぁぃぅぇぉ]')
+_MIXED_SMALL_VOWELS_RE = re.compile(r'([ぁぃぅぇぉ])(?!\1)[ぁぃぅぇぉ]')
 # AA 眼睛／睫毛的「うぅ」筆畫：前接漢字／片假名／⌒／橫線（「灯示うぅ」「芥うぅx」
 # 「⌒うぅミ」「ニニ-うぅ」），或後接 ミ／彡／x／㍉；以及鏡像的「ぅう」（「ｨぅう笊」
 # 「xぅう笊」）。真實台詞的「うぅ」前面是平假名或句首（「ううぅ・・・」「ちゃうぅっ」
@@ -1735,7 +1762,7 @@ def _extract_experimental_line(
         if len(text) < min_len:
             continue
         # AA 形狀硬否決（不進落選收集 — 名牌救援不該把它們救回來）
-        if _aa_veto(text) is not None:
+        if _aa_veto(text) is not None or _aa_eye_glued(text, line, s):
             continue
         if invalid_regex.match(text):
             continue
@@ -2352,6 +2379,8 @@ def analyze_extraction(
                         f"（allow_short={allow_short}）。")
                     continue
                 veto = _aa_veto(t)
+                if veto is None and _aa_eye_glued(t, proc_line, s):
+                    veto = '緊貼半形片假名、含小字母音的短平假名段（AA 眼睛「ｨうてぅ」）'
                 if veto is not None:
                     report.append(f"    -> ❌ 剔除：{veto}，硬否決。")
                     continue

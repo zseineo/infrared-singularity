@@ -849,21 +849,10 @@ class UrlFetchWindow(QWidget):
             "HTML / 文字檔 (*.html *.htm *.txt);;All files (*.*)")
         if not file_path:
             return
-        name = os.path.basename(file_path)
-        try:
-            text = self._read_saved_text(file_path)
-        except OSError as e:
-            self._set_status(f"❌ 無法讀取檔案：{e}", "#dc3545")
-            return
-        if not self._main._compute_author_fingerprint(text or ""):
-            self._set_status(
-                f"⚠️ {name} 裡找不到投稿標頭（日期＋時間＋ID），無法比對網址", "#f39c12")
-            return
-        url = self._main._find_url_for_text(text)
+        url, err, severe = self._main.find_url_for_saved_file(file_path)
         if not url:
-            self._set_status(
-                f"⚠️ 讀取紀錄裡沒有與 {name} 指紋相符的網址"
-                "（可能從沒在本工具讀過，或紀錄已被清除）", "#f39c12")
+            self._set_status(("❌ " if severe else "⚠️ ") + err,
+                             "#dc3545" if severe else "#f39c12")
             return
         self._fetch_url(url)
 

@@ -117,8 +117,8 @@ def access_links(port: int, token: str) -> list[tuple[str, str]]:
 
 
 #: GET /api/<名稱>（唯讀查詢）與 POST /api/<名稱>（動作）允許的名稱
-GET_NAMES = {"state", "ui", "fs"}
-POST_NAMES = {"start", "stop", "force_stop", "resume", "read",
+GET_NAMES = {"state", "ui", "fs", "history"}
+POST_NAMES = {"start", "stop", "force_stop", "resume", "read", "from_file",
               "ui_set", "ui_click", "conn_open", "folder", "reorder", "fetchopts"}
 
 
@@ -325,6 +325,9 @@ table.tw input[type=text],table.tw select{padding:6px;font-size:13px}
 .sheet>div{background:var(--card);width:100%;max-height:88vh;overflow:auto;border-radius:16px 16px 0 0;
   padding:16px 16px calc(16px + env(safe-area-inset-bottom))}
 .dirs a{display:block;padding:11px 8px;border-bottom:1px solid var(--line);color:var(--fg);text-decoration:none;word-break:break-all}
+.chips{display:flex;flex-wrap:wrap;gap:6px;max-height:136px;overflow:auto;margin-top:8px}
+.chips button{padding:6px 10px;font-size:13px;font-weight:400;background:#3a3f44;color:#ddd;border-radius:999px}
+.chips button.on{background:var(--accent);color:#fff}
 .hidden{display:none!important}
 </style></head><body>
 <header>
@@ -376,6 +379,7 @@ table.tw input[type=text],table.tw select{padding:6px;font-size:13px}
     <div class="inline" style="margin-top:8px">
       <button id="bPrev" class="sec">◀ 上一話</button><button id="bNext" class="sec">下一話 ▶</button>
     </div>
+    <button id="bFile" class="sec" style="width:100%;margin-top:8px">📄 從檔案（用電腦上已存的檔案找回網址）</button>
     <label class="fl" for="fauthor">作者名稱</label>
     <input id="fauthor" type="text" autocomplete="off">
     <label class="chk"><input id="fonly" type="checkbox"><span>忽略留言（只留作者貼文）</span></label>
@@ -389,11 +393,19 @@ table.tw input[type=text],table.tw select{padding:6px;font-size:13px}
     <div id="rdStatus" class="dim" style="margin-top:4px"></div>
     <div id="rdList" class="chapters"></div>
   </div>
+  <div class="card">
+    <b>讀取紀錄</b>
+    <input id="hq" type="text" placeholder="搜尋標題（或點下面的作品名）" autocomplete="off" style="margin-top:8px">
+    <div id="hchips" class="chips"></div>
+    <div id="hinfo" class="dim" style="margin-top:6px"></div>
+    <div id="hlist" class="chapters"></div>
+    <button id="hmore" class="sec" style="width:100%;margin-top:8px;display:none"></button>
+  </div>
 </section>
 
 <div class="sheet" id="modal"><div id="modalBody"></div></div>
 <div class="sheet" id="picker"><div>
-  <div style="font-weight:700">選擇資料夾</div>
+  <div id="pkTitle" style="font-weight:700">選擇資料夾</div>
   <div id="pkPath" class="dim" style="word-break:break-all;margin:6px 0"></div>
   <div id="pkDirs" class="dirs"></div>
   <div class="btns"><button id="pkCancel" class="sec">取消</button><button id="pkOk">選這個資料夾</button></div>
@@ -426,7 +438,7 @@ function setBtns(){
   $('bStart').disabled=busy||run||st.thread_busy;
   $('bStop').disabled=busy||!run||st.stopping;$('bForce').disabled=busy||!run;
   $('bResume').style.display=st.paused?'':'none';$('bResume').disabled=busy;
-  $('bRead').disabled=busy||(st.read&&st.read.loading);
+  $('bRead').disabled=$('bFile').disabled=busy||(st.read&&st.read.loading);
 }
 // ── 狀態輪詢 ──
 async function poll(){
@@ -563,15 +575,22 @@ function renderModal(m){
   if(m.kind==='dialog')renderItems($('form-modal'),m.items,'modal');
 }
 // ── 資料夾瀏覽 ──
-let pickCb=null,pickPath='';
-async function openPicker(start,cb){pickCb=cb;$('picker').classList.add('show');await listDir(start);}
+let pickCb=null,pickPath='',pickFiles=false;
+// files=true：選檔案模式（列 html／htm／txt，點檔案＝選定；不顯示「選這個資料夾」）
+async function openPicker(start,cb,files){pickCb=cb;pickFiles=!!files;
+  $('pkTitle').textContent=pickFiles?'選擇檔案':'選擇資料夾';$('pkOk').style.display=pickFiles?'none':'';
+  $('picker').classList.add('show');await listDir(start);}
 async function listDir(p){
   $('pkDirs').innerHTML='<div class="dim">讀取中…</div>';
-  try{const r=await fetch('/api/fs?path='+encodeURIComponent(p),{credentials:'same-origin'});const j=await r.json();
+  try{const r=await fetch('/api/fs?path='+encodeURIComponent(p)+(pickFiles?'&files=1':''),{credentials:'same-origin'});const j=await r.json();
     pickPath=j.path||'';$('pkPath').textContent=pickPath||'（選擇磁碟）';const box=$('pkDirs');box.innerHTML='';
     if(j.error){box.innerHTML='<div class="err">'+esc(j.error)+'</div>';}
     if(pickPath){const up=document.createElement('a');up.href='#';up.textContent='⬆ 上一層';up.onclick=e=>{e.preventDefault();listDir(j.parent||'');};box.appendChild(up);}
     for(const d of j.dirs){const a=document.createElement('a');a.href='#';a.textContent='📁 '+d.name;a.onclick=e=>{e.preventDefault();listDir(d.path);};box.appendChild(a);}
+    for(const f of (j.files||[])){const a=document.createElement('a');a.href='#';a.textContent='📄 '+f.name;
+      a.onclick=e=>{e.preventDefault();$('picker').classList.remove('show');if(pickCb)pickCb(f.path);};box.appendChild(a);}
+    if(pickFiles&&pickPath&&!(j.files||[]).length&&!j.error){const d=document.createElement('div');d.className='dim';d.style.padding='8px';
+      d.textContent='（這個資料夾沒有 html／txt 檔）';box.appendChild(d);}
     $('pkOk').disabled=!pickPath;
   }catch(e){$('pkDirs').innerHTML='<div class="err">讀取失敗</div>';}
 }
@@ -599,6 +618,32 @@ function stepChapter(d){const r=st.read||{};const ch=r.chapters||[];const i=ch.f
   if(i<0||!ch[i+d]){toast(d<0?'沒有上一話':'沒有下一話',false);return;}readUrl(ch[i+d].url);}
 $('bRead').onclick=()=>readUrl($('furl').value.trim());
 $('bPrev').onclick=()=>stepChapter(-1);$('bNext').onclick=()=>stepChapter(1);
+$('bFile').onclick=()=>openPicker('@last',p=>post('from_file',{path:p}),true);
+// ── 讀取紀錄（同電腦網址讀取視窗：搜尋標題、作品名快速篩選、點一筆＝讀取）──
+let histOff=0,histTitles=[],histTimer=null,histSeq=0;
+async function loadHist(more,withTitles){
+  const q=$('hq').value.trim(),off=more?histOff:0,my=++histSeq;
+  try{const r=await fetch('/api/history?q='+encodeURIComponent(q)+'&offset='+off+(withTitles?'&titles=1':''),
+      {credentials:'same-origin',cache:'no-store'});
+    const j=await r.json();if(my!==histSeq)return;   // 打字中，只留最後一次的結果
+    if(j.error){$('hinfo').textContent=j.error;return;}
+    if(j.titles){histTitles=j.titles;renderChips();}
+    const box=$('hlist');if(!more)box.innerHTML='';
+    for(const e of j.entries){const a=document.createElement('a');a.href='#';a.textContent=e.title;
+      a.onclick=ev=>{ev.preventDefault();readUrl(e.url);};box.appendChild(a);}
+    histOff=off+j.entries.length;
+    $('hinfo').textContent=j.total?(q?'符合 '+j.total+' 筆':'共 '+j.total+' 筆')+'（點一下讀取）':(q?'（無符合「'+q+'」的紀錄）':'（沒有讀取紀錄）');
+    const m=$('hmore'),rest=j.total-histOff;m.style.display=rest>0?'':'none';m.textContent='顯示更多（尚有 '+rest+' 筆）';
+  }catch(e){$('hinfo').textContent='讀取紀錄載入失敗';}
+}
+function renderChips(){
+  const box=$('hchips'),q=$('hq').value.trim();box.innerHTML='';
+  for(const t of histTitles){const b=document.createElement('button');b.textContent=t;b.className=t===q?'on':'';
+    b.onclick=()=>{$('hq').value=($('hq').value.trim()===t)?'':t;markChips();loadHist(false,false);};box.appendChild(b);}
+}
+function markChips(){const q=$('hq').value.trim();for(const b of $('hchips').children)b.className=b.textContent===q?'on':'';}
+$('hq').oninput=()=>{markChips();clearTimeout(histTimer);histTimer=setTimeout(()=>loadHist(false,false),300);};
+$('hmore').onclick=()=>loadHist(true,false);
 function sendOpts(){post('fetchopts',{author:$('fauthor').value.trim(),author_only:$('fonly').checked,skip_cache:$('fskip').checked},true);}
 for(const id of ['fauthor','fonly','fskip'])$(id).onchange=sendOpts;
 // ── 狀態分頁按鈕 ──
@@ -612,6 +657,7 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=async()=>{
   for(const t of ['status','auto','conn','fetch'])$('tab-'+t).classList.toggle('hidden',t!==tab);
   if(tab==='conn')await api('conn_open',{});
   if(tab==='auto'||tab==='conn')loadUI(tab);
+  if(tab==='fetch')loadHist(false,true);   // 每次切過來重抓（電腦上可能讀了新的網址）
 });
 poll();
 setInterval(()=>{if(busy)return;poll();if(tab==='auto'||tab==='conn')loadUI(tab);},2000);

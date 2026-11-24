@@ -72,7 +72,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.49"
+APP_VERSION = "3.50"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -4336,6 +4336,15 @@ class MainWindow(QMainWindow):
         running = self._auto_translate_running
         if action == "read":
             return self._remote_read_url(str(payload.get("url") or "").strip())
+        if action == "from_file":
+            path = str(payload.get("path") or "")
+            if not os.path.isfile(path):
+                return False, "檔案不存在"
+            url, err, _severe = self.find_url_for_saved_file(path)
+            if not url:
+                return False, err
+            ok, msg = self._remote_read_url(url)
+            return ok, ("找到網址，讀取中…" if ok else msg)
         if action == "stop":
             if not running:
                 return False, "目前沒有在執行"
@@ -4427,8 +4436,71 @@ class MainWindow(QMainWindow):
         if name == "ui":
             return self._remote_ui(params.get("view", ""))
         if name == "fs":
-            return self._remote_fs(params.get("path", ""))
+            return self._remote_fs(params.get("path", ""), files=bool(params.get("files")))
+        if name == "history":
+            return self._remote_history(params)
         return {"error": "unknown"}
+
+    def find_url_for_saved_file(self, file_path: str) -> tuple[str | None, str, bool]:
+        """「從檔案」：已存檔案的投稿標頭指紋 → 讀取紀錄裡的網址。
+
+        回傳 (網址, 找不到時的原因, 原因是否為讀檔錯誤)。網址讀取視窗與手機共用。
+        """
+        from aa_url_fetch_qt import UrlFetchWindow
+        name = os.path.basename(file_path)
+        try:
+            text = UrlFetchWindow._read_saved_text(file_path)
+        except OSError as e:
+            return None, f"無法讀取檔案：{e}", True
+        if not self._compute_author_fingerprint(text or ""):
+            return None, f"{name} 裡找不到投稿標頭（日期＋時間＋ID），無法比對網址", False
+        url = self._find_url_for_text(text)
+        if not url:
+            return None, (f"讀取紀錄裡沒有與 {name} 指紋相符的網址"
+                          "（可能從沒在本工具讀過，或紀錄已被清除）"), False
+        return url, "", False
+
+    def _remote_history(self, params: dict) -> dict:
+        """手機「讀取紀錄」：同電腦網址讀取視窗的紀錄列表（最新在前、標題關鍵字篩選、
+        每頁 HISTORY_PAGE_SIZE 筆）；``titles=1`` 時附上標題快速篩選用的作品名清單。"""
+        from aa_url_fetch_qt import HISTORY_PAGE_SIZE
+        entries = [h for h in reversed(self.url_history)
+                   if isinstance(h, dict) and h.get("url")]
+        kw = str(params.get("q") or "").strip().lower()
+        if kw:
+            entries = [h for h in entries if kw in (h.get("title") or "").lower()]
+        try:
+            offset = max(0, int(params.get("offset") or 0))
+        except ValueError:
+            offset = 0
+        page = entries[offset:offset + HISTORY_PAGE_SIZE]
+        out = {"total": len(entries), "offset": offset,
+               "entries": [{"title": h.get("title") or h["url"], "url": h["url"]}
+                           for h in page]}
+        if params.get("titles"):
+            out["titles"] = self._remote_history_titles()
+        return out
+
+    def _remote_history_titles(self) -> list[str]:
+        """讀取紀錄裡不重複的作品名（同電腦「標題快速篩選」，最新優先）；紀錄沒變就用快取。"""
+        from aa_url_fetch_qt import _normalize_title_for_filter
+        last = self.url_history[-1] if self.url_history else None
+        sig = (len(self.url_history),
+               (last.get("url"), last.get("title")) if isinstance(last, dict) else None)
+        cache = getattr(self, "_remote_titles_cache", None)
+        if cache is not None and cache[0] == sig:
+            return cache[1]
+        seen: set[str] = set()
+        titles: list[str] = []
+        for e in reversed(self.url_history):
+            if not isinstance(e, dict):
+                continue
+            t = _normalize_title_for_filter(e.get("title") or "")
+            if t and t not in seen:
+                seen.add(t)
+                titles.append(t)
+        self._remote_titles_cache = (sig, titles)
+        return titles
 
     def _mirror(self, view: str):
         from aa_remote_mirror_qt import Mirror
@@ -4468,31 +4540,41 @@ class MainWindow(QMainWindow):
                 return sub
         return out_dir
 
-    def _remote_fs(self, path: str) -> dict:
-        """手機的資料夾瀏覽：只列子資料夾名稱（不列檔案、不讀內容）。"""
+    _REMOTE_FILE_EXTS = (".html", ".htm", ".txt")
+
+    def _remote_fs(self, path: str, files: bool = False) -> dict:
+        """手機的資料夾瀏覽：列子資料夾名稱；``files`` 時另列 html／htm／txt 檔名
+        （「從檔案」用）。只回名稱，不讀內容。"""
         p = self._auto_window
         if path == "@out":
             path = p.out_edit.text().strip() if p is not None else ""
         elif path == "@reorder":
             path = self._remote_reorder_start()
+        elif path == "@last":   # 「從檔案」：同電腦檔案對話框的起始資料夾
+            path = self._last_dir or (p.out_edit.text().strip() if p is not None else "")
         if not path or not os.path.isdir(path):
             drives = [f"{c}:\\" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
                       if os.path.isdir(f"{c}:\\")]
-            return {"path": "", "parent": "",
+            return {"path": "", "parent": "", "files": [],
                     "dirs": [{"name": d, "path": d} for d in drives]}
         path = os.path.abspath(path)
         try:
-            names = sorted((n for n in os.listdir(path)
-                            if not n.startswith(("$", "."))
-                            and os.path.isdir(os.path.join(path, n))), key=str.casefold)
+            all_names = [n for n in os.listdir(path) if not n.startswith(("$", "."))]
         except OSError as e:
             return {"path": path, "parent": os.path.dirname(path.rstrip("\\/")),
-                    "dirs": [], "error": str(e)}
+                    "dirs": [], "files": [], "error": str(e)}
+        names = sorted((n for n in all_names if os.path.isdir(os.path.join(path, n))),
+                       key=str.casefold)
+        fnames = (sorted((n for n in all_names
+                          if n.lower().endswith(self._REMOTE_FILE_EXTS)
+                          and os.path.isfile(os.path.join(path, n))), key=str.casefold)
+                  if files else [])
         parent = os.path.dirname(path.rstrip("\\/"))
         if parent == path or (len(path) <= 3 and path.endswith(":\\")):
             parent = ""
         return {"path": path, "parent": parent,
-                "dirs": [{"name": n, "path": os.path.join(path, n)} for n in names[:500]]}
+                "dirs": [{"name": n, "path": os.path.join(path, n)} for n in names[:500]],
+                "files": [{"name": n, "path": os.path.join(path, n)} for n in fnames[:1000]]}
 
     # ── 自動更新（v3.28，⚙ 設定「檢查更新」）──
 

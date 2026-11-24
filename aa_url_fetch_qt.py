@@ -201,7 +201,8 @@ class UrlFetchWindow(QWidget):
 
     def sync_state(self, *, url_history: list, url_related_links: list,
                    current_url: str, author_only: bool, author_name: str,
-                   skip_cache: bool = False, initial_url: str = "") -> None:
+                   skip_cache: bool = False, initial_url: str = "",
+                   keep_dice: bool = False) -> None:
         """主程式在切換到此面板之前呼叫，同步最新狀態。"""
         self._url_history = list(url_history)
         self._url_related_links = list(url_related_links)
@@ -209,6 +210,8 @@ class UrlFetchWindow(QWidget):
         self._author_only = author_only
         self._author_name = author_name
         self.author_only_switch.setChecked(author_only)
+        self.keep_dice_switch.setChecked(keep_dice)
+        self.keep_dice_switch.setEnabled(author_only)
         self.skip_cache_switch.setChecked(skip_cache)
         self.author_name_entry.setText(author_name)
         if initial_url:
@@ -224,6 +227,7 @@ class UrlFetchWindow(QWidget):
     def sync_back_to_main(self) -> None:
         """離開面板（返回首頁）時，由主程式呼叫，將狀態同步回去。"""
         self._main._author_only = self.author_only_switch.isChecked()
+        self._main._keep_dice_posts = self.keep_dice_switch.isChecked()
         self._main._skip_url_cache = self.skip_cache_switch.isChecked()
         self._main._author_name = self.author_name_entry.text().strip()
         self._main.schedule_save()
@@ -298,6 +302,15 @@ class UrlFetchWindow(QWidget):
         self.author_only_switch = QCheckBox("忽略留言")
         self.author_only_switch.setFont(self.ui_small_font)
         top.addWidget(self.author_only_switch)
+
+        self.keep_dice_switch = QCheckBox("保留骰子留言")
+        self.keep_dice_switch.setFont(self.ui_small_font)
+        self.keep_dice_switch.setToolTip(
+            "勾「忽略留言」時，留言裡有骰子（例：【1D10:7】）的照樣保留，\n"
+            "安價的擲骰結果常是讀者貼的。網址讀取、上一話／下一話、自動翻譯都適用。")
+        self.keep_dice_switch.setEnabled(False)
+        self.author_only_switch.toggled.connect(self.keep_dice_switch.setEnabled)
+        top.addWidget(self.keep_dice_switch)
 
         self.skip_cache_switch = QCheckBox("不讀暫存")
         self.skip_cache_switch.setFont(self.ui_small_font)
@@ -968,6 +981,7 @@ class UrlFetchWindow(QWidget):
         self._fetching = True
 
         self._main._author_name = self.author_name_entry.text().strip()
+        self._main._keep_dice_posts = self.keep_dice_switch.isChecked()
         self._main._handle_url_fetch_request(
             raw,
             self.author_only_switch.isChecked(),

@@ -218,6 +218,7 @@ class AutoConfig:
     fix_translation_ids: bool
     glossary_skip_extract: bool
     work_title: str
+    keep_dice_posts: bool = False   # 忽略留言時保留含骰子的留言
 
 
 def load_config(base_dir: str) -> AutoConfig:
@@ -237,6 +238,7 @@ def load_config(base_dir: str) -> AutoConfig:
             glossary_text, kana_fold=c.glossary_kana_fold),
         author_name=c.author_name,
         author_only=c.author_only,
+        keep_dice_posts=c.keep_dice_posts,
         korean_mode=c.korean_mode,
         experimental=c.experimental_extraction,
         pad_right_aa=c.pad_right_aa,
@@ -360,7 +362,8 @@ def _fetch_and_parse(url: str, cfg: AutoConfig, *,
     try:
         text_content, nav_links, page_title = url_fetcher.parse_page_html(
             page_html, url,
-            author_name=cfg.author_name, author_only=cfg.author_only)
+            author_name=cfg.author_name, author_only=cfg.author_only,
+            keep_dice_posts=cfg.keep_dice_posts)
     except Exception as e:
         raise ChapterError(f"解析頁面失敗：{e}") from e
     if not text_content or not text_content.strip():
@@ -821,7 +824,8 @@ def _preview_fetch_source(
         try:
             text, _nav, title = url_fetcher.parse_page_html(
                 html_text, url,
-                author_name=cfg.author_name, author_only=cfg.author_only)
+                author_name=cfg.author_name, author_only=cfg.author_only,
+                keep_dice_posts=cfg.keep_dice_posts)
         except Exception:
             return None
         return (text, title) if text and text.strip() else None

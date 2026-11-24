@@ -72,7 +72,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.50"
+APP_VERSION = "3.51"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -862,6 +862,7 @@ class MainWindow(QMainWindow):
         self._pending_update: str = ""   # 自動更新：已驗證的新版資料夾，關閉時啟動換檔
         self._update_busy = False          # 檢查／下載更新中
         self._author_only: bool = False
+        self._keep_dice_posts: bool = False   # 忽略留言時保留含骰子的留言
         self._author_name: str = ""
         # 「不讀暫存」（網址讀取面板的開關）：本次執行中**所有**讀取網址的行為
         # 都強制重新上網抓（網址讀取、上一話／下一話、重找原文、自動翻譯），
@@ -2527,6 +2528,7 @@ class MainWindow(QMainWindow):
             url_related_links=self.url_related_links,
             current_url=self.current_url,
             author_only=self._author_only,
+            keep_dice=self._keep_dice_posts,
             author_name=self._author_name,
             skip_cache=self._skip_url_cache,
             initial_url=self.current_url,
@@ -2635,7 +2637,7 @@ class MainWindow(QMainWindow):
                 page_html, fresh = self._fetch_page_html(raw_url)
                 text_content, nav_links, page_title = _parse_page_html(
                     page_html, raw_url, author_name=author,
-                    author_only=author_only)
+                    author_only=author_only, keep_dice_posts=self._keep_dice_posts)
             except Exception as ex:
                 err = str(ex)
                 # 連線層失敗時 url_fetcher 會附診斷（見 SPEC §4.5）；取第一行
@@ -2789,7 +2791,8 @@ class MainWindow(QMainWindow):
                 page_html, fresh = self._fetch_page_html(next_url)
                 text_content, nav_links, page_title = _parse_page_html(
                     page_html, next_url, author_name=author,
-                    author_only=self._author_only)
+                    author_only=self._author_only,
+                    keep_dice_posts=self._keep_dice_posts)
                 n_lines = _url_fetcher.content_line_count(text_content)
                 if text_content is not None and n_lines < _url_fetcher.MIN_CONTENT_LINES:
                     m = "⚠️ " + _url_fetcher.too_short_message(n_lines)
@@ -2898,6 +2901,7 @@ class MainWindow(QMainWindow):
             batch_folder=self._batch_folder,
             author_name=self._author_name,
             author_only=self._author_only,
+            keep_dice_posts=self._keep_dice_posts,
             work_history=list(self.work_history),
             editor_font_family=self._editor_font_family,
             editor_font_size=self._editor_font_size,
@@ -3010,6 +3014,7 @@ class MainWindow(QMainWindow):
         if cache.author_name:
             self._author_name = cache.author_name
         self._author_only = cache.author_only
+        self._keep_dice_posts = cache.keep_dice_posts
         if cache.work_history:
             self.work_history = list(cache.work_history)
         if cache.editor_font_family:
@@ -3857,7 +3862,8 @@ class MainWindow(QMainWindow):
             text_content, _nav, page_title = _parse_page_html(
                 page_html, matching_url,
                 author_name=self._author_name,
-                author_only=self._author_only)
+                author_only=self._author_only,
+                keep_dice_posts=self._keep_dice_posts)
         except Exception:
             return None
         if not text_content or not text_content.strip():
@@ -4273,6 +4279,7 @@ class MainWindow(QMainWindow):
             "preview": self._remote_preview(),
             "modal": self._mirror("modal").describe_modal(),
             "fetchopts": {"author": self._author_name, "author_only": self._author_only,
+                          "keep_dice": self._keep_dice_posts,
                           "skip_cache": self._skip_url_cache},
         }
 
@@ -4414,11 +4421,13 @@ class MainWindow(QMainWindow):
         if action == "fetchopts":
             self._author_name = str(payload.get("author") or "").strip()
             self._author_only = bool(payload.get("author_only"))
+            self._keep_dice_posts = bool(payload.get("keep_dice"))
             self._skip_url_cache = bool(payload.get("skip_cache"))
             if self._url_fetch_win is not None and self._url_fetch_win_visible():
                 win = self._url_fetch_win
                 win.author_name_entry.setText(self._author_name)
                 win.author_only_switch.setChecked(self._author_only)
+                win.keep_dice_switch.setChecked(self._keep_dice_posts)
                 win.skip_cache_switch.setChecked(self._skip_url_cache)
             self.schedule_save()
             return True, "已套用"

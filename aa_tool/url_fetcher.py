@@ -49,6 +49,7 @@
 """
 from __future__ import annotations
 
+import contextvars
 import gzip
 import html
 import json
@@ -757,6 +758,20 @@ def _is_author_post(header_text: str, author_name: str) -> bool:
     return _NAME_TRAIL_RE.sub('', poster_name) == _NAME_TRAIL_RE.sub('', target)
 
 
+# 「忽略留言」時保留含骰子的非作者貼文（v3.51；安價的擲骰結果常由讀者貼出）。
+# 由 parse_page_html(keep_dice_posts=) 設定；用 ContextVar 而不是逐一加參數到十幾個
+# 解析器，各執行緒（網址讀取／自動翻譯同時跑）各自獨立。
+_KEEP_DICE_POSTS: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    'keep_dice_posts', default=False)
+# 骰子格式：【1D10:7】、【2D6:9(4+5)】（語料庫實際只出現這兩種）
+_DICE_RE = re.compile(r'【\d+[DdＤｄ]\d+[:：]\d+')
+
+
+def _has_dice(text: str) -> bool:
+    """這則非作者貼文是否因含骰子而保留（開關沒開一律 False）。"""
+    return _KEEP_DICE_POSTS.get() and bool(_DICE_RE.search(text))
+
+
 def _filter_color_by_author(text: str, author_name: str, *, author_only: bool = False) -> str:
     """在無 dt/dd 結構的文字中，僅保留作者貼文的顏色標記。
 
@@ -768,21 +783,30 @@ def _filter_color_by_author(text: str, author_name: str, *, author_only: bool = 
         author_name = _detect_main_author_from_lines(text)
 
     lines = text.split('\n')
+    clean = [_COLOR_SPAN_RE.sub('', ln) for ln in lines]
+    is_header = [bool(_POST_HEADER_RE.search(c)) for c in clean]
     result: list[str] = []
     is_author_block = False
+    skip_block = author_only   # 第一個標頭之前的內容：忽略留言時不留
 
-    for line in lines:
+    for i, line in enumerate(lines):
         # 先移除 span 標籤再判斷標頭（標頭行可能被 color span 包住）
-        clean_line = _COLOR_SPAN_RE.sub('', line)
-        if _POST_HEADER_RE.search(clean_line):
+        clean_line = clean[i]
+        if is_header[i]:
             is_author_block = _is_author_post(clean_line, author_name)
-            if author_only and not is_author_block:
+            skip_block = author_only and not is_author_block
+            if skip_block and _KEEP_DICE_POSTS.get():
+                j = i + 1
+                while j < len(lines) and not is_header[j]:
+                    j += 1
+                skip_block = not _has_dice('\n'.join(clean[i:j]))
+            if skip_block:
                 continue
             # 標頭行本身不保留顏色
             result.append(clean_line)
         elif is_author_block:
             result.append(line)
-        elif not author_only:
+        elif not skip_block:
             result.append(clean_line)
 
     return _cleanup_unmatched_spans('\n'.join(result))
@@ -819,8 +843,9 @@ def _extract_dt_dd_posts(
         # 判斷是否為指定作者的貼文
         is_author = _is_author_post(dt_text, author_name)
 
-        # 忽略非作者貼文
-        if author_only and author_name and not is_author:
+        # 忽略非作者貼文（開了「保留骰子留言」且內含骰子的照留，當一般留言處理）
+        if author_only and author_name and not is_author and not _has_dice(
+                dt_text + '\n' + html.unescape(re.sub(r'<[^>]+>', '', post.group(2)))):
             continue
 
         dd_content = post.group(2)
@@ -2506,8 +2531,28 @@ def parse_page_html(
     *,
     author_name: str = "",
     author_only: bool = False,
+    keep_dice_posts: bool = False,
 ) -> tuple[str | None, list[dict], str]:
     """解析頁面 HTML，回傳 (文本內容, 關聯連結列表, 頁面標題)。
+
+    keep_dice_posts：「忽略留言」時仍保留含骰子（【1D10:7】）的非作者貼文。
+    """
+    token = _KEEP_DICE_POSTS.set(bool(keep_dice_posts))
+    try:
+        return _parse_page_html_impl(page_html, base_url, author_name=author_name,
+                                     author_only=author_only)
+    finally:
+        _KEEP_DICE_POSTS.reset(token)
+
+
+def _parse_page_html_impl(
+    page_html: str,
+    base_url: str,
+    *,
+    author_name: str = "",
+    author_only: bool = False,
+) -> tuple[str | None, list[dict], str]:
+    """parse_page_html 的本體。
 
     分派策略：
     1. **已知網域**（見 ``_DOMAIN_PARSERS``）→ 直接使用指定解析器。

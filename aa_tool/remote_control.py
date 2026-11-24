@@ -383,6 +383,7 @@ table.tw input[type=text],table.tw select{padding:6px;font-size:13px}
     <label class="fl" for="fauthor">作者名稱</label>
     <input id="fauthor" type="text" autocomplete="off">
     <label class="chk"><input id="fonly" type="checkbox"><span>忽略留言（只留作者貼文）</span></label>
+    <label class="chk"><input id="fdice" type="checkbox"><span>保留骰子留言（忽略留言時，有【1D10:7】這類骰子的留言照留）</span></label>
     <label class="chk"><input id="fskip" type="checkbox"><span>不讀暫存（每次重新上網抓）</span></label>
     <div class="dim" style="margin-top:6px">檔名：<span id="pvName">—</span></div>
     <div class="dim" id="pvFolderRow" style="display:none">作品資料夾：<span id="pvFolder"></span></div>
@@ -462,7 +463,7 @@ async function poll(){
     renderRead(st.read);
     const pv=st.preview||{};$('pvName').textContent=pv.filename||'—';
     $('pvFolderRow').style.display=pv.folder?'':'none';$('pvFolder').textContent=pv.folder||'';
-    if(!optsFilled&&st.fetchopts){$('fauthor').value=st.fetchopts.author||'';$('fonly').checked=!!st.fetchopts.author_only;
+    if(!optsFilled&&st.fetchopts){$('fauthor').value=st.fetchopts.author||'';$('fonly').checked=!!st.fetchopts.author_only;$('fdice').checked=!!st.fetchopts.keep_dice;$('fdice').disabled=!$('fonly').checked;
       $('fskip').checked=!!st.fetchopts.skip_cache;if(!$('furl').value)$('furl').value=(st.form&&st.form.url)||'';optsFilled=true;}
     renderModal(st.modal);
     setBtns();
@@ -644,8 +645,9 @@ function renderChips(){
 function markChips(){const q=$('hq').value.trim();for(const b of $('hchips').children)b.className=b.textContent===q?'on':'';}
 $('hq').oninput=()=>{markChips();clearTimeout(histTimer);histTimer=setTimeout(()=>loadHist(false,false),300);};
 $('hmore').onclick=()=>loadHist(true,false);
-function sendOpts(){post('fetchopts',{author:$('fauthor').value.trim(),author_only:$('fonly').checked,skip_cache:$('fskip').checked},true);}
-for(const id of ['fauthor','fonly','fskip'])$(id).onchange=sendOpts;
+function sendOpts(){$('fdice').disabled=!$('fonly').checked;
+  post('fetchopts',{author:$('fauthor').value.trim(),author_only:$('fonly').checked,keep_dice:$('fdice').checked,skip_cache:$('fskip').checked},true);}
+for(const id of ['fauthor','fonly','fdice','fskip'])$(id).onchange=sendOpts;
 // ── 狀態分頁按鈕 ──
 $('bStart').onclick=()=>post('start',{});
 $('bStop').onclick=()=>post('stop');

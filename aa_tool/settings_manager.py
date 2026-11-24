@@ -118,6 +118,7 @@ class AppCache:
     batch_folder: str = ""
     author_name: str = ""
     author_only: bool = False
+    keep_dice_posts: bool = False   # 忽略留言時保留含骰子的留言（v3.51）
     work_history: list = field(default_factory=list)
     editor_font_family: str = "MS PGothic"
     editor_font_size: int = 12
@@ -435,6 +436,7 @@ class SettingsManager:
             cache.batch_folder = data.get('batch_folder', '')
             cache.author_name = data.get('author_name', '')
             cache.author_only = bool(data.get('author_only', False))
+            cache.keep_dice_posts = bool(data.get('keep_dice_posts', False))
             cache.work_history = data.get('work_history', []) or []
             cache.editor_font_family = data.get(
                 'editor_font_family', cache.editor_font_family)
@@ -730,6 +732,7 @@ class SettingsManager:
                 'batch_folder': cache.batch_folder,
                 'author_name': cache.author_name,
                 'author_only': cache.author_only,
+                'keep_dice_posts': cache.keep_dice_posts,
                 'work_history': work_hist,
                 'editor_font_family': cache.editor_font_family,
                 'editor_font_size': cache.editor_font_size,

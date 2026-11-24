@@ -46,6 +46,18 @@ def _read_pre_safe(path: str) -> str | None:
         return None
 
 
+def _list_html(folder: str, recursive: bool) -> list[str]:
+    """資料夾裡的 .html（相對 folder 的路徑，排序過）。recursive＝連子資料夾一起找。"""
+    if not recursive:
+        return sorted(f for f in os.listdir(folder) if f.lower().endswith('.html'))
+    out = []
+    for root, _dirs, files in os.walk(folder):
+        rel = os.path.relpath(root, folder)
+        out.extend(f if rel == '.' else os.path.join(rel, f)
+                   for f in files if f.lower().endswith('.html'))
+    return sorted(out)
+
+
 def _warm_file(path: str) -> None:
     """把檔案讀過一次（內容丟掉），讓作業系統快取住，之後真正搜尋時直接從記憶體讀。"""
     try:
@@ -84,7 +96,9 @@ class BatchSearchWindow(QMainWindow):
                  on_add_to_glossary=None, # (a, b) -> None
                  on_back=None,            # () -> None，ESC 返回首頁
                  on_files_renamed=None,   # ({舊路徑: 新路徑}) -> None，附註檔名後通知主程式
-                 glossary_auto_search: bool = True):
+                 glossary_auto_search: bool = True,
+                 include_subfolders: bool = False,
+                 on_subfolders_change=None):  # (bool) -> None，「含子資料夾」切換時存設定
         super().__init__()
         self.setWindowTitle("AA 批次搜尋")
         self.resize(1280, 700)
@@ -97,6 +111,8 @@ class BatchSearchWindow(QMainWindow):
         self._cmd_file = cmd_file
         self._reverse_cmd_file = reverse_cmd_file
         self.glossary_auto_search: bool = glossary_auto_search
+        self._include_subfolders = include_subfolders
+        self._on_subfolders_change = on_subfolders_change
 
         # 連接信號
         self._sig_progress.connect(self._on_progress)
@@ -194,6 +210,15 @@ class BatchSearchWindow(QMainWindow):
         self.regex_switch = QCheckBox("正則")
         self.regex_switch.setFont(self.ui_small_font)
         search_row.addWidget(self.regex_switch)
+
+        self.subfolder_switch = QCheckBox("含子資料夾")
+        self.subfolder_switch.setFont(self.ui_small_font)
+        self.subfolder_switch.setToolTip(
+            "勾選後連同資料夾底下所有子資料夾裡的 HTML 一起搜尋；\n"
+            "結果的檔名欄會顯示「子資料夾\\檔名」。")
+        self.subfolder_switch.setChecked(self._include_subfolders)
+        self.subfolder_switch.toggled.connect(self._on_subfolder_toggled)
+        search_row.addWidget(self.subfolder_switch)
 
         lbl_replace = QLabel("替換:")
         lbl_replace.setFont(self.ui_font)
@@ -437,6 +462,11 @@ class BatchSearchWindow(QMainWindow):
             self.folder_entry.setText(folder)
             self._start_prefetch()
 
+    def _on_subfolder_toggled(self, checked: bool) -> None:
+        if self._on_subfolders_change is not None:
+            self._on_subfolders_change(checked)
+        self._start_prefetch()
+
     def showEvent(self, event):
         super().showEvent(event)
         self._start_prefetch()
@@ -450,17 +480,19 @@ class BatchSearchWindow(QMainWindow):
         folder = self.folder_entry.text().strip()
         if not folder or not os.path.isdir(folder):
             return
-        last_folder, last_at = self._prefetched
-        if folder == last_folder and time.time() - last_at < _PREFETCH_TTL:
+        recursive = self.subfolder_switch.isChecked()
+        key = f"{folder}|{int(recursive)}"
+        last_key, last_at = self._prefetched
+        if key == last_key and time.time() - last_at < _PREFETCH_TTL:
             return
-        self._prefetched = (folder, time.time())
+        self._prefetched = (key, time.time())
         self._prefetch_gen += 1
         gen = self._prefetch_gen
 
         def _run() -> None:
             try:
-                paths = [os.path.join(folder, f) for f in os.listdir(folder)
-                         if f.lower().endswith('.html')]
+                paths = [os.path.join(folder, f)
+                         for f in _list_html(folder, recursive)]
             except OSError:
                 return
 
@@ -516,8 +548,11 @@ class BatchSearchWindow(QMainWindow):
         self._batch_undo = None
         self.btn_undo_all.hide()
 
-        html_files = [f for f in os.listdir(folder) if f.lower().endswith('.html')]
-        html_files.sort()
+        try:
+            html_files = _list_html(folder, self.subfolder_switch.isChecked())
+        except OSError as e:
+            self._toast(f"讀取資料夾失敗: {e}", color="#dc3545")
+            return
         file_count = len(html_files)
 
         self.search_btn.setEnabled(False)
@@ -554,7 +589,7 @@ class BatchSearchWindow(QMainWindow):
                             'file_text': text,  # 交給 _search_done 放進 _known
                             'origin': (line, match_start),
                             'stale': False,
-                            'file_name': fname,
+                            'file_name': os.path.basename(fname),
                             'line_idx': line_idx,
                             'match_start': match_start,
                             'match_end': match_end,
@@ -1208,7 +1243,9 @@ class BatchSearchWindow(QMainWindow):
             if new:
                 mi['file_path'] = new
                 mi['file_name'] = os.path.basename(new)
-                mi['stem'] = os.path.splitext(mi['file_name'])[0]
+                # 含子資料夾搜尋時 stem 前面帶相對路徑（「子資料夾\檔名」），保留它
+                mi['stem'] = os.path.join(os.path.dirname(mi['stem']),
+                                          os.path.splitext(mi['file_name'])[0])
         self._undo_backups = {renamed.get(k, k): v for k, v in self._undo_backups.items()}
         self._known = {renamed.get(k, k): v for k, v in self._known.items()}
         if self._batch_undo:

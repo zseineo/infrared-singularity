@@ -116,6 +116,7 @@ class AppCache:
     current_url: str = ""
     auto_copy: bool = False
     batch_folder: str = ""
+    batch_include_subfolders: bool = False   # 批次搜尋「含子資料夾」（v3.53）
     author_name: str = ""
     author_only: bool = False
     keep_dice_posts: bool = False   # 忽略留言時保留含骰子的留言（v3.51）
@@ -434,6 +435,7 @@ class SettingsManager:
                 cache.url_related_links = []
             cache.auto_copy = bool(data.get('auto_copy', False))
             cache.batch_folder = data.get('batch_folder', '')
+            cache.batch_include_subfolders = bool(data.get('batch_include_subfolders', False))
             cache.author_name = data.get('author_name', '')
             cache.author_only = bool(data.get('author_only', False))
             cache.keep_dice_posts = bool(data.get('keep_dice_posts', False))
@@ -730,6 +732,7 @@ class SettingsManager:
                 'current_url': cache.current_url,
                 'auto_copy': cache.auto_copy,
                 'batch_folder': cache.batch_folder,
+                'batch_include_subfolders': cache.batch_include_subfolders,
                 'author_name': cache.author_name,
                 'author_only': cache.author_only,
                 'keep_dice_posts': cache.keep_dice_posts,

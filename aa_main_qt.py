@@ -72,7 +72,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.54"
+APP_VERSION = "3.55"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -293,10 +293,18 @@ class TranslatePanel(QWidget):
         btn_file_list.clicked.connect(self._main.toggle_file_list_panel)
         row.addWidget(btn_file_list)
 
-        btn_wiki = _make_btn("📖 Wiki 對照", "#6f42c1", "#5a32a3", font=_ui_font(12))
-        btn_wiki.setToolTip("從 Wiki 角色列表頁抓取中日文對照")
-        btn_wiki.clicked.connect(self._main.open_wiki_name_dialog)
-        row.addWidget(btn_wiki)
+        # 實驗性功能（v3.55）：Wiki 對照與 AI 校稿匯出收進同一個選單，工具列少一顆鈕
+        btn_lab = _make_btn("🧪 實驗性功能", "#6f42c1", "#5a32a3", font=_ui_font(12))
+        lab_menu = QMenu(btn_lab)
+        act = lab_menu.addAction("📖 Wiki 對照")
+        act.setToolTip("從 Wiki 角色列表頁抓取中日文對照")
+        act.triggered.connect(self._main.open_wiki_name_dialog)
+        act = lab_menu.addAction("🤖 AI 校稿素材匯出")
+        act.setToolTip("選擇譯文檔，產生給 AI 校稿用的對照表、貼文截圖與說明")
+        act.triggered.connect(self._main.export_ai_proofread)
+        lab_menu.setToolTipsVisible(True)
+        btn_lab.setMenu(lab_menu)
+        row.addWidget(btn_lab)
 
         btn_import = _make_btn("📥 讀取設定", "#17a2b8", "#138496", font=_ui_font(12))
         btn_import.clicked.connect(self._main.import_settings)
@@ -873,6 +881,7 @@ class MainWindow(QMainWindow):
         self._batch_folder: str = ""
         self._batch_subfolders: bool = False   # 批次搜尋「含子資料夾」
         self._batch_one_per_file: bool = False   # 批次搜尋「每檔一筆」
+        self._ai_proofread_out_dir: str = ""   # AI 校稿素材匯出位置
         self.work_history: list[dict] = []
         self._editor_font_family: str = "submona"
         self._editor_font_size: int = 12
@@ -2527,6 +2536,70 @@ class MainWindow(QMainWindow):
         self._wiki_dialog.activateWindow()
 
     # ════════════════════════════════════════════════════════════
+    #  AI 校稿素材匯出（實驗性，v3.55；aa_proofread_qt）
+    # ════════════════════════════════════════════════════════════
+
+    def export_ai_proofread(self) -> None:
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtWidgets import QProgressDialog
+        from aa_proofread_qt import export_packets
+
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "選擇要校稿的譯文檔", self._last_dir or "",
+            "HTML 檔 (*.html *.htm)")
+        if not files:
+            return
+        out = QFileDialog.getExistingDirectory(
+            self, "校稿素材要放在哪個資料夾",
+            self._ai_proofread_out_dir or os.path.dirname(files[0]))
+        if not out:
+            return
+        self._ai_proofread_out_dir = out
+        self.schedule_save()
+
+        prog = QProgressDialog("匯出中…", "取消", 0, len(files), self)
+        prog.setWindowTitle("AI 校稿素材匯出")
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+        prog.setMinimumDuration(300)
+
+        def _progress(i: int, total: int, name: str) -> bool:
+            prog.setValue(i)
+            prog.setLabelText(f"（{i + 1}/{total}）{name}")
+            QApplication.processEvents()
+            return not prog.wasCanceled()
+
+        try:
+            r = export_packets(files, out, self._base_dir(),
+                               self._translate_panel.get_combined_glossary(), _progress)
+        except OSError as e:
+            prog.close()
+            QMessageBox.warning(self, "AI 校稿素材匯出", f"匯出失敗：{e}")
+            return
+        prog.setValue(len(files))
+        prog.close()
+
+        lines = [f"已匯出 {len(r['done'])} 個檔案到：", r["dir"]]
+        if r["cancelled"]:
+            lines.append("（已取消，後面的檔案沒有匯出）")
+        if r["skipped"]:
+            lines.append("")
+            lines.append(f"略過 {len(r['skipped'])} 個：")
+            lines += [f"・{n}：{why}" for n, why in r["skipped"][:15]]
+            if len(r["skipped"]) > 15:
+                lines.append(f"…另外 {len(r['skipped']) - 15} 個")
+        lines += ["", "把整個資料夾交給 AI，請它照「校稿說明.md」做；"
+                      "結果「校稿結果.txt」可整份貼進批次搜尋的「快速替換」。"]
+        box = QMessageBox(self)
+        box.setWindowTitle("AI 校稿素材匯出")
+        box.setText("\n".join(lines))
+        open_btn = box.addButton("開啟資料夾", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("關閉", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is open_btn:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(r["dir"]))
+
+    # ════════════════════════════════════════════════════════════
     #  URL 抓取（in-process UrlFetchWindow，嵌入 stack index 3）
     # ════════════════════════════════════════════════════════════
 
@@ -2915,6 +2988,7 @@ class MainWindow(QMainWindow):
             batch_folder=self._batch_folder,
             batch_include_subfolders=self._batch_subfolders,
             batch_one_per_file=self._batch_one_per_file,
+            ai_proofread_out_dir=self._ai_proofread_out_dir,
             author_name=self._author_name,
             author_only=self._author_only,
             keep_dice_posts=self._keep_dice_posts,
@@ -3029,6 +3103,7 @@ class MainWindow(QMainWindow):
             self._batch_folder = cache.batch_folder
         self._batch_subfolders = bool(cache.batch_include_subfolders)
         self._batch_one_per_file = bool(cache.batch_one_per_file)
+        self._ai_proofread_out_dir = cache.ai_proofread_out_dir or ""
         if cache.author_name:
             self._author_name = cache.author_name
         self._author_only = cache.author_only

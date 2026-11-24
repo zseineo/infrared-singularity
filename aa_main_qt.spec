@@ -44,6 +44,7 @@ shared_hiddenimports = [
     'PyQt6.sip',
     'aa_settings_dialog_qt',     # lazy import（在 function 內才 import）
     'aa_wiki_name_dialog_qt',    # 同上
+    'aa_proofread_qt',           # 同上（AI 校稿素材匯出）
 ]
 
 # ════════════════════════════════════════════════

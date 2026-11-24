@@ -118,6 +118,7 @@ class AppCache:
     batch_folder: str = ""
     batch_include_subfolders: bool = False   # 批次搜尋「含子資料夾」（v3.53）
     batch_one_per_file: bool = False   # 批次搜尋「每檔一筆」（v3.54）
+    ai_proofread_out_dir: str = ""   # AI 校稿素材匯出位置（v3.55）
     author_name: str = ""
     author_only: bool = False
     keep_dice_posts: bool = False   # 忽略留言時保留含骰子的留言（v3.51）
@@ -438,6 +439,7 @@ class SettingsManager:
             cache.batch_folder = data.get('batch_folder', '')
             cache.batch_include_subfolders = bool(data.get('batch_include_subfolders', False))
             cache.batch_one_per_file = bool(data.get('batch_one_per_file', False))
+            cache.ai_proofread_out_dir = str(data.get('ai_proofread_out_dir', '') or '')
             cache.author_name = data.get('author_name', '')
             cache.author_only = bool(data.get('author_only', False))
             cache.keep_dice_posts = bool(data.get('keep_dice_posts', False))
@@ -736,6 +738,7 @@ class SettingsManager:
                 'batch_folder': cache.batch_folder,
                 'batch_include_subfolders': cache.batch_include_subfolders,
                 'batch_one_per_file': cache.batch_one_per_file,
+                'ai_proofread_out_dir': cache.ai_proofread_out_dir,
                 'author_name': cache.author_name,
                 'author_only': cache.author_only,
                 'keep_dice_posts': cache.keep_dice_posts,

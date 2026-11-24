@@ -98,7 +98,9 @@ class BatchSearchWindow(QMainWindow):
                  on_files_renamed=None,   # ({舊路徑: 新路徑}) -> None，附註檔名後通知主程式
                  glossary_auto_search: bool = True,
                  include_subfolders: bool = False,
-                 on_subfolders_change=None):  # (bool) -> None，「含子資料夾」切換時存設定
+                 on_subfolders_change=None,   # (bool) -> None，「含子資料夾」切換時存設定
+                 one_per_file: bool = False,
+                 on_one_per_file_change=None):  # (bool) -> None，「每檔一筆」切換時存設定
         super().__init__()
         self.setWindowTitle("AA 批次搜尋")
         self.resize(1280, 700)
@@ -113,6 +115,9 @@ class BatchSearchWindow(QMainWindow):
         self.glossary_auto_search: bool = glossary_auto_search
         self._include_subfolders = include_subfolders
         self._on_subfolders_change = on_subfolders_change
+        self._one_per_file = one_per_file
+        self._on_one_per_file_change = on_one_per_file_change
+        self._searched_one_per_file = False   # 上次搜尋時的「每檔一筆」狀態（狀態列文字用）
 
         # 連接信號
         self._sig_progress.connect(self._on_progress)
@@ -219,6 +224,15 @@ class BatchSearchWindow(QMainWindow):
         self.subfolder_switch.setChecked(self._include_subfolders)
         self.subfolder_switch.toggled.connect(self._on_subfolder_toggled)
         search_row.addWidget(self.subfolder_switch)
+
+        self.onefile_switch = QCheckBox("每檔一筆")
+        self.onefile_switch.setFont(self.ui_small_font)
+        self.onefile_switch.setToolTip(
+            "勾選後每個檔案只列出找到的第一筆，就換下一個檔案。\n"
+            "「全部替換」也只會替換列出來的那一筆；同一檔其他地方要再搜尋一次。")
+        self.onefile_switch.setChecked(self._one_per_file)
+        self.onefile_switch.toggled.connect(self._on_onefile_toggled)
+        search_row.addWidget(self.onefile_switch)
 
         lbl_replace = QLabel("替換:")
         lbl_replace.setFont(self.ui_font)
@@ -467,6 +481,10 @@ class BatchSearchWindow(QMainWindow):
             self._on_subfolders_change(checked)
         self._start_prefetch()
 
+    def _on_onefile_toggled(self, checked: bool) -> None:
+        if self._on_one_per_file_change is not None:
+            self._on_one_per_file_change(checked)
+
     def showEvent(self, event):
         super().showEvent(event)
         self._start_prefetch()
@@ -554,6 +572,8 @@ class BatchSearchWindow(QMainWindow):
             self._toast(f"讀取資料夾失敗: {e}", color="#dc3545")
             return
         file_count = len(html_files)
+        # 「每檔一筆」：每個檔案找到第一筆就換下一個檔案
+        one_per_file = self._searched_one_per_file = self.onefile_switch.isChecked()
 
         self.search_btn.setEnabled(False)
         self.status_label.setText(f"搜尋中... (0 / {file_count} 個檔案)")
@@ -598,9 +618,10 @@ class BatchSearchWindow(QMainWindow):
                             'ctx_after': (after + "…") if ctx_end < len(line) else after,
                             'stem': stem,
                         })
-                        if len(matches) >= 500:
+                        if one_per_file or len(matches) >= 500:
                             break
-                    if len(matches) >= 500:
+                    if len(matches) >= 500 or (
+                            one_per_file and matches and matches[-1]['file_path'] == fpath):
                         break
                 if len(matches) >= 500:
                     break
@@ -638,7 +659,8 @@ class BatchSearchWindow(QMainWindow):
 
         capped = total >= 500
         status_text = (
-            f"找到 {total} 筆結果"
+            (f"找到 {total} 個檔案（每檔只列第一筆）" if self._searched_one_per_file
+             else f"找到 {total} 筆結果")
             + ("（已達上限 500 筆）" if capped else "")
             + f"，共掃描 {file_count} 個檔案"
         )

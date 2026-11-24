@@ -72,7 +72,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.53"
+APP_VERSION = "3.54"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -872,6 +872,7 @@ class MainWindow(QMainWindow):
         self._last_fetched_title: str = ""
         self._batch_folder: str = ""
         self._batch_subfolders: bool = False   # 批次搜尋「含子資料夾」
+        self._batch_one_per_file: bool = False   # 批次搜尋「每檔一筆」
         self.work_history: list[dict] = []
         self._editor_font_family: str = "submona"
         self._editor_font_size: int = 12
@@ -1392,6 +1393,8 @@ class MainWindow(QMainWindow):
                 glossary_auto_search=self._glossary_auto_search,
                 include_subfolders=self._batch_subfolders,
                 on_subfolders_change=self._on_batch_subfolders_change,
+                one_per_file=self._batch_one_per_file,
+                on_one_per_file_change=self._on_batch_one_per_file_change,
             )
             self.stack.removeWidget(self._batch_placeholder)
             self.stack.insertWidget(2, self._batch_window)
@@ -1431,6 +1434,10 @@ class MainWindow(QMainWindow):
 
     def _on_batch_subfolders_change(self, checked: bool) -> None:
         self._batch_subfolders = checked
+        self.schedule_save()
+
+    def _on_batch_one_per_file_change(self, checked: bool) -> None:
+        self._batch_one_per_file = checked
         self.schedule_save()
 
     # ════════════════════════════════════════════════════════════
@@ -2907,6 +2914,7 @@ class MainWindow(QMainWindow):
             auto_copy=self._auto_copy,
             batch_folder=self._batch_folder,
             batch_include_subfolders=self._batch_subfolders,
+            batch_one_per_file=self._batch_one_per_file,
             author_name=self._author_name,
             author_only=self._author_only,
             keep_dice_posts=self._keep_dice_posts,
@@ -3020,6 +3028,7 @@ class MainWindow(QMainWindow):
         if cache.batch_folder:
             self._batch_folder = cache.batch_folder
         self._batch_subfolders = bool(cache.batch_include_subfolders)
+        self._batch_one_per_file = bool(cache.batch_one_per_file)
         if cache.author_name:
             self._author_name = cache.author_name
         self._author_only = cache.author_only

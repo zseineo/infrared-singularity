@@ -734,6 +734,8 @@ def _detect_main_author_from_lines(text_content: str) -> str:
 
 
 _NAME_TRAIL_RE = re.compile(r'[\s.．。・,，、]+$')
+# trip 碼（◆ 後 8 碼以上）。有些作者每篇換名稱欄、只有 trip 不變（v3.52）。
+_TRIP_RE = re.compile(r'◆([A-Za-z0-9./+]{8,})')
 
 
 def _is_author_post(header_text: str, author_name: str) -> bool:
@@ -746,6 +748,8 @@ def _is_author_post(header_text: str, author_name: str) -> bool:
     並會去除名稱尾端常見標點（`.`/`。`/`、` 等），以容許作者在不同貼文偶爾在
     名稱後加 dot 的情況（如 yaruobookshelf 上 `三流 ◆WiAEg3iQI` ↔
     `三流 ◆WiAEg3iQI.`，trip 碼與 ID 相同確認為同一人）。
+    作者名稱帶 trip 時，名稱欄不同但 trip 相同也算作者（v3.52；yaruobook.jp
+    有作者每篇把名稱欄當標語用、只有 `◆Hr94QM5gdI` 不變）。
     """
     if not author_name:
         return False
@@ -755,7 +759,10 @@ def _is_author_post(header_text: str, author_name: str) -> bool:
     target = re.sub(r'\s+', ' ', author_name.strip())
     if poster_name == target:
         return True
-    return _NAME_TRAIL_RE.sub('', poster_name) == _NAME_TRAIL_RE.sub('', target)
+    if _NAME_TRAIL_RE.sub('', poster_name) == _NAME_TRAIL_RE.sub('', target):
+        return True
+    trip = _TRIP_RE.search(target)
+    return bool(trip) and trip.group(1) in _TRIP_RE.findall(poster_name)
 
 
 # 「忽略留言」時保留含骰子的非作者貼文（v3.51；安價的擲骰結果常由讀者貼出）。

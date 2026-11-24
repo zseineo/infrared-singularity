@@ -72,7 +72,7 @@ from aa_edit_qt import EditWindow, load_bundled_fonts
 from aa_batch_search_qt import BatchSearchWindow
 from aa_auto_translate_qt import AutoTranslatePanel
 
-APP_VERSION = "3.51"
+APP_VERSION = "3.52"
 APP_TITLE = f"AA 創作翻譯輔助小工具 v{APP_VERSION}"
 
 # ── 共用字體 ──
@@ -4732,8 +4732,6 @@ class MainWindow(QMainWindow):
                 self, "檢查更新", f"目前已是最新版（v{APP_VERSION}）。")
             return
         notes = info.notes.strip()
-        if len(notes) > 1500:
-            notes = notes[:1500] + "\n…"
         if not getattr(sys, "frozen", False):
             QMessageBox.information(
                 self, "檢查更新",
@@ -4741,17 +4739,38 @@ class MainWindow(QMainWindow):
                 "目前是原始碼執行，不支援自動更新，請用 git pull 更新。")
             return
         size_mb = info.zip_size / 1024 / 1024 if info.zip_size else 0
-        if QMessageBox.question(
-                self, "有新版本",
-                f"有新版 v{info.version}（目前 v{APP_VERSION}）"
-                + (f"，下載約 {size_mb:.0f} MB" if size_mb else "") + "。\n\n"
-                + (f"更新說明：\n{notes}\n\n" if notes else "")
-                + "要下載並更新嗎？（下載完會先核對 SHA256，確認後才關閉程式）",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        ) != QMessageBox.StandardButton.Yes:
+        if not self._ask_update(info.version, size_mb, notes):
             self.show_status("已取消更新", "#6c757d")
             return
         self._download_update(info)
+
+    def _ask_update(self, version: str, size_mb: float, notes: str) -> bool:
+        """更新確認視窗：更新說明放在可捲動的區塊，按鈕固定在底部。
+        （QMessageBox 會隨內文長高，說明一長按鈕就跑到螢幕外。）"""
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QTextBrowser
+        dlg = QDialog(self)
+        dlg.setWindowTitle("有新版本")
+        vl = QVBoxLayout(dlg)
+        vl.addWidget(QLabel(
+            f"有新版 v{version}（目前 v{APP_VERSION}）"
+            + (f"，下載約 {size_mb:.0f} MB" if size_mb else "") + "。"))
+        if notes:
+            vl.addWidget(QLabel("更新說明："))
+            tb = QTextBrowser()
+            tb.setOpenExternalLinks(True)
+            tb.setMarkdown(notes)
+            vl.addWidget(tb, 1)
+        vl.addWidget(QLabel("要下載並更新嗎？（下載完會先核對 SHA256，確認後才關閉程式）"))
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        bb.button(QDialogButtonBox.StandardButton.Yes).setDefault(True)
+        vl.addWidget(bb)
+        avail = (self.screen() or QApplication.primaryScreen()).availableGeometry()
+        dlg.resize(min(720, avail.width() - 40),
+                   min(640 if notes else 160, avail.height() - 80))
+        return dlg.exec() == QDialog.DialogCode.Accepted
 
     def _download_update(self, info) -> None:
         from aa_tool import updater
